@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from base import BaseAgent, get_project_dirs, parse_status_list
@@ -17,7 +18,7 @@ TRIAGE_PROMPT_DEFAULT = (
     '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
     "如果是复杂任务：\n"
     '{"action": "decompose", "subtasks": [\n'
-    '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
+    '  {"title": "子任务标题", "objective":"子任务目标", "deliverables":["交付物1"], "acceptance_criteria":["验收1","验收2"], "agent": "developer"}\n'
     "]}"
 )
 
@@ -26,10 +27,23 @@ FORCE_DECOMPOSE_PROMPT = (
     "## 任务标题\n{task_title}\n\n"
     "## 任务描述\n{task_description}\n\n"
     "## 可用 Agent 类型\n{agent_list}\n\n"
-    "只输出 JSON 数组，不要任何其他文字：\n"
+    "只输出 JSON 数组，不要任何其他文字，字段必须完整且具体：\n"
     "[\n"
-    '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
+    '  {"title": "子任务标题", "objective":"子任务目标", "deliverables":["交付物1"], "acceptance_criteria":["验收1","验收2"], "agent": "developer"}\n'
     "]"
+)
+
+LEADER_PROMPT_QUALITY_BLOCK = (
+    "## 子任务质量门槛（必须满足）\n"
+    "1. 子任务必须是可独立验收的功能，不得空泛。\n"
+    "2. 每个子任务必须提供：\n"
+    "   - title: 明确功能点（不要“完善功能/优化体验/相关开发”）\n"
+    "   - objective: 具体目标（包含对象、行为、结果）\n"
+    "   - todo_steps: 具体执行步骤清单（按顺序）\n"
+    "   - deliverables: 具体交付物清单（文件/接口/页面/脚本/测试）\n"
+    "   - acceptance_criteria: 可验证的验收标准，至少 2 条\n"
+    "3. 如果任务描述中有明确模块/页面/接口名称，子任务必须覆盖这些关键词。\n"
+    "4. 禁止输出空泛词：如“完善功能”“相关逻辑”“进行优化”“处理需求”等。\n"
 )
 
 LEADER_SUBTASK_SCHEMA = {
@@ -37,10 +51,30 @@ LEADER_SUBTASK_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "title": {"type": "string"},
+        "objective": {"type": "string"},
         "description": {"type": "string"},
+        "implementation_scope": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "todo_steps": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+        },
+        "deliverables": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+        "acceptance_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+        },
         "agent": {"type": "string"},
     },
-    "required": ["title"],
+    "required": ["title", "objective", "todo_steps", "deliverables", "acceptance_criteria"],
 }
 
 LEADER_TRIAGE_SCHEMA = {
@@ -59,8 +93,26 @@ LEADER_TRIAGE_SCHEMA = {
 
 LEADER_FORCE_DECOMPOSE_SCHEMA = {
     "type": "array",
-    "minItems": 1,
+    "minItems": 2,
     "items": LEADER_SUBTASK_SCHEMA,
+}
+
+GENERIC_SUBTASK_PATTERNS = [
+    r"完善功能",
+    r"优化(体验|性能|功能)?",
+    r"相关(逻辑|功能|开发|内容)",
+    r"处理(需求|逻辑)",
+    r"模块开发",
+    r"功能开发",
+    r"页面开发",
+    r"接口开发",
+    r"实现功能",
+    r"支持功能",
+]
+
+NOISE_KEYWORDS = {
+    "实现", "功能", "系统", "任务", "开发", "需求", "相关", "支持", "处理", "优化",
+    "模块", "页面", "接口", "文档", "测试", "项目", "方案", "逻辑", "内容",
 }
 
 
@@ -80,6 +132,12 @@ class LeaderAgent(BaseAgent):
 
     def respect_assignment_for(self, status: str) -> bool:
         return False
+
+    def _render_prompt(self, template: str, **kwargs) -> str:
+        out = str(template or "")
+        for k, v in kwargs.items():
+            out = out.replace("{" + k + "}", str(v))
+        return out
 
     async def _get_agent_list(self) -> str:
         try:
@@ -105,44 +163,167 @@ class LeaderAgent(BaseAgent):
         except Exception:
             return None
 
-    def _normalize_subtasks(self, raw_subtasks) -> list[dict]:
-        if not isinstance(raw_subtasks, list):
+    def _extract_parent_keywords(self, task: dict | None) -> list[str]:
+        if not task:
+            return []
+        text = f"{task.get('title') or ''} {task.get('description') or ''}"
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}|[\u4e00-\u9fff]{2,}", text)
+        out: list[str] = []
+        seen: set[str] = set()
+        for tok in tokens:
+            t = tok.strip()
+            if not t or t in seen or t in NOISE_KEYWORDS:
+                continue
+            seen.add(t)
+            out.append(t)
+        return out[:20]
+
+    def _is_generic_text(self, text: str) -> bool:
+        t = (text or "").strip()
+        if len(t) < 6:
+            return True
+        return any(re.search(p, t, re.IGNORECASE) for p in GENERIC_SUBTASK_PATTERNS)
+
+    def _as_text_list(self, raw) -> list[str]:
+        if not isinstance(raw, list):
             return []
         out = []
+        for x in raw:
+            s = str(x or "").strip()
+            if not s:
+                continue
+            out.append(s[:200])
+        return out
+
+    def _is_complex_task(self, task: dict) -> bool:
+        text = f"{task.get('title') or ''}\n{task.get('description') or ''}"
+        score = 0
+        if len((task.get("description") or "").strip()) >= 120:
+            score += 1
+        if re.search(r"(并且|同时|以及|另外|此外|包含|并发|多模块|多步骤)", text):
+            score += 1
+        if len(re.findall(r"[、,，；;]", text)) >= 2:
+            score += 1
+        facets = [
+            "前端", "后端", "接口", "数据库", "鉴权", "登录", "支付", "部署",
+            "测试", "文档", "监控", "缓存", "队列", "消息", "权限", "审核",
+        ]
+        hit = sum(1 for k in facets if k in text)
+        if hit >= 2:
+            score += 2
+        elif hit == 1:
+            score += 1
+        return score >= 3
+
+    def _build_subtask_description(
+        self,
+        objective: str,
+        scope: list[str],
+        todo_steps: list[str],
+        deliverables: list[str],
+        acceptance: list[str],
+    ) -> str:
+        lines = ["## 子任务目标", objective.strip()]
+        if scope:
+            lines.append("")
+            lines.append("## 实施范围")
+            lines.extend([f"- {x}" for x in scope])
+        lines.append("")
+        lines.append("## TODO 步骤")
+        lines.extend([f"- [ ] {x}" for x in todo_steps])
+        lines.append("")
+        lines.append("## 交付物")
+        lines.extend([f"- {x}" for x in deliverables])
+        lines.append("")
+        lines.append("## 验收标准")
+        lines.extend([f"- [ ] {x}" for x in acceptance])
+        return "\n".join(lines)[:3000]
+
+    def _normalize_subtasks(self, raw_subtasks, parent_task: dict | None = None) -> tuple[list[dict], list[str]]:
+        if not isinstance(raw_subtasks, list):
+            return [], ["subtasks 不是数组"]
+        parent_keywords = self._extract_parent_keywords(parent_task)
+        out = []
+        issues: list[str] = []
         for i, st in enumerate(raw_subtasks, 1):
             if not isinstance(st, dict):
+                issues.append(f"#{i} 不是对象")
                 continue
             title = str(st.get("title") or "").strip()
             if not title:
+                issues.append(f"#{i} 缺少 title")
                 continue
-            desc = str(st.get("description") or "").strip()
+            objective = (
+                str(st.get("objective") or "").strip()
+                or str(st.get("description") or "").strip()
+            )
+            todo_steps = self._as_text_list(st.get("todo_steps"))
+            deliverables = self._as_text_list(st.get("deliverables"))
+            acceptance = self._as_text_list(st.get("acceptance_criteria"))
+            scope = self._as_text_list(st.get("implementation_scope"))
+
+            if not objective or len(objective) < 20:
+                issues.append(f"#{i} objective 过短")
+                continue
+            if len(todo_steps) < 2:
+                issues.append(f"#{i} todo_steps 少于2条")
+                continue
+            if len(deliverables) < 1:
+                issues.append(f"#{i} deliverables 为空")
+                continue
+            if len(acceptance) < 2:
+                issues.append(f"#{i} acceptance_criteria 少于2条")
+                continue
+            if self._is_generic_text(title) or self._is_generic_text(objective):
+                issues.append(f"#{i} 内容过于空泛")
+                continue
+            if parent_keywords:
+                joined = f"{title} {objective} {' '.join(deliverables)} {' '.join(scope)}"
+                if not any(k in joined for k in parent_keywords):
+                    issues.append(f"#{i} 与父任务关键词关联弱")
+                    continue
+
             agent = str(st.get("agent") or "developer").strip() or "developer"
+            desc = self._build_subtask_description(
+                objective=objective,
+                scope=scope,
+                todo_steps=todo_steps,
+                deliverables=deliverables,
+                acceptance=acceptance,
+            )
             out.append(
                 {
                     "title": title[:200],
-                    "description": desc[:3000],
+                    "description": desc,
                     "agent": agent,
+                    "objective": objective[:300],
+                    "todo_steps": todo_steps[:12],
+                    "deliverables": deliverables[:8],
+                    "acceptance_criteria": acceptance[:10],
+                    "implementation_scope": scope[:8],
                 }
             )
-        return out
+        return out, issues
 
-    def _normalize_triage_decision(self, raw_decision) -> dict | None:
+    def _normalize_triage_decision(self, raw_decision, parent_task: dict | None = None) -> tuple[dict | None, list[str]]:
         if not isinstance(raw_decision, dict):
-            return None
+            return None, ["triage 结果不是对象"]
         action = str(raw_decision.get("action") or "").strip().lower()
         if action == "simple":
             reason = str(raw_decision.get("reason") or "").strip() or "判定为简单任务"
-            return {"action": "simple", "reason": reason[:500]}
+            return {"action": "simple", "reason": reason[:500]}, []
         if action == "decompose":
-            subtasks = self._normalize_subtasks(raw_decision.get("subtasks"))
+            subtasks, issues = self._normalize_subtasks(raw_decision.get("subtasks"), parent_task=parent_task)
             if not subtasks:
-                return None
+                return None, issues or ["subtasks 为空或不满足质量门槛"]
+            if len(subtasks) < 2:
+                return None, issues + ["decompose 至少需要 2 个子任务"]
             reason = str(raw_decision.get("reason") or "").strip()
             out = {"action": "decompose", "subtasks": subtasks}
             if reason:
                 out["reason"] = reason[:500]
-            return out
-        return None
+            return out, issues
+        return None, [f"未知 action: {action or '(empty)'}"]
 
     async def _handle_structured_output_error(
         self,
@@ -217,6 +398,10 @@ class LeaderAgent(BaseAgent):
                         "subtask_id": sub.get("id"),
                         "subtask_title": title,
                         "subtask_agent": agent,
+                        "objective": st.get("objective"),
+                        "todo_steps": st.get("todo_steps"),
+                        "deliverables": st.get("deliverables"),
+                        "acceptance_criteria": st.get("acceptance_criteria"),
                     },
                 )
             except Exception as e:
@@ -250,17 +435,28 @@ class LeaderAgent(BaseAgent):
 
         agent_list  = await self._get_agent_list()
         prompt_tpl  = self.prompt_template or TRIAGE_PROMPT_DEFAULT
-        try:
-            prompt = prompt_tpl.format(
+        prompt = self._render_prompt(
+            prompt_tpl,
+            task_title=task["title"],
+            task_description=task["description"] or "(无额外描述)",
+            agent_list=agent_list,
+        )
+        unresolved = [
+            x for x in ("{task_title}", "{task_description}", "{agent_list}") if x in prompt
+        ]
+        if unresolved:
+            await self.add_log(task_id, f"⚠ Leader 模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
+            prompt = self._render_prompt(
+                TRIAGE_PROMPT_DEFAULT,
                 task_title=task["title"],
                 task_description=task["description"] or "(无额外描述)",
                 agent_list=agent_list,
             )
-        except Exception:
-            prompt = prompt_tpl
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
+        prompt += f"\n\n{LEADER_PROMPT_QUALITY_BLOCK}\n"
+        prompt += f"\n\n{LEADER_PROMPT_QUALITY_BLOCK}\n"
 
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
@@ -277,7 +473,8 @@ class LeaderAgent(BaseAgent):
             f"请把最终评估写入 JSON 文件：{decision_file}\n"
             "仅允许以下二选一格式：\n"
             '{"action":"simple","reason":"..."}\n'
-            '{"action":"decompose","subtasks":[{"title":"...","description":"...","agent":"developer"}]}\n'
+            '{"action":"decompose","subtasks":[{"title":"...","objective":"...","implementation_scope":["..."],'
+            '"todo_steps":["步骤1","步骤2"],"deliverables":["..."],"acceptance_criteria":["...","..."],"agent":"developer"}]}\n'
             "同时在回复最后一行输出同一个 JSON 对象。"
         )
 
@@ -330,19 +527,40 @@ class LeaderAgent(BaseAgent):
                 output=output,
             )
             return
-        decision = self._normalize_triage_decision(raw_decision)
+        decision, quality_issues = self._normalize_triage_decision(raw_decision, parent_task=task)
         if decision is None:
+            issue_text = "; ".join(quality_issues[:6]) if quality_issues else "未知原因"
             await self._handle_structured_output_error(
                 task,
                 prev_status=task.get("_claimed_from_status", task.get("status", "triage")),
                 stage_code="leader_triage_invalid_schema",
-                reason=f"结构化结果字段不完整：{decision_file}",
+                reason=f"结构化结果字段不完整或质量不足：{decision_file}；{issue_text}",
                 output=output,
             )
             return
         await self.add_log(task_id, f"已读取结构化评估结果文件: {decision_file}")
+        complex_by_rule = self._is_complex_task(task)
+        await self.add_log(task_id, f"复杂度规则判定: {'complex' if complex_by_rule else 'simple'}")
 
         if decision and decision.get("action") == "decompose":
+            if not complex_by_rule:
+                await self.add_log(task_id, "任务复杂度规则判定为简单任务，忽略分解建议，直接转 todo")
+                reason = "任务规模较小，按单任务推进更高效"
+                await self.add_handoff(
+                    task_id,
+                    stage="leader_to_todo",
+                    to_agent=task.get("assigned_agent") or "developer",
+                    status_from=task.get("_claimed_from_status", task.get("status")),
+                    status_to="todo",
+                    title="任务转入开发",
+                    summary=reason,
+                    conclusion=reason,
+                    payload={"action": "simple", "reason": "heuristic_simple_override"},
+                    artifact_path=str(decision_file),
+                )
+                await self.update_task(task_id, status="todo", assignee=None)
+                self._post_output_bg("✓ 判定为简单任务，推进至 todo")
+                return
             subtasks = decision.get("subtasks") or []
             if subtasks:
                 await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
@@ -385,14 +603,23 @@ class LeaderAgent(BaseAgent):
     async def _force_decompose(self, task: dict):
         task_id = task["id"]
         agent_list = await self._get_agent_list()
-        try:
-            prompt = FORCE_DECOMPOSE_PROMPT.format(
+        prompt = self._render_prompt(
+            FORCE_DECOMPOSE_PROMPT,
+            task_title=task["title"],
+            task_description=task["description"] or "(无额外描述)",
+            agent_list=agent_list,
+        )
+        unresolved = [
+            x for x in ("{task_title}", "{task_description}", "{agent_list}") if x in prompt
+        ]
+        if unresolved:
+            await self.add_log(task_id, f"⚠ Leader 强制分解模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
+            prompt = self._render_prompt(
+                FORCE_DECOMPOSE_PROMPT,
                 task_title=task["title"],
                 task_description=task["description"] or "(无额外描述)",
                 agent_list=agent_list,
             )
-        except Exception:
-            prompt = FORCE_DECOMPOSE_PROMPT
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
@@ -410,7 +637,8 @@ class LeaderAgent(BaseAgent):
         prompt += (
             "\n\n## 结构化交付（必须）\n"
             f"请把子任务数组写入 JSON 文件：{decision_file}\n"
-            "文件内容必须是 JSON 数组，每个元素包含：title/description/agent。\n"
+            "文件内容必须是 JSON 数组，每个元素必须包含：\n"
+            '- title\n- objective\n- implementation_scope(可选)\n- todo_steps(至少2条)\n- deliverables(至少1条)\n- acceptance_criteria(至少2条)\n- agent\n'
             "同时在回复最后一行输出同一个 JSON 数组。"
         )
 
@@ -454,7 +682,7 @@ class LeaderAgent(BaseAgent):
             return
 
         raw_subtasks = self._load_json_file(decision_file)
-        subtasks = self._normalize_subtasks(raw_subtasks)
+        subtasks, quality_issues = self._normalize_subtasks(raw_subtasks, parent_task=task)
         if raw_subtasks is None:
             await self._handle_structured_output_error(
                 task,
@@ -466,11 +694,12 @@ class LeaderAgent(BaseAgent):
             return
         await self.add_log(task_id, f"已读取结构化分解结果文件: {decision_file}")
         if not subtasks:
+            issue_text = "; ".join(quality_issues[:6]) if quality_issues else "未知原因"
             await self._handle_structured_output_error(
                 task,
                 prev_status=task.get("_claimed_from_status", task.get("status", "decompose")),
                 stage_code="leader_force_decompose_invalid_schema",
-                reason=f"子任务数组为空或字段不完整：{decision_file}",
+                reason=f"子任务数组为空或质量不足：{decision_file}；{issue_text}",
                 output=output,
             )
             return
