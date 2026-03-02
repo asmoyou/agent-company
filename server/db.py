@@ -61,12 +61,17 @@ LEADER_PROMPT_DEFAULT = (
     "## 评估标准\n"
     "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
     "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
+    "## 子任务质量门槛（必须满足）\n"
+    "1. 子任务必须可独立验收，禁止空泛措辞。\n"
+    "2. 每个子任务必须包含：title/objective/todo_steps/deliverables/acceptance_criteria/agent。\n"
+    "3. deliverables 要写清文件、接口、页面或脚本等可交付物。\n"
+    "4. acceptance_criteria 至少 2 条，必须可验证。\n\n"
     "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
     "如果是简单任务：\n"
     '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
     "如果是复杂任务：\n"
     '{"action": "decompose", "subtasks": [\n'
-    '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
+    '  {"title":"子任务标题","objective":"子任务目标","todo_steps":["步骤1","步骤2"],"deliverables":["交付物1"],"acceptance_criteria":["验收1","验收2"],"agent":"developer"}\n'
     "]}"
 )
 
@@ -251,6 +256,16 @@ def _seed_builtin_agents(conn):
            WHERE key='reviewer' AND is_builtin=1
              AND INSTR(prompt, '条列说明需要修改的具体内容') > 0""",
         (BUILTIN_PROMPTS["reviewer"],),
+    )
+    # Migrate legacy leader prompt with weak/free-form subtask spec.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='leader' AND is_builtin=1
+             AND INSTR(prompt, '输出格式') > 0
+             AND INSTR(prompt, '子任务质量门槛') = 0
+             AND (INSTR(prompt, 'acceptance_criteria') = 0 OR INSTR(prompt, 'todo_steps') = 0)""",
+        (BUILTIN_PROMPTS["leader"],),
     )
 
 

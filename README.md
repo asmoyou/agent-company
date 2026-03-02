@@ -36,6 +36,10 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
 任意状态 → 已取消（自动归档，不再执行）
 ```
 
+Leader 分解规则：
+- 简单任务不分解，直接进入 `todo`。
+- 复杂任务才分解，且每个子任务必须包含具体 `TODO` 步骤、交付物与验收标准。
+
 ## 交接材料（Handoff）
 
 - 每个关键流转节点都会写入结构化交接记录（`from_agent/to_agent/stage/status/commit_hash/conclusion/payload`）。
