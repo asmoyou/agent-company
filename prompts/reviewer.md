@@ -22,14 +22,8 @@
 
 ## 输出格式
 
-审查完毕后，在回复**最后**输出决定 JSON（后面不要再有任何文字）：
+审查完毕后，在回复最后一行只输出一个 JSON 对象（不要代码块、不要额外文字）：
 
-**同意合并：**
-```json
-{{"decision": "approve", "comment": "简要说明通过原因"}}
-```
-
-**需要修改：**
-```json
-{{"decision": "request_changes", "feedback": "条列说明需要修改的具体内容"}}
-```
+- decision 只能是 "approve" 或 "request_changes"
+- decision="approve" 时必须提供 comment 字段
+- decision="request_changes" 时必须提供 feedback 字段

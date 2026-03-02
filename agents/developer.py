@@ -70,13 +70,38 @@ class DeveloperAgent(BaseAgent):
                 f"{rework_section}\n\n"
                 "要求：把所有内容写入文件，不要只输出文字。"
             )
+        handoff_context = await self.build_handoff_context(task_id)
+        if handoff_context:
+            prompt += f"\n\n{handoff_context}\n"
 
         # ── Run CLI ───────────────────────────────────────────────────────────
         returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
         if returncode != 0:
+            if await self.stop_if_task_cancelled(task_id, "CLI 失败后"):
+                return
             await self.add_log(task_id, f"❌ CLI 执行失败（exit={returncode}），任务退回 {prev_status}")
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.add_alert(
+                summary=f"开发执行失败（exit={returncode}）",
+                task_id=task_id,
+                message=output[-1200:].strip(),
+                kind="error",
+                code="developer_cli_failed",
+                stage="developer_failed",
+                metadata={"exit_code": returncode, "rollback_to": prev_status},
+            )
+            await self.add_handoff(
+                task_id,
+                stage="developer_failed",
+                to_agent=self.name,
+                status_from=prev_status,
+                status_to=prev_status,
+                title="开发执行失败",
+                summary=f"CLI 执行失败（exit={returncode}），已退回 {prev_status}",
+                conclusion=f"开发执行失败，回退到 {prev_status}",
+                payload={"exit_code": returncode},
+            )
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         if output.strip():
@@ -102,6 +127,18 @@ class DeveloperAgent(BaseAgent):
 
         if not diff.strip():
             await self.add_log(task_id, "无文件变更，提交审查")
+            await self.add_handoff(
+                task_id,
+                stage="dev_to_review",
+                to_agent="reviewer",
+                status_from=prev_status,
+                status_to="in_review",
+                title="开发交接审查（无提交）",
+                summary="本轮无文件变更，推进到审查",
+                conclusion="无代码变更，直接交接审查",
+                payload={"has_commit": False, "source_branch": branch},
+                artifact_path=str(worktree_dev),
+            )
             if await self.stop_if_task_cancelled(task_id, "推进审查前"):
                 return
             await self.update_task(
@@ -122,6 +159,23 @@ class DeveloperAgent(BaseAgent):
             )
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
             await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
+            await self.add_handoff(
+                task_id,
+                stage="dev_to_review",
+                to_agent="reviewer",
+                status_from=prev_status,
+                status_to="in_review",
+                title="开发交接审查",
+                summary=f"已提交 commit {commit_hash}，等待审查",
+                commit_hash=commit_hash,
+                conclusion="开发完成，等待审查结论",
+                payload={
+                    "commit_hash": commit_hash,
+                    "diff_stat": diff.strip(),
+                    "source_branch": branch,
+                },
+                artifact_path=str(worktree_dev),
+            )
             if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
                 return
             await self.update_task(
@@ -134,6 +188,25 @@ class DeveloperAgent(BaseAgent):
             )
         except Exception as e:
             await self.add_log(task_id, f"提交失败: {e}")
+            await self.add_alert(
+                summary="开发提交失败",
+                task_id=task_id,
+                message=str(e),
+                kind="error",
+                code="developer_commit_failed",
+                stage="developer_failed",
+            )
+            await self.add_handoff(
+                task_id,
+                stage="developer_failed",
+                to_agent=self.name,
+                status_from=prev_status,
+                status_to="todo",
+                title="开发提交失败",
+                summary=f"提交失败，任务退回 todo：{e}",
+                conclusion="提交失败，任务回退到 todo",
+                payload={"error": str(e)},
+            )
             await self.update_task(task_id, status="todo", assignee=None)
 
 

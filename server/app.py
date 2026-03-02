@@ -1,10 +1,12 @@
 import asyncio
+import json
 import mimetypes
 import re
 import shutil
 import subprocess
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Set
 
@@ -12,7 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
@@ -69,6 +71,10 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+async def broadcast_log(log: dict):
+    await manager.broadcast({"event": "log_added", "log": log})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
@@ -115,6 +121,29 @@ class LogCreate(BaseModel):
     agent: str
     message: str
 
+class HandoffCreate(BaseModel):
+    stage: str
+    from_agent: str
+    to_agent: str | None = None
+    status_from: str | None = None
+    status_to: str | None = None
+    title: str = ""
+    summary: str = ""
+    commit_hash: str | None = None
+    conclusion: str | None = None
+    payload: dict = Field(default_factory=dict)
+    artifact_path: str | None = None
+
+class AgentAlertCreate(BaseModel):
+    agent: str
+    task_id: str | None = None
+    kind: str = "error"
+    summary: str
+    message: str = ""
+    code: str = ""
+    stage: str = ""
+    metadata: dict = Field(default_factory=dict)
+
 class AgentOutput(BaseModel):
     line: str
 
@@ -159,6 +188,52 @@ class TaskClaim(BaseModel):
 class CancelTaskRequest(BaseModel):
     reason: str | None = None
     include_subtasks: bool = True
+
+
+COMMIT_REQUIRED_STAGES = {
+    "dev_to_review",
+    "review_to_manager",
+    "review_to_dev",
+    "merge_to_acceptance",
+    "merge_to_dev",
+    "merge_failed",
+}
+
+
+def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None, str]:
+    stage = str(body.stage or "").strip()
+    if not stage:
+        raise HTTPException(422, "handoff.stage 不能为空")
+    from_agent = str(body.from_agent or "").strip()
+    if not from_agent:
+        raise HTTPException(422, "handoff.from_agent 不能为空")
+
+    payload = dict(body.payload or {})
+
+    raw_commit = (
+        str(body.commit_hash or "").strip()
+        or str(payload.get("commit_hash") or "").strip()
+        or str(task.get("commit_hash") or "").strip()
+    )
+    commit_hash = raw_commit[:120] if raw_commit else None
+    if commit_hash:
+        payload.setdefault("commit_hash", commit_hash)
+
+    raw_conclusion = (
+        str(body.conclusion or "").strip()
+        or str(payload.get("conclusion") or "").strip()
+        or str(body.summary or "").strip()
+    )
+    conclusion = raw_conclusion[:500]
+    if not conclusion:
+        raise HTTPException(422, "handoff.conclusion 不能为空（可复用 summary）")
+    payload.setdefault("conclusion", conclusion)
+
+    has_commit = payload.get("has_commit")
+    if stage in COMMIT_REQUIRED_STAGES and has_commit is not False and not commit_hash:
+        raise HTTPException(422, f"stage={stage} 交接必须包含 commit_hash")
+
+    return payload, commit_hash, conclusion
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
@@ -319,7 +394,7 @@ async def cancel_task(task_id: str, body: CancelTaskRequest | None = None):
     for t in cancelled:
         message = root_msg if t["id"] == task_id else child_msg
         log = db.add_log(t["id"], "system", message)
-        await manager.broadcast({"event": "log_added", "log": log})
+        await broadcast_log(log)
         await manager.broadcast({"event": "task_updated", "task": t})
 
     return {
@@ -339,8 +414,85 @@ async def get_logs(task_id: str):
 @app.post("/tasks/{task_id}/logs", status_code=201)
 async def add_log(task_id: str, body: LogCreate):
     log = db.add_log(task_id, body.agent, body.message)
-    await manager.broadcast({"event": "log_added", "log": log})
+    await broadcast_log(log)
     return log
+
+
+@app.post("/alerts", status_code=201)
+async def add_alert(body: AgentAlertCreate):
+    kind = (body.kind or "error").strip().lower()
+    if kind not in {"error", "warning", "info"}:
+        kind = "error"
+    alert = {
+        "event": "agent_alert",
+        "kind": kind,
+        "agent": body.agent,
+        "task_id": body.task_id,
+        "summary": (body.summary or "").strip()[:240] or "系统告警",
+        "message": (body.message or "").strip()[:1200],
+        "code": (body.code or "").strip()[:120],
+        "stage": (body.stage or "").strip()[:120],
+        "metadata": body.metadata or {},
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    await manager.broadcast(alert)
+    return alert
+
+
+def _format_handoff(h: dict) -> dict:
+    out = dict(h)
+    try:
+        payload = h["payload"] if isinstance(h.get("payload"), dict) else json.loads(h.get("payload") or "{}")
+    except Exception:
+        payload = {}
+    out["payload"] = payload
+    if not out.get("commit_hash"):
+        ch = payload.get("commit_hash")
+        out["commit_hash"] = ch if isinstance(ch, str) and ch.strip() else None
+    if not out.get("conclusion"):
+        cc = payload.get("conclusion")
+        if isinstance(cc, str) and cc.strip():
+            out["conclusion"] = cc.strip()[:500]
+        elif isinstance(payload.get("decision"), str):
+            out["conclusion"] = payload["decision"]
+        elif out.get("summary"):
+            out["conclusion"] = str(out["summary"])[:500]
+    return out
+
+
+@app.get("/tasks/{task_id}/handoffs")
+async def get_handoffs(task_id: str):
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return [_format_handoff(h) for h in db.get_handoffs(task_id)]
+
+
+@app.post("/tasks/{task_id}/handoffs", status_code=201)
+async def add_handoff(task_id: str, body: HandoffCreate):
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    payload, commit_hash, conclusion = _prepare_handoff(task, body)
+    stage = str(body.stage or "").strip()
+    from_agent = str(body.from_agent or "").strip()
+    handoff = db.add_handoff(
+        task_id=task_id,
+        stage=stage,
+        from_agent=from_agent,
+        to_agent=body.to_agent,
+        status_from=body.status_from,
+        status_to=body.status_to,
+        title=body.title,
+        summary=body.summary,
+        commit_hash=commit_hash,
+        conclusion=conclusion,
+        payload=payload,
+        artifact_path=body.artifact_path,
+    )
+    formatted = _format_handoff(handoff)
+    await manager.broadcast({"event": "handoff_added", "handoff": formatted})
+    return formatted
 
 @app.get("/tasks/{task_id}/files")
 async def get_task_files(task_id: str):
@@ -370,24 +522,35 @@ async def get_task_files(task_id: str):
     files = []
     has_real_commit = False
 
-    if commit_hash and inspect_dir.exists():
-        try:
-            log_res = subprocess.run(
-                ["git", "log", "--oneline", f"{commit_hash}^!"],
-                cwd=str(inspect_dir), capture_output=True, text=True, timeout=5
-            )
-            msg = log_res.stdout.strip()
-            is_scaffold = any(k in msg for k in ["chore: init", "initial commit", "Initial commit"])
-            if not is_scaffold:
+    if commit_hash:
+        probe_dirs = []
+        if inspect_dir.exists():
+            probe_dirs.append(inspect_dir)
+        if proj_root.exists() and proj_root not in probe_dirs:
+            probe_dirs.append(proj_root)
+        for probe in probe_dirs:
+            try:
+                log_res = subprocess.run(
+                    ["git", "log", "--oneline", f"{commit_hash}^!"],
+                    cwd=str(probe), capture_output=True, text=True, timeout=5
+                )
+                msg = log_res.stdout.strip()
+                if not msg:
+                    continue
+                is_scaffold = any(k in msg for k in ["chore: init", "initial commit", "Initial commit"])
+                if is_scaffold:
+                    break
                 res = subprocess.run(
                     ["git", "show", "--name-only", "--format=", commit_hash],
-                    cwd=str(inspect_dir), capture_output=True, text=True, timeout=5
+                    cwd=str(probe), capture_output=True, text=True, timeout=5
                 )
                 raw = [f.strip() for f in res.stdout.strip().splitlines() if f.strip()]
                 files = [(rel_base + f) for f in raw]
                 has_real_commit = bool(files)
-        except Exception:
-            pass
+                if has_real_commit:
+                    break
+            except Exception:
+                continue
 
     return {
         "location": str(proj_root),

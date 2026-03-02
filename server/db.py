@@ -41,15 +41,10 @@ REVIEWER_PROMPT_DEFAULT = (
     "- 代码质量、可读性、边界情况处理\n"
     "- 文件结构是否合理\n\n"
     "## 输出格式\n\n"
-    "审查完毕后，在回复**最后**输出决定 JSON（后面不要再有任何文字）：\n\n"
-    "**同意合并：**\n"
-    "```json\n"
-    '{{"decision": "approve", "comment": "简要说明通过原因"}}\n'
-    "```\n\n"
-    "**需要修改：**\n"
-    "```json\n"
-    '{{"decision": "request_changes", "feedback": "条列说明需要修改的具体内容"}}\n'
-    "```"
+    "审查完毕后，在回复最后一行只输出一个 JSON 对象（不要代码块、不要额外文字）：\n"
+    '- decision 只能是 "approve" 或 "request_changes"\n'
+    '- decision="approve" 时必须提供 comment 字段\n'
+    '- decision="request_changes" 时必须提供 feedback 字段'
 )
 
 MANAGER_PROMPT_DEFAULT = (
@@ -123,6 +118,24 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
 
+        CREATE TABLE IF NOT EXISTS task_handoffs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id      TEXT NOT NULL,
+            stage        TEXT NOT NULL,
+            from_agent   TEXT NOT NULL,
+            to_agent     TEXT,
+            status_from  TEXT,
+            status_to    TEXT,
+            title        TEXT NOT NULL DEFAULT '',
+            summary      TEXT NOT NULL DEFAULT '',
+            commit_hash  TEXT,
+            conclusion   TEXT,
+            payload      TEXT NOT NULL DEFAULT '{}',
+            artifact_path TEXT,
+            created_at   TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        );
+
         CREATE TABLE IF NOT EXISTS agent_types (
             id             TEXT PRIMARY KEY,
             key            TEXT NOT NULL UNIQUE,
@@ -150,7 +163,16 @@ def init_db():
         if col not in existing:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {defn}")
 
+    handoff_existing = {r[1] for r in conn.execute("PRAGMA table_info(task_handoffs)").fetchall()}
+    for col, defn in [
+        ("commit_hash", "TEXT"),
+        ("conclusion", "TEXT"),
+    ]:
+        if col not in handoff_existing:
+            conn.execute(f"ALTER TABLE task_handoffs ADD COLUMN {col} {defn}")
+
     _seed_builtin_agents(conn)
+    _recover_reviewer_stuck_tasks(conn)
     conn.commit()
     conn.close()
 
@@ -221,6 +243,35 @@ def _seed_builtin_agents(conn):
                WHERE key=? AND is_builtin=1 AND TRIM(COALESCE(prompt, ''))=''""",
             (prompt, key),
         )
+    # Migrate legacy reviewer prompt that embedded example JSON bodies; those
+    # examples can be echoed by CLI and misparsed as real decisions.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='reviewer' AND is_builtin=1
+             AND INSTR(prompt, '条列说明需要修改的具体内容') > 0""",
+        (BUILTIN_PROMPTS["reviewer"],),
+    )
+
+
+def _recover_reviewer_stuck_tasks(conn):
+    """Repair historical reviewer-system-error tasks stuck in needs_changes."""
+    conn.execute(
+        """
+        UPDATE tasks
+           SET status='blocked',
+               assigned_agent='reviewer',
+               assignee=NULL,
+               updated_at=?
+         WHERE status='needs_changes'
+           AND assigned_agent='reviewer'
+           AND (
+                review_feedback LIKE '[系统错误]%'
+                OR review_feedback LIKE '[系统错误][review_retry=%'
+           )
+        """,
+        (_now(),),
+    )
 
 
 def _now():
@@ -282,6 +333,11 @@ def list_projects() -> list[dict]:
 def delete_project(project_id: str) -> bool:
     """Delete a project and all its tasks/logs. Returns True if deleted."""
     conn = get_conn()
+    # Delete handoffs for all tasks in this project
+    conn.execute(
+        "DELETE FROM task_handoffs WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)",
+        (project_id,),
+    )
     # Delete logs for all tasks in this project
     conn.execute(
         "DELETE FROM logs WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)",
@@ -572,6 +628,79 @@ def get_logs(task_id: str) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM logs WHERE task_id=? ORDER BY created_at ASC", (task_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_handoff(
+    task_id: str,
+    stage: str,
+    from_agent: str,
+    to_agent: str | None = None,
+    status_from: str | None = None,
+    status_to: str | None = None,
+    title: str = "",
+    summary: str = "",
+    commit_hash: str | None = None,
+    conclusion: str | None = None,
+    payload: dict | None = None,
+    artifact_path: str | None = None,
+) -> dict:
+    conn = get_conn()
+    now = _now()
+    payload_text = json.dumps(payload or {}, ensure_ascii=False)
+    cur = conn.execute(
+        """
+        INSERT INTO task_handoffs
+        (task_id, stage, from_agent, to_agent, status_from, status_to, title, summary, commit_hash, conclusion, payload, artifact_path, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            task_id,
+            stage,
+            from_agent,
+            to_agent,
+            status_from,
+            status_to,
+            title,
+            summary,
+            commit_hash,
+            conclusion,
+            payload_text,
+            artifact_path,
+            now,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM task_handoffs WHERE id=?",
+        (cur.lastrowid,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {
+        "id": cur.lastrowid,
+        "task_id": task_id,
+        "stage": stage,
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "status_from": status_from,
+        "status_to": status_to,
+        "title": title,
+        "summary": summary,
+        "commit_hash": commit_hash,
+        "conclusion": conclusion,
+        "payload": payload_text,
+        "artifact_path": artifact_path,
+        "created_at": now,
+    }
+
+
+def get_handoffs(task_id: str) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM task_handoffs WHERE task_id=? ORDER BY created_at ASC, id ASC",
+        (task_id,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
