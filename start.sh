@@ -8,27 +8,9 @@ cd "$PROJECT_ROOT"
 if [ ! -f ".env" ]; then
   echo "⚠️  .env not found. Copying from .env.example..."
   cp .env.example .env
-  echo "📝 Edit .env to configure which CLI tools to use, then re-run start.sh"
+  echo "📝 Edit .env for server polling/timeout settings, then re-run start.sh"
 fi
 set -a; source .env 2>/dev/null || true; set +a
-
-# ── Check required CLI tools ──────────────────────────────────────────────────
-DEVELOPER_CLI="${DEVELOPER_CLI:-claude}"
-REVIEWER_CLI="${REVIEWER_CLI:-claude}"
-
-check_cli() {
-  if ! command -v "$1" &>/dev/null; then
-    echo "❌ '$1' not found in PATH."
-    echo "   Install it or change ${2} in .env"
-    exit 1
-  else
-    echo "✅ $1 found: $(command -v "$1")"
-  fi
-}
-
-echo "🔍 Checking CLI tools..."
-check_cli "$DEVELOPER_CLI" "DEVELOPER_CLI"
-check_cli "$REVIEWER_CLI"  "REVIEWER_CLI"
 
 # ── Virtual environment ───────────────────────────────────────────────────────
 if [ ! -d ".venv" ]; then
@@ -55,7 +37,7 @@ for i in $(seq 1 20); do
 done
 
 # ── Start agents ──────────────────────────────────────────────────────────────
-echo "🤖 Starting agents (developer=$DEVELOPER_CLI, reviewer=$REVIEWER_CLI)..."
+echo "🤖 Starting agents..."
 (cd agents && ../.venv/bin/python run_all.py) &
 AGENTS_PID=$!
 
@@ -66,8 +48,7 @@ echo "║  Multi-Agent Task Board              ║"
 echo "║  http://localhost:8080               ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
-echo "  Developer CLI : $DEVELOPER_CLI"
-echo "  Reviewer CLI  : $REVIEWER_CLI"
+echo "  Agent CLI can be configured in: Agent 管理 -> 编辑 Agent 类型"
 echo ""
 echo "  Press Ctrl+C to stop all processes."
 echo ""

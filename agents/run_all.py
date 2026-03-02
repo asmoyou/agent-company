@@ -18,20 +18,15 @@ SERVER_URL   = os.getenv("SERVER_URL", "http://localhost:8080")
 BUILTIN_KEYS = {"developer", "reviewer", "manager", "leader"}
 
 
-async def load_custom_agents(shutdown: asyncio.Event) -> list:
-    """Fetch non-builtin agent types from the server and instantiate them."""
+async def load_agent_types() -> list[dict]:
+    """Fetch agent type records from the server."""
     try:
         async with httpx.AsyncClient(base_url=SERVER_URL, trust_env=False, timeout=10) as client:
             r = await client.get("/agent-types")
             r.raise_for_status()
-            types = r.json()
-        custom = [t for t in types if t["key"] not in BUILTIN_KEYS]
-        agents = [GenericAgent(t, shutdown) for t in custom]
-        if agents:
-            print(f"[run_all] Loaded {len(agents)} custom agent(s): {[a.name for a in agents]}")
-        return agents
+            return r.json()
     except Exception as e:
-        print(f"[run_all] Could not load custom agents: {e}")
+        print(f"[run_all] Could not load agent types: {e}")
         return []
 
 
@@ -47,14 +42,21 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
 
+    agent_types = await load_agent_types()
+    cfg = {t["key"]: t for t in agent_types}
+
     builtin_agents = [
-        DeveloperAgent(shutdown),
-        ReviewerAgent(shutdown),
-        ManagerAgent(shutdown),
-        LeaderAgent(shutdown),
+        DeveloperAgent(shutdown, cfg.get("developer")),
+        ReviewerAgent(shutdown, cfg.get("reviewer")),
+        ManagerAgent(shutdown, cfg.get("manager")),
+        LeaderAgent(shutdown, cfg.get("leader")),
     ]
 
-    custom_agents = await load_custom_agents(shutdown)
+    custom = [t for t in agent_types if t["key"] not in BUILTIN_KEYS]
+    custom_agents = [GenericAgent(t, shutdown) for t in custom]
+    if custom_agents:
+        print(f"[run_all] Loaded {len(custom_agents)} custom agent(s): {[a.name for a in custom_agents]}")
+
     all_agents = builtin_agents + custom_agents
 
     print(f"[run_all] Starting {len(all_agents)} agent(s). Press Ctrl+C to stop gracefully.")
@@ -68,4 +70,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

@@ -1,14 +1,20 @@
 import asyncio
-import os
 
-from base import BaseAgent, load_prompt
+from base import BaseAgent, load_prompt, parse_status_list
 
 
 class DeveloperAgent(BaseAgent):
     name = "developer"
     poll_statuses = ["todo", "needs_changes"]
-    cli_name = os.getenv("DEVELOPER_CLI", "claude")
+    cli_name = "claude"
     working_status = "in_progress"
+
+    def __init__(self, shutdown_event=None, config: dict | None = None):
+        super().__init__(shutdown_event)
+        cfg = config or {}
+        self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["todo", "needs_changes"])
+        self.cli_name = str(cfg.get("cli") or "claude")
+        self.working_status = str(cfg.get("working_status") or "in_progress")
 
     async def process_task(self, task: dict):
         task_id = task["id"]

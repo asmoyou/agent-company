@@ -648,7 +648,7 @@ function renderTerminals() {
     <div style="min-width:220px;flex:1">
       <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
         <span id="dot2-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-        ${escHtml(at.name||at.key)} · <span id="status-${at.key}" class="text-slate-600">idle</span>
+        ${escHtml(at.name||at.key)} · ${escHtml(at.cli||"-")} · <span id="status-${at.key}" class="text-slate-600">idle</span>
       </div>
       <div class="terminal" id="term-${at.key}"></div>
     </div>`).join("");
@@ -684,9 +684,9 @@ function renderAgentTypesList() {
   el.innerHTML = list.map(at => {
     const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]').join(', '); } catch { return at.poll_statuses||''; } })();
     const builtin = at.is_builtin ? '<span class="text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">内置</span>' : '';
-    const actions = at.is_builtin ? '' : `
+    const actions = `
       <button onclick="openAgentForm('${at.key}')" class="text-xs text-slate-400 hover:text-indigo-400 px-2 py-1 rounded hover:bg-slate-700 transition">编辑</button>
-      <button onclick="deleteAgentType('${at.key}')" class="text-xs text-slate-400 hover:text-red-400 px-2 py-1 rounded hover:bg-slate-700 transition">删除</button>`;
+      ${at.is_builtin ? '' : `<button onclick="deleteAgentType('${at.key}')" class="text-xs text-slate-400 hover:text-red-400 px-2 py-1 rounded hover:bg-slate-700 transition">删除</button>`}`;
     return `<div class="flex items-start justify-between bg-slate-700/40 rounded-lg px-4 py-3">
       <div>
         <div class="flex items-center gap-2 mb-1">
@@ -696,6 +696,7 @@ function renderAgentTypesList() {
         </div>
         <div class="text-xs text-slate-500">${escHtml(at.description||'')}</div>
         <div class="text-xs text-slate-600 mt-0.5">轮询: <span class="text-slate-500">${escHtml(polls)}</span> → <span class="text-slate-500">${escHtml(at.next_status)}</span></div>
+        <div class="text-xs text-slate-600 mt-0.5">CLI: <span class="text-slate-500 font-mono">${escHtml(at.cli||'-')}</span></div>
       </div>
       <div class="flex gap-1 shrink-0 ml-4">${actions}</div>
     </div>`;

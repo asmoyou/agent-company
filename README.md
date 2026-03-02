@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-cp .env.example .env   # 按需修改 CLI 工具配置
+cp .env.example .env   # 按需修改服务轮询/超时配置
 bash start.sh          # 自动安装依赖、启动服务
 # 浏览器打开 http://localhost:8080
 ```
@@ -38,7 +38,8 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DEVELOPER_CLI` | `claude` | 开发 Agent 使用的 CLI |
-| `REVIEWER_CLI`  | `claude` | 审查 Agent 使用的 CLI |
+| `SERVER_URL`    | `http://localhost:8080` | Agent 请求后端的地址 |
 | `POLL_INTERVAL` | `5`      | 轮询间隔（秒） |
 | `CLI_TIMEOUT`   | `300`    | CLI 超时（秒） |
+
+Agent CLI 类型（包括内置 `leader/developer/reviewer/manager`）在 Web 页面 `Agent 管理` 中配置。
