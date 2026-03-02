@@ -50,6 +50,11 @@
       class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition">
       + 新建项目
     </button>
+    <button onclick="syncProjects()" id="btn-sync"
+      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      title="检测并清理已删除目录的项目">
+      ↻ 同步
+    </button>
   </div>
 
   <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1">
@@ -775,6 +780,28 @@ async function submitNewProject(e) {
   } catch(err) { alert("创建失败: "+err.message); }
 }
 
+async function syncProjects() {
+  const btn = document.getElementById("btn-sync");
+  btn.disabled = true;
+  btn.textContent = "同步中...";
+  try {
+    const res = await fetch(`${API}/projects/sync`, {method:"POST"});
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (data.deleted.length === 0) {
+      btn.textContent = "✓ 已同步";
+    } else {
+      btn.textContent = `✓ 清理 ${data.deleted.length} 个`;
+    }
+  } catch(err) {
+    alert("同步失败: " + err.message);
+    btn.textContent = "↻ 同步";
+    btn.disabled = false;
+    return;
+  }
+  setTimeout(() => { btn.textContent = "↻ 同步"; btn.disabled = false; }, 2000);
+}
+
 // ── Create Task Modal ─────────────────────────────────────────────────────────
 function openCreateModal() {
   if (!currentProjectId) return;
@@ -828,6 +855,22 @@ function connectWS() {
       const sel=document.getElementById("project-select");
       sel.insertAdjacentHTML("beforeend",`<option value="${msg.project.id}">${escHtml(msg.project.name)}</option>`);
       if (!currentProjectId) { sel.value=msg.project.id; currentProjectId=msg.project.id; updateProjectUI(); }
+    } else if (msg.event==="project_deleted") {
+      const pid=msg.project_id;
+      delete projects[pid];
+      // Remove from selector
+      const sel=document.getElementById("project-select");
+      const opt=sel.querySelector(`option[value="${pid}"]`);
+      if (opt) opt.remove();
+      // If current project was deleted, switch to first available
+      if (currentProjectId===pid) {
+        currentProjectId=sel.value||null;
+        sel.value=currentProjectId||"";
+        updateProjectUI();
+        refreshBoard();
+      }
+      // Remove tasks belonging to deleted project from local cache
+      Object.keys(tasks).forEach(tid=>{ if(tasks[tid].project_id===pid) delete tasks[tid]; });
     } else if (msg.event==="task_created"||msg.event==="task_updated") {
       tasks[msg.task.id]=msg.task;
       refreshBoard();
