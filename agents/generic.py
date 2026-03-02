@@ -23,6 +23,8 @@ class GenericAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        if await self.stop_if_task_cancelled(task_id, "开始处理前"):
+            return
         proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
 
         await self.add_log(
@@ -63,6 +65,8 @@ class GenericAgent(BaseAgent):
             return
         if output.strip():
             await self.add_log(task_id, f"输出摘要:\n{output[:400]}")
+        if await self.stop_if_task_cancelled(task_id, "CLI 执行后"):
+            return
 
         # Stage & check diff
         await self.git("add", "-A", cwd=worktree_dev)
@@ -95,6 +99,8 @@ class GenericAgent(BaseAgent):
                     "assignee": None,
                     "commit_hash": commit_hash,
                 }
+                if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
+                    return
                 if self.next_status == "in_review":
                     update_fields["assigned_agent"] = self.name
                     update_fields["dev_agent"] = self.name
@@ -107,6 +113,8 @@ class GenericAgent(BaseAgent):
                 return
 
         await self.add_log(task_id, f"无文件变更，推进至 {self.next_status}")
+        if await self.stop_if_task_cancelled(task_id, "无变更推进前"):
+            return
         update_fields = {"status": self.next_status, "assignee": None}
         if self.next_status == "in_review":
             update_fields["assigned_agent"] = self.name

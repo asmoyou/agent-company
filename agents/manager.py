@@ -21,6 +21,8 @@ class ManagerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        if await self.stop_if_task_cancelled(task_id, "开始合并前"):
+            return
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
         target_commit = commit_hash
@@ -72,6 +74,8 @@ class ManagerAgent(BaseAgent):
 
             # Merge exactly the reviewed commit (not branch HEAD).
             merge_msg = f"merge: {task['title'][:72]}\n\nTask ID: {task_id}"
+            if await self.stop_if_task_cancelled(task_id, "执行 git merge 前"):
+                return
             try:
                 result = await self.git(
                     "-c", "user.email=agent@opc-demo.local",
@@ -90,6 +94,8 @@ class ManagerAgent(BaseAgent):
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)
             await self.add_log(task_id, f"✅ 合并成功: {commit_hash}，文件已在 {proj_root}")
             self._post_output_bg(f"✓ 合并完成 {commit_hash}")
+            if await self.stop_if_task_cancelled(task_id, "合并后状态更新前"):
+                return
             await self.update_task(
                 task_id, status="pending_acceptance", assignee=None, commit_hash=commit_hash
             )
