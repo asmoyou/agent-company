@@ -69,13 +69,13 @@ fi
 
 # ── Start server ──────────────────────────────────────────────────────────────
 echo ""
-echo "🚀 Starting FastAPI server on http://localhost:8000 ..."
-.venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000 &
+echo "🚀 Starting FastAPI server on http://localhost:8080 ..."
+.venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 8080 &
 SERVER_PID=$!
 
 # Wait up to 10s for server
 for i in $(seq 1 20); do
-  if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+  if curl -s http://localhost:8080/ > /dev/null 2>&1; then
     echo "   Server ready."
     break
   fi
@@ -91,7 +91,7 @@ AGENTS_PID=$!
 echo ""
 echo "╔══════════════════════════════════════╗"
 echo "║  Multi-Agent Task Board              ║"
-echo "║  http://localhost:8000               ║"
+echo "║  http://localhost:8080               ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 echo "  Developer CLI : $DEVELOPER_CLI"
@@ -101,9 +101,9 @@ echo "  Press Ctrl+C to stop all processes."
 echo ""
 
 if command -v open &>/dev/null; then
-  open http://localhost:8000
+  open http://localhost:8080
 elif command -v xdg-open &>/dev/null; then
-  xdg-open http://localhost:8000
+  xdg-open http://localhost:8080
 fi
 
 # ── Cleanup on exit ───────────────────────────────────────────────────────────
