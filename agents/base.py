@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
 # Idle fallback auto-reply is disabled by default to avoid blind ENTER loops.
 AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
+HANDOFF_SYNC_STRATEGY = os.getenv("HANDOFF_SYNC_STRATEGY", "cherry-pick").strip().lower()
 INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
     r"\[y/n\]|\[y/N\]|\(y/n\)|yes/no|select\s+an?\s+option|choose\s+an?\s+option|"
@@ -53,6 +55,11 @@ def normalize_agent_key(agent_key: str | None, default: str = "developer") -> st
     raw = (agent_key or default).strip().lower()
     safe = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
     return safe or default
+
+
+def safe_agent_key(agent_key: str | None) -> str:
+    raw = (agent_key or "").strip().lower()
+    return re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
 
 
 def get_task_dev_agent(task: dict, fallback: str = "developer") -> str:
@@ -151,6 +158,282 @@ class BaseAgent:
         except Exception:
             pass
 
+    async def add_alert(
+        self,
+        summary: str,
+        task_id: str | None = None,
+        message: str = "",
+        kind: str = "error",
+        code: str = "",
+        stage: str = "",
+        metadata: dict | None = None,
+    ):
+        try:
+            await self.http.post(
+                "/alerts",
+                json={
+                    "agent": self.name,
+                    "task_id": task_id,
+                    "kind": kind,
+                    "summary": summary,
+                    "message": message,
+                    "code": code,
+                    "stage": stage,
+                    "metadata": metadata or {},
+                },
+            )
+        except Exception:
+            pass
+
+    async def get_handoffs(self, task_id: str) -> list[dict]:
+        try:
+            r = await self.http.get(f"/tasks/{task_id}/handoffs")
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    async def build_handoff_context(self, task_id: str, limit: int = 6) -> str:
+        handoffs = await self.get_handoffs(task_id)
+        if not handoffs:
+            return ""
+        tail = handoffs[-limit:]
+        lines = ["## 历史交接记录（最近）"]
+        for h in tail:
+            stage = str(h.get("stage") or "").strip() or "-"
+            from_agent = str(h.get("from_agent") or "").strip() or "-"
+            to_agent = str(h.get("to_agent") or "").strip() or "-"
+            summary = str(h.get("summary") or "").strip()
+            commit_hash = str(h.get("commit_hash") or "").strip()
+            conclusion = str(h.get("conclusion") or "").strip()
+            lines.append(f"- {from_agent} -> {to_agent} [{stage}]")
+            if commit_hash:
+                lines.append(f"  commit: {commit_hash}")
+            if conclusion:
+                lines.append(f"  结论: {conclusion[:160]}")
+            if summary:
+                lines.append(f"  摘要: {summary[:200]}")
+        return "\n".join(lines)
+
+    def _extract_handoff_commit(self, handoff: dict) -> str:
+        commit_hash = str(handoff.get("commit_hash") or "").strip()
+        if commit_hash:
+            return commit_hash
+        payload = handoff.get("payload")
+        if isinstance(payload, dict):
+            return str(payload.get("commit_hash") or "").strip()
+        return ""
+
+    def _extract_handoff_source_branch(self, handoff: dict) -> str:
+        payload = handoff.get("payload")
+        if isinstance(payload, dict):
+            return str(payload.get("source_branch") or "").strip()
+        return ""
+
+    async def get_latest_handoff_for_agent(self, task_id: str) -> dict | None:
+        handoffs = await self.get_handoffs(task_id)
+        if not handoffs:
+            return None
+        me = safe_agent_key(self.name)
+        for h in reversed(handoffs):
+            to_agent = safe_agent_key(h.get("to_agent"))
+            if to_agent and to_agent == me:
+                return h
+        for h in reversed(handoffs):
+            if self._extract_handoff_commit(h):
+                return h
+        return handoffs[-1]
+
+    async def _is_commit_in_head(self, worktree: Path, commit_hash: str) -> bool:
+        try:
+            await self.git("merge-base", "--is-ancestor", commit_hash, "HEAD", cwd=worktree)
+            return True
+        except Exception:
+            return False
+
+    async def sync_from_latest_handoff(
+        self,
+        task: dict,
+        worktree: Path,
+        current_branch: str | None = None,
+    ) -> dict:
+        strategy = HANDOFF_SYNC_STRATEGY
+        if strategy in ("", "none", "off", "disabled"):
+            return {"status": "disabled"}
+
+        task_id = task["id"]
+        handoff = await self.get_latest_handoff_for_agent(task_id)
+        if not handoff:
+            return {"status": "no_handoff"}
+
+        commit_hash = self._extract_handoff_commit(handoff) or str(task.get("commit_hash") or "").strip()
+        if not commit_hash:
+            return {"status": "no_commit"}
+
+        source_branch = self._extract_handoff_source_branch(handoff)
+        if current_branch is None:
+            try:
+                current_branch = await self.git("branch", "--show-current", cwd=worktree)
+            except Exception:
+                current_branch = ""
+
+        if source_branch and current_branch and source_branch == current_branch:
+            return {"status": "same_branch", "commit_hash": commit_hash, "source_branch": source_branch}
+
+        try:
+            await self.git("cat-file", "-e", f"{commit_hash}^{{commit}}", cwd=worktree)
+        except Exception as e:
+            msg = f"[系统错误] 交接引用的 commit 不存在：{commit_hash} ({e})"
+            await self.add_log(task_id, msg[:500])
+            await self.add_alert(
+                summary="交接 commit 不存在",
+                task_id=task_id,
+                message=msg,
+                kind="error",
+                code=f"{self.name}_sync_missing_commit",
+                stage=f"{self.name}_sync_failed",
+                metadata={"commit_hash": commit_hash, "source_branch": source_branch},
+            )
+            await self.add_handoff(
+                task_id,
+                stage=f"{self.name}_sync_failed",
+                to_agent=self.name,
+                status_from=task.get("status"),
+                status_to="blocked",
+                title="交接同步失败",
+                summary=msg[:300],
+                commit_hash=commit_hash,
+                conclusion="交接 commit 丢失，任务阻塞",
+                payload={"reason": "missing_commit_object", "source_branch": source_branch},
+            )
+            await self.update_task(
+                task_id,
+                status="blocked",
+                assignee=None,
+                assigned_agent=self.name,
+                review_feedback=msg[:500],
+            )
+            return {"status": "failed", "reason": "missing_commit_object"}
+
+        if await self._is_commit_in_head(worktree, commit_hash):
+            return {"status": "already_contains", "commit_hash": commit_hash, "source_branch": source_branch}
+
+        try:
+            if strategy == "merge":
+                await self.git("merge", "--no-edit", "--no-ff", commit_hash, cwd=worktree)
+            else:
+                await self.git("cherry-pick", "-x", commit_hash, cwd=worktree)
+        except Exception as e:
+            err = str(e)
+            try:
+                if strategy == "merge":
+                    await self.git("merge", "--abort", cwd=worktree)
+                else:
+                    await self.git("cherry-pick", "--abort", cwd=worktree)
+            except Exception:
+                pass
+            msg = f"[系统错误] 交接 commit 同步失败：{commit_hash}（{strategy}）{err[:260]}"
+            await self.add_log(task_id, msg[:500])
+            await self.add_alert(
+                summary="交接同步失败",
+                task_id=task_id,
+                message=msg,
+                kind="error",
+                code=f"{self.name}_sync_failed",
+                stage=f"{self.name}_sync_failed",
+                metadata={
+                    "commit_hash": commit_hash,
+                    "source_branch": source_branch,
+                    "strategy": strategy,
+                },
+            )
+            await self.add_handoff(
+                task_id,
+                stage=f"{self.name}_sync_failed",
+                to_agent=self.name,
+                status_from=task.get("status"),
+                status_to="blocked",
+                title="交接同步失败",
+                summary=msg[:300],
+                commit_hash=commit_hash,
+                conclusion="交接同步冲突/失败，任务阻塞",
+                payload={
+                    "reason": "sync_failed",
+                    "strategy": strategy,
+                    "source_branch": source_branch,
+                },
+                artifact_path=str(worktree),
+            )
+            await self.update_task(
+                task_id,
+                status="blocked",
+                assignee=None,
+                assigned_agent=self.name,
+                review_feedback=msg[:500],
+            )
+            return {"status": "failed", "reason": "sync_failed"}
+
+        sync_msg = f"已同步交接 commit {commit_hash} 到当前分支（{strategy}）"
+        await self.add_log(task_id, sync_msg)
+        await self.add_handoff(
+            task_id,
+            stage=f"{self.name}_sync_in",
+            to_agent=self.name,
+            status_from=task.get("status"),
+            status_to=task.get("status"),
+            title="接收交接同步",
+            summary=sync_msg,
+            commit_hash=commit_hash,
+            conclusion="已完成跨 Agent 代码同步",
+            payload={
+                "strategy": strategy,
+                "source_branch": source_branch,
+                "source_stage": handoff.get("stage"),
+            },
+            artifact_path=str(worktree),
+        )
+        return {"status": "synced", "commit_hash": commit_hash, "source_branch": source_branch}
+
+    async def add_handoff(
+        self,
+        task_id: str,
+        stage: str,
+        to_agent: str | None = None,
+        status_from: str | None = None,
+        status_to: str | None = None,
+        title: str = "",
+        summary: str = "",
+        commit_hash: str | None = None,
+        conclusion: str | None = None,
+        payload: dict | None = None,
+        artifact_path: str | None = None,
+    ):
+        payload_obj = dict(payload or {})
+        if commit_hash and not payload_obj.get("commit_hash"):
+            payload_obj["commit_hash"] = commit_hash
+        if conclusion and not payload_obj.get("conclusion"):
+            payload_obj["conclusion"] = conclusion
+        try:
+            await self.http.post(
+                f"/tasks/{task_id}/handoffs",
+                json={
+                    "stage": stage,
+                    "from_agent": self.name,
+                    "to_agent": to_agent,
+                    "status_from": status_from,
+                    "status_to": status_to,
+                    "title": title,
+                    "summary": summary,
+                    "commit_hash": commit_hash,
+                    "conclusion": conclusion,
+                    "payload": payload_obj,
+                    "artifact_path": artifact_path,
+                },
+            )
+        except Exception:
+            pass
+
     # ── Agent terminal output ─────────────────────────────────────────────────
 
     def _post_output_bg(self, line: str):
@@ -208,8 +491,42 @@ class BaseAgent:
 
     # ── CLI runner ────────────────────────────────────────────────────────────
 
-    async def run_cli(self, prompt: str, cwd: Path, task_id: str | None = None) -> tuple[int, str]:
-        cmd = build_cli_cmd(self.cli_name, prompt)
+    async def run_cli(
+        self,
+        prompt: str,
+        cwd: Path,
+        task_id: str | None = None,
+        output_schema: dict | None = None,
+    ) -> tuple[int, str]:
+        schema_path: Path | None = None
+        last_message_path: Path | None = None
+        if self.cli_name == "codex":
+            cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+            try:
+                fd_last, raw_last = tempfile.mkstemp(
+                    prefix="opc-codex-last-", suffix=".txt", dir=str(cwd)
+                )
+                os.close(fd_last)
+                last_message_path = Path(raw_last)
+                cmd += ["--output-last-message", str(last_message_path)]
+            except Exception:
+                last_message_path = None
+
+            if output_schema is not None:
+                try:
+                    fd_schema, raw_schema = tempfile.mkstemp(
+                        prefix="opc-codex-schema-", suffix=".json", dir=str(cwd)
+                    )
+                    with os.fdopen(fd_schema, "w", encoding="utf-8") as f:
+                        json.dump(output_schema, f, ensure_ascii=False)
+                    schema_path = Path(raw_schema)
+                    cmd += ["--output-schema", str(schema_path)]
+                except Exception:
+                    schema_path = None
+
+            cmd.append(prompt)
+        else:
+            cmd = build_cli_cmd(self.cli_name, prompt)
         print(f"[{self.name}] Spawning {cmd[0]} (cwd={cwd.name})")
         self._post_output_bg(f"$ {cmd[0]}  cwd={cwd}")
         env = os.environ.copy()
@@ -337,6 +654,23 @@ class BaseAgent:
             cwatch.cancel()
 
         await proc.wait()
+
+        if last_message_path and last_message_path.exists():
+            try:
+                last_msg = last_message_path.read_text(encoding="utf-8", errors="replace").strip()
+                if last_msg:
+                    lines.append(last_msg)
+            except Exception:
+                pass
+
+        for p in (last_message_path, schema_path):
+            if not p:
+                continue
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         return proc.returncode, "\n".join(lines)
 
     async def _sync_branch_with_main(self, root: Path, worktree: Path, branch: str) -> str:
@@ -435,19 +769,47 @@ class BaseAgent:
 
     # ── JSON decision parser ─────────────────────────────────────────────────
 
+    def _normalize_decision_payload(self, payload: dict) -> dict | None:
+        decision = str(payload.get("decision") or "").strip().lower()
+        if decision not in {"approve", "request_changes"}:
+            return None
+
+        placeholder_values = {
+            "简要说明通过原因",
+            "条列说明需要修改的具体内容",
+            "请修复问题",
+            "...",
+        }
+
+        if decision == "approve":
+            comment = str(payload.get("comment") or "").strip()
+            if not comment or comment in placeholder_values:
+                return None
+            return {"decision": "approve", "comment": comment}
+
+        feedback = str(payload.get("feedback") or "").strip()
+        if not feedback or feedback in placeholder_values:
+            return None
+        return {"decision": "request_changes", "feedback": feedback}
+
     def parse_json_decision(self, text: str) -> dict | None:
-        for m in reversed(re.findall(r"```(?:json)?\s*(\{[\s\S]+?\})\s*```", text)):
+        # Only parse near the tail to avoid picking JSON examples echoed from the prompt.
+        tail = text[-6000:] if len(text) > 6000 else text
+
+        for m in reversed(re.findall(r"```(?:json)?\s*(\{[\s\S]+?\})\s*```", tail)):
             try:
                 d = json.loads(m)
-                if "decision" in d:
-                    return d
+                parsed = self._normalize_decision_payload(d)
+                if parsed:
+                    return parsed
             except json.JSONDecodeError:
                 pass
-        for m in reversed(re.findall(r"\{[^{}]*\}", text)):
+        for m in reversed(re.findall(r"\{[^{}]*\}", tail)):
             try:
                 d = json.loads(m)
-                if "decision" in d:
-                    return d
+                parsed = self._normalize_decision_payload(d)
+                if parsed:
+                    return parsed
             except json.JSONDecodeError:
                 pass
         return None
@@ -493,6 +855,14 @@ class BaseAgent:
                             await self.process_task(task)
                         except Exception as e:
                             await self.add_log(task["id"], f"错误: {e}")
+                            await self.add_alert(
+                                summary=f"{self.name} 运行异常",
+                                task_id=task["id"],
+                                message=str(e),
+                                kind="error",
+                                code=f"{self.name}_runtime_error",
+                                stage="runtime_exception",
+                            )
                             self._post_output_bg(f"✗ 错误: {e}")
                             print(f"[{self.name}] Error: {e}")
                         finally:

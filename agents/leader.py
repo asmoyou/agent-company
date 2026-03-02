@@ -138,9 +138,25 @@ class LeaderAgent(BaseAgent):
                     "status": "todo",   # subtasks skip triage
                 })
                 r.raise_for_status()
+                sub = r.json()
                 created += 1
                 await self.add_log(task["id"], f"  ✓ [{i}] {title} (→ {agent})")
                 self._post_output_bg(f"  子任务 {i}: {title}")
+                await self.add_handoff(
+                    task["id"],
+                    stage="leader_assign_subtask",
+                    to_agent=agent,
+                    status_from=task.get("status"),
+                    status_to="todo",
+                    title=f"分配子任务 {i}",
+                    summary=f"已创建子任务「{title}」并分配给 {agent}",
+                    conclusion=f"子任务已分配给 {agent}",
+                    payload={
+                        "subtask_id": sub.get("id"),
+                        "subtask_title": title,
+                        "subtask_agent": agent,
+                    },
+                )
             except Exception as e:
                 await self.add_log(task["id"], f"  ✗ [{i}] 创建失败: {e}")
         return created
@@ -180,16 +196,41 @@ class LeaderAgent(BaseAgent):
             )
         except Exception:
             prompt = prompt_tpl
+        handoff_context = await self.build_handoff_context(task_id)
+        if handoff_context:
+            prompt += f"\n\n{handoff_context}\n"
 
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
 
         returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
         if returncode != 0:
+            if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
+                return
             prev_status = task.get("_claimed_from_status", task.get("status", "triage"))
             await self.add_log(task_id, f"❌ Leader 评估失败（exit={returncode}），退回 {prev_status}")
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.add_alert(
+                summary=f"Leader 评估失败（exit={returncode}）",
+                task_id=task_id,
+                message=output[-1200:].strip(),
+                kind="error",
+                code="leader_triage_failed",
+                stage="leader_failed",
+                metadata={"exit_code": returncode},
+            )
+            await self.add_handoff(
+                task_id,
+                stage="leader_failed",
+                to_agent=self.name,
+                status_from=prev_status,
+                status_to=prev_status,
+                title="任务评估失败",
+                summary=f"Leader 评估失败（exit={returncode}），保持状态 {prev_status}",
+                conclusion=f"评估失败，保持状态 {prev_status}",
+                payload={"exit_code": returncode},
+            )
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"评估输出:\n{output[:600]}")
@@ -203,6 +244,17 @@ class LeaderAgent(BaseAgent):
             if subtasks:
                 await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
                 n = await self._create_subtasks(task, subtasks)
+                await self.add_handoff(
+                    task_id,
+                    stage="leader_to_decomposed",
+                    to_agent="multi-agent",
+                    status_from=task.get("_claimed_from_status", task.get("status")),
+                    status_to="decomposed",
+                    title="任务分解完成",
+                    summary=f"已分解为 {n} 个子任务并分配",
+                    conclusion=f"复杂任务，已拆分为 {n} 个子任务",
+                    payload={"subtask_count": n},
+                )
                 await self.update_task(task_id, status="decomposed", assignee=None)
                 await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
                 self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
@@ -211,6 +263,17 @@ class LeaderAgent(BaseAgent):
         # Simple task (or parse failed) — push to todo
         reason = decision.get("reason", "判定为简单任务") if decision else "无法解析评估结果，按简单任务处理"
         await self.add_log(task_id, f"判断为简单任务：{reason}")
+        await self.add_handoff(
+            task_id,
+            stage="leader_to_todo",
+            to_agent=task.get("assigned_agent") or "developer",
+            status_from=task.get("_claimed_from_status", task.get("status")),
+            status_to="todo",
+            title="任务转入开发",
+            summary=reason[:300],
+            conclusion=reason[:300] or "判定为简单任务，转入开发",
+            payload={"action": "simple"},
+        )
         await self.update_task(task_id, status="todo", assignee=None)
         self._post_output_bg(f"✓ 简单任务，推进至 todo")
 
@@ -225,16 +288,41 @@ class LeaderAgent(BaseAgent):
             )
         except Exception:
             prompt = FORCE_DECOMPOSE_PROMPT
+        handoff_context = await self.build_handoff_context(task_id)
+        if handoff_context:
+            prompt += f"\n\n{handoff_context}\n"
 
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
 
         returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
         if returncode != 0:
+            if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):
+                return
             prev_status = task.get("_claimed_from_status", task.get("status", "decompose"))
             await self.add_log(task_id, f"❌ Leader 分解失败（exit={returncode}），退回 {prev_status}")
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.add_alert(
+                summary=f"Leader 分解失败（exit={returncode}）",
+                task_id=task_id,
+                message=output[-1200:].strip(),
+                kind="error",
+                code="leader_decompose_failed",
+                stage="leader_failed",
+                metadata={"exit_code": returncode},
+            )
+            await self.add_handoff(
+                task_id,
+                stage="leader_failed",
+                to_agent=self.name,
+                status_from=prev_status,
+                status_to=prev_status,
+                title="任务分解失败",
+                summary=f"Leader 分解失败（exit={returncode}），保持状态 {prev_status}",
+                conclusion=f"分解失败，保持状态 {prev_status}",
+                payload={"exit_code": returncode},
+            )
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"分解输出:\n{output[:600]}")
@@ -244,10 +332,32 @@ class LeaderAgent(BaseAgent):
         subtasks = self._parse_subtasks_array(output)
         if not subtasks:
             await self.add_log(task_id, "⚠ 无法解析子任务，回退为 todo")
+            await self.add_handoff(
+                task_id,
+                stage="leader_to_todo",
+                to_agent=task.get("assigned_agent") or "developer",
+                status_from=task.get("_claimed_from_status", task.get("status")),
+                status_to="todo",
+                title="分解失败回退开发",
+                summary="无法解析子任务，回退为 todo",
+                conclusion="分解结果不可解析，回退到开发",
+                payload={"action": "fallback_todo"},
+            )
             await self.update_task(task_id, status="todo", assignee=None)
             return
 
         n = await self._create_subtasks(task, subtasks)
+        await self.add_handoff(
+            task_id,
+            stage="leader_to_decomposed",
+            to_agent="multi-agent",
+            status_from=task.get("_claimed_from_status", task.get("status")),
+            status_to="decomposed",
+            title="强制分解完成",
+            summary=f"已强制分解为 {n} 个子任务",
+            conclusion=f"强制分解完成，共 {n} 个子任务",
+            payload={"subtask_count": n, "forced": True},
+        )
         await self.update_task(task_id, status="decomposed", assignee=None)
         await self.add_log(task_id, f"✅ 强制分解完成，共创建 {n} 个子任务")
         self._post_output_bg(f"✓ 强制分解完成: {n} 个子任务")

@@ -33,6 +33,25 @@ class ManagerAgent(BaseAgent):
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法精确合并。退回开发重提。"
             await self.add_log(task_id, feedback)
+            await self.add_alert(
+                summary="合并前置条件缺失：commit_hash",
+                task_id=task_id,
+                message=feedback,
+                kind="error",
+                code="manager_missing_commit_hash",
+                stage="merge_to_dev",
+            )
+            await self.add_handoff(
+                task_id,
+                stage="merge_to_dev",
+                to_agent=dev_agent,
+                status_from="approved",
+                status_to="needs_changes",
+                title="合并退回开发",
+                summary=feedback,
+                conclusion="缺少目标 commit，退回开发重提",
+                payload={"reason": "missing_commit_hash", "has_commit": False},
+            )
             await self.update_task(
                 task_id,
                 status="needs_changes",
@@ -87,6 +106,18 @@ class ManagerAgent(BaseAgent):
             except RuntimeError as e:
                 if "already up to date" in str(e).lower():
                     await self.add_log(task_id, "Already up to date")
+                    await self.add_handoff(
+                        task_id,
+                        stage="merge_to_acceptance",
+                        to_agent="user",
+                        status_from="approved",
+                        status_to="pending_acceptance",
+                        title="无需合并，进入验收",
+                        summary="目标提交已在主分支，直接进入待验收",
+                        commit_hash=commit_hash,
+                        conclusion="目标提交已存在于 main，直接进入验收",
+                        payload={"commit_hash": commit_hash, "already_up_to_date": True},
+                    )
                     await self.update_task(task_id, status="pending_acceptance", assignee=None)
                     return
                 raise
@@ -94,6 +125,19 @@ class ManagerAgent(BaseAgent):
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)
             await self.add_log(task_id, f"✅ 合并成功: {commit_hash}，文件已在 {proj_root}")
             self._post_output_bg(f"✓ 合并完成 {commit_hash}")
+            await self.add_handoff(
+                task_id,
+                stage="merge_to_acceptance",
+                to_agent="user",
+                status_from="approved",
+                status_to="pending_acceptance",
+                title="合并完成，交接验收",
+                summary=f"已将审查通过提交合并到 main：{commit_hash}",
+                commit_hash=commit_hash,
+                conclusion="合并完成，进入待验收",
+                payload={"commit_hash": commit_hash, "source_branch": dev_branch, "reviewed_commit": target_commit},
+                artifact_path=str(proj_root),
+            )
             if await self.stop_if_task_cancelled(task_id, "合并后状态更新前"):
                 return
             await self.update_task(
@@ -104,6 +148,18 @@ class ManagerAgent(BaseAgent):
             err = str(e)
             if "already up to date" in err.lower():
                 await self.add_log(task_id, "Already up to date，标记为待验收")
+                await self.add_handoff(
+                    task_id,
+                    stage="merge_to_acceptance",
+                    to_agent="user",
+                    status_from="approved",
+                    status_to="pending_acceptance",
+                    title="无需合并，进入验收",
+                    summary="主分支已是最新，直接进入待验收",
+                    commit_hash=target_commit,
+                    conclusion="无需合并，进入待验收",
+                    payload={"already_up_to_date": True},
+                )
                 await self.update_task(task_id, status="pending_acceptance", assignee=None)
                 return
             await self.add_log(task_id, f"合并失败: {err[:300]}")
@@ -120,6 +176,27 @@ class ManagerAgent(BaseAgent):
                     f"请 {dev_agent} 在其分支解决冲突后重新提交。"
                 )
                 await self.add_log(task_id, f"↩ 发生合并冲突，退回 {dev_agent} 处理")
+                await self.add_alert(
+                    summary="合并冲突，退回开发处理",
+                    task_id=task_id,
+                    message=feedback,
+                    kind="warning",
+                    code="manager_merge_conflict",
+                    stage="merge_to_dev",
+                    metadata={"commit_hash": target_commit, "dev_branch": dev_branch},
+                )
+                await self.add_handoff(
+                    task_id,
+                    stage="merge_to_dev",
+                    to_agent=dev_agent,
+                    status_from="approved",
+                    status_to="needs_changes",
+                    title="合并冲突，退回开发",
+                    summary=feedback,
+                    commit_hash=target_commit,
+                    conclusion="合并冲突，需开发解决后重提",
+                    payload={"reason": "merge_conflict", "commit_hash": target_commit},
+                )
                 await self.update_task(
                     task_id,
                     status="needs_changes",
@@ -129,6 +206,27 @@ class ManagerAgent(BaseAgent):
                     review_feedback=feedback,
                 )
                 return
+            await self.add_alert(
+                summary="合并失败（系统错误）",
+                task_id=task_id,
+                message=err[:1000],
+                kind="error",
+                code="manager_merge_failed",
+                stage="merge_failed",
+                metadata={"commit_hash": target_commit},
+            )
+            await self.add_handoff(
+                task_id,
+                stage="merge_failed",
+                to_agent=self.name,
+                status_from="approved",
+                status_to="approved",
+                title="合并失败（系统）",
+                summary=f"合并失败但非冲突：{err[:200]}",
+                commit_hash=target_commit,
+                conclusion="合并系统错误，等待重试",
+                payload={"error": err[:500], "commit_hash": target_commit},
+            )
             await self.update_task(task_id, status="approved", assignee=None)
 
 

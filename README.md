@@ -32,8 +32,34 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
 ```
 待开发 → 开发中 → 待审查 → 审查中 → 需修改 ↗
                                     ↘ 审查通过 → 合并中 → 待验收 → 已完成
+待审查/审查中 → 已阻塞（环境或系统错误，修复后可恢复到 in_review）
 任意状态 → 已取消（自动归档，不再执行）
 ```
+
+## 交接材料（Handoff）
+
+- 每个关键流转节点都会写入结构化交接记录（`from_agent/to_agent/stage/status/commit_hash/conclusion/payload`）。
+- 关键代码流转阶段（如 `dev_to_review/review_to_manager/merge_to_acceptance`）会强制携带 `commit_hash`。
+- 建议在 payload 中携带 `source_branch`，便于跨 worktree 审阅定位。
+- 后端接口：
+  - `GET /tasks/{task_id}/handoffs`
+  - `POST /tasks/{task_id}/handoffs`
+- 前端任务详情面板中的「交接记录」展示该任务的完整交接链路，便于多 Agent 共同审阅。
+
+## 结构化告警
+
+- 告警由 Agent 显式上报，不再依赖日志文本正则猜测。
+- 后端接口：
+  - `POST /alerts`
+
+## 跨 Agent 同步（Worktree）
+
+- 默认启用 `HANDOFF_SYNC_STRATEGY=cherry-pick`：
+  - Generic Agent 领取任务后，会基于最近 handoff 的 `commit_hash/source_branch` 自动同步代码到本分支。
+- 可选策略：
+  - `HANDOFF_SYNC_STRATEGY=merge`
+  - `HANDOFF_SYNC_STRATEGY=none`（关闭自动同步）
+- 同步失败会写入结构化告警并将任务置为 `blocked`，避免静默继续执行。
 
 ## 配置（.env）
 

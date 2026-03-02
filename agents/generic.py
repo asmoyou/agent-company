@@ -30,6 +30,9 @@ class GenericAgent(BaseAgent):
         await self.add_log(
             task_id, f"{self._display_name} 接手，分支: {branch}，工作目录: {worktree_dev}"
         )
+        sync_result = await self.sync_from_latest_handoff(task, worktree_dev, current_branch=branch)
+        if sync_result.get("status") == "failed":
+            return
 
         prev_status = task.get("_claimed_from_status", task.get("status"))
         is_rework = task.get("review_feedback") and prev_status == "needs_changes"
@@ -54,13 +57,38 @@ class GenericAgent(BaseAgent):
                 f"{rework_section}\n\n"
                 "把所有输出写入文件，不要只输出文字。"
             )
+        handoff_context = await self.build_handoff_context(task_id)
+        if handoff_context:
+            prompt += f"\n\n{handoff_context}\n"
 
         returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
         if returncode != 0:
+            if await self.stop_if_task_cancelled(task_id, "CLI 失败后"):
+                return
             prev_status = task.get("_claimed_from_status", task.get("status"))
             await self.add_log(task_id, f"❌ CLI 执行失败（exit={returncode}），任务退回 {prev_status}")
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.add_alert(
+                summary=f"{self._display_name} 执行失败（exit={returncode}）",
+                task_id=task_id,
+                message=output[-1200:].strip(),
+                kind="error",
+                code=f"{self.name}_cli_failed",
+                stage=f"{self.name}_failed",
+                metadata={"exit_code": returncode},
+            )
+            await self.add_handoff(
+                task_id,
+                stage=f"{self.name}_failed",
+                to_agent=self.name,
+                status_from=prev_status,
+                status_to=prev_status,
+                title=f"{self._display_name} 执行失败",
+                summary=f"CLI 执行失败（exit={returncode}）",
+                conclusion=f"{self._display_name} 执行失败，回退到 {prev_status}",
+                payload={"exit_code": returncode},
+            )
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         if output.strip():
@@ -104,10 +132,42 @@ class GenericAgent(BaseAgent):
                 if self.next_status == "in_review":
                     update_fields["assigned_agent"] = self.name
                     update_fields["dev_agent"] = self.name
+                await self.add_handoff(
+                    task_id,
+                    stage=f"{self.name}_handoff",
+                    to_agent=(update_fields.get("assigned_agent") or self.next_status),
+                    status_from=prev_status,
+                    status_to=self.next_status,
+                    title=f"{self._display_name} 交接",
+                    summary=f"已提交 commit {commit_hash}，推进到 {self.next_status}",
+                    commit_hash=commit_hash,
+                    conclusion=f"{self._display_name} 完成，推进到 {self.next_status}",
+                    payload={"commit_hash": commit_hash, "diff_stat": diff.strip(), "source_branch": branch},
+                    artifact_path=str(worktree_dev),
+                )
                 await self.update_task(task_id, **update_fields)
                 return
             except Exception as e:
                 await self.add_log(task_id, f"提交失败: {e}")
+                await self.add_alert(
+                    summary=f"{self._display_name} 提交失败",
+                    task_id=task_id,
+                    message=str(e),
+                    kind="error",
+                    code=f"{self.name}_commit_failed",
+                    stage=f"{self.name}_failed",
+                )
+                await self.add_handoff(
+                    task_id,
+                    stage=f"{self.name}_failed",
+                    to_agent=self.name,
+                    status_from=prev_status,
+                    status_to=prev_status,
+                    title=f"{self._display_name} 提交失败",
+                    summary=str(e)[:300],
+                    conclusion=f"{self._display_name} 提交失败，任务回退",
+                    payload={"error": str(e)},
+                )
                 prev_status = task.get("_claimed_from_status", task.get("status"))
                 await self.update_task(task_id, status=prev_status, assignee=None)
                 return
@@ -119,6 +179,18 @@ class GenericAgent(BaseAgent):
         if self.next_status == "in_review":
             update_fields["assigned_agent"] = self.name
             update_fields["dev_agent"] = self.name
+        await self.add_handoff(
+            task_id,
+            stage=f"{self.name}_handoff",
+            to_agent=(update_fields.get("assigned_agent") or self.next_status),
+            status_from=prev_status,
+            status_to=self.next_status,
+            title=f"{self._display_name} 交接",
+            summary=f"无文件变更，推进到 {self.next_status}",
+            conclusion=f"无文件变更，推进到 {self.next_status}",
+            payload={"has_commit": False, "source_branch": branch},
+            artifact_path=str(worktree_dev),
+        )
         await self.update_task(task_id, **update_fields)
 
     def working_status_for(self, status: str) -> str:
