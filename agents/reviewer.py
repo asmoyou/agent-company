@@ -52,6 +52,8 @@ class ReviewerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        if await self.stop_if_task_cancelled(task_id, "开始审查前"):
+            return
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
         _, worktree_dev, branch = await self.ensure_agent_workspace(
@@ -129,6 +131,8 @@ class ReviewerAgent(BaseAgent):
             )
             return
         await self.add_log(task_id, f"审查输出:\n{output[:400]}")
+        if await self.stop_if_task_cancelled(task_id, "审查输出后"):
+            return
 
         decision = self.parse_json_decision(output)
         if decision is None:

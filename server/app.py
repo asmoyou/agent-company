@@ -156,6 +156,10 @@ class TaskClaim(BaseModel):
     respect_assignment: bool = True
     project_id: str | None = None
 
+class CancelTaskRequest(BaseModel):
+    reason: str | None = None
+    include_subtasks: bool = True
+
 
 # ── Root ──────────────────────────────────────────────────────────────────────
 @app.get("/")
@@ -292,6 +296,37 @@ async def update_task(task_id: str, body: TaskUpdate):
             if parent:
                 await manager.broadcast({"event": "task_updated", "task": parent})
     return task
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, body: CancelTaskRequest | None = None):
+    payload = body or CancelTaskRequest()
+    cancelled = db.cancel_task(
+        task_id,
+        include_subtasks=payload.include_subtasks,
+    )
+    if not cancelled:
+        raise HTTPException(404, "Task not found")
+
+    reason = (payload.reason or "").strip()
+    root_msg = "任务已取消并归档，不再执行。"
+    if reason:
+        root_msg += f"\n原因：{reason}"
+    child_msg = "因父任务被取消，任务已取消并归档，不再执行。"
+    if reason:
+        child_msg += f"\n父任务取消原因：{reason}"
+
+    for t in cancelled:
+        message = root_msg if t["id"] == task_id else child_msg
+        log = db.add_log(t["id"], "system", message)
+        await manager.broadcast({"event": "log_added", "log": log})
+        await manager.broadcast({"event": "task_updated", "task": t})
+
+    return {
+        "task": cancelled[0],
+        "affected_count": len(cancelled),
+        "affected_task_ids": [t["id"] for t in cancelled],
+    }
 
 @app.get("/tasks/{task_id}/subtasks")
 async def get_subtasks(task_id: str):

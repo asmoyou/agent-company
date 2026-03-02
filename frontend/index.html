@@ -307,6 +307,14 @@
       </button>
     </div>
 
+    <!-- 取消按钮（非完成任务） -->
+    <div id="panel-cancel-btn" class="hidden">
+      <button onclick="cancelCurrentTask()"
+        class="w-full bg-red-900/30 hover:bg-red-900/50 text-red-300 text-sm py-2 rounded-lg border border-red-900/40 transition">
+        ⛔ 取消任务（归档且停止执行）
+      </button>
+    </div>
+
     <!-- 分解按钮 (todo only, non-subtask) — 强制让 leader 分解 -->
     <div id="panel-decompose-btn" class="hidden">
       <button onclick="decomposeCurrentTask()"
@@ -526,6 +534,7 @@ const COLUMNS = [
   { status:"merging",            label:"合并中",   dot:"bg-purple-500"  },
   { status:"pending_acceptance", label:"待验收",   dot:"bg-teal-500"    },
   { status:"completed",          label:"已完成",   dot:"bg-emerald-400" },
+  { status:"cancelled",          label:"已取消",   dot:"bg-slate-600"   },
 ];
 const STATUS_BADGE = {
   triage:"bg-violet-900 text-violet-300",   triaging:"bg-violet-900 text-violet-300",
@@ -536,6 +545,7 @@ const STATUS_BADGE = {
   needs_changes:"bg-red-900 text-red-300", approved:"bg-green-900 text-green-300",
   merging:"bg-purple-900 text-purple-300", pending_acceptance:"bg-teal-900 text-teal-300",
   completed:"bg-emerald-900 text-emerald-300",
+  cancelled:"bg-slate-700 text-slate-300",
 };
 const STATUS_LABEL = Object.fromEntries(COLUMNS.map(c=>[c.status,c.label]));
 const ALL_STATUSES = COLUMNS.map(c => c.status);
@@ -991,6 +1001,11 @@ async function openPanel(id) {
   const archBtn = document.getElementById("panel-archive-btn");
   archBtn.classList.toggle("hidden", task.status!=="completed" || !!task.archived);
 
+  // Cancel button: hide for completed/cancelled tasks
+  const cancelBtn = document.getElementById("panel-cancel-btn");
+  const canCancel = !task.archived && !["completed", "cancelled"].includes(task.status);
+  cancelBtn.classList.toggle("hidden", !canCancel);
+
   // Decompose button: show only for todo tasks that are not subtasks
   const decompBtn = document.getElementById("panel-decompose-btn");
   decompBtn.classList.toggle("hidden", task.status !== "todo" || !!task.parent_task_id);
@@ -1108,6 +1123,22 @@ async function decomposeCurrentTask() {
   if (!currentTaskId) return;
   if (!confirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？")) return;
   await patchTask(currentTaskId, {status: "decompose"});
+}
+async function cancelCurrentTask() {
+  if (!currentTaskId) return;
+  if (!confirm("取消后任务将被归档，且不会再被 Agent 执行。确认取消？")) return;
+  const reasonInput = prompt("可选：填写取消原因（会写入任务日志）", "");
+  const reason = reasonInput === null ? "" : reasonInput.trim();
+  const res = await fetch(`${API}/tasks/${currentTaskId}/cancel`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({reason: reason || null, include_subtasks: true}),
+  });
+  if (!res.ok) {
+    alert("取消失败: " + await res.text());
+    return;
+  }
+  closePanel();
 }
 function renderSubtaskList(parentId) {
   const listEl = document.getElementById("panel-subtasks-list");

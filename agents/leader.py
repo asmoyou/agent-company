@@ -148,6 +148,8 @@ class LeaderAgent(BaseAgent):
     async def process_task(self, task: dict):
         original_status = task.get("_claimed_from_status", task.get("status"))  # "triage" or "decompose"
         task_id = task["id"]
+        if await self.stop_if_task_cancelled(task_id, "开始评估前"):
+            return
 
         if original_status == "decompose":
             # User explicitly requested decomposition — skip evaluation
@@ -191,6 +193,8 @@ class LeaderAgent(BaseAgent):
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"评估输出:\n{output[:600]}")
+        if await self.stop_if_task_cancelled(task_id, "评估输出后"):
+            return
 
         decision = self._parse_triage(output)
 
@@ -234,6 +238,8 @@ class LeaderAgent(BaseAgent):
             await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"分解输出:\n{output[:600]}")
+        if await self.stop_if_task_cancelled(task_id, "分解输出后"):
+            return
 
         subtasks = self._parse_subtasks_array(output)
         if not subtasks:

@@ -37,6 +37,8 @@ class DeveloperAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        if await self.stop_if_task_cancelled(task_id, "开始处理前"):
+            return
         _, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
 
         await self.add_log(task_id, f"Developer 接手，分支: {branch}，工作目录: {worktree_dev}")
@@ -79,6 +81,8 @@ class DeveloperAgent(BaseAgent):
             return
         if output.strip():
             await self.add_log(task_id, f"CLI 输出摘要:\n{output[:400]}")
+        if await self.stop_if_task_cancelled(task_id, "CLI 执行后"):
+            return
 
         # ── Stage & check diff ────────────────────────────────────────────────
         await self.git("add", "-A", cwd=worktree_dev)
@@ -98,6 +102,8 @@ class DeveloperAgent(BaseAgent):
 
         if not diff.strip():
             await self.add_log(task_id, "无文件变更，提交审查")
+            if await self.stop_if_task_cancelled(task_id, "推进审查前"):
+                return
             await self.update_task(
                 task_id,
                 status="in_review",
@@ -116,6 +122,8 @@ class DeveloperAgent(BaseAgent):
             )
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
             await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
+            if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
+                return
             await self.update_task(
                 task_id,
                 status="in_review",

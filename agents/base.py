@@ -85,6 +85,7 @@ class BaseAgent:
         self.shutdown = shutdown_event or asyncio.Event()
         # trust_env=False: ignore system proxy (SOCKS etc.) for localhost calls
         self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30, trust_env=False)
+        self._active_task_id: str | None = None
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
@@ -120,6 +121,27 @@ class BaseAgent:
         r.raise_for_status()
         return r.json()
 
+    async def is_task_cancelled(self, task_id: str) -> bool:
+        try:
+            task = await self.get_task(task_id)
+        except Exception:
+            return False
+        if not task:
+            return True
+        status = str(task.get("status") or "").strip().lower()
+        archived = int(task.get("archived") or 0)
+        return status == "cancelled" or archived == 1
+
+    async def stop_if_task_cancelled(self, task_id: str, stage: str = "") -> bool:
+        if not await self.is_task_cancelled(task_id):
+            return False
+        msg = "任务已取消，停止继续执行"
+        if stage:
+            msg += f"（{stage}）"
+        await self.add_log(task_id, msg)
+        self._post_output_bg(f"🛑 {msg}")
+        return True
+
     async def add_log(self, task_id: str, message: str):
         try:
             await self.http.post(
@@ -153,13 +175,33 @@ class BaseAgent:
 
     # ── Git ───────────────────────────────────────────────────────────────────
 
-    async def git(self, *args: str, cwd: Path) -> str:
+    async def git(self, *args: str, cwd: Path, task_id: str | None = None) -> str:
         proc = await asyncio.create_subprocess_exec(
             "git", *args, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        watch_task_id = task_id or self._active_task_id
+
+        async def cancel_watcher():
+            if not watch_task_id:
+                return
+            while proc.returncode is None:
+                await asyncio.sleep(1)
+                if proc.returncode is not None:
+                    return
+                if await self.is_task_cancelled(watch_task_id):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
+        cwatch = asyncio.create_task(cancel_watcher())
+        try:
+            stdout, stderr = await proc.communicate()
+        finally:
+            cwatch.cancel()
         if proc.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)} failed: {stderr.decode().strip()}")
         return stdout.decode().strip()
@@ -252,8 +294,34 @@ class BaseAgent:
                     continue
                 await auto_reply(f"idle {int(idle)}s")
 
+        async def cancel_watcher():
+            if not task_id:
+                return
+            while proc.returncode is None:
+                await asyncio.sleep(1)
+                if proc.returncode is not None:
+                    return
+                try:
+                    current = await self.get_task(task_id)
+                except Exception:
+                    continue
+                if not current:
+                    continue
+                status = str(current.get("status") or "").strip().lower()
+                archived = int(current.get("archived") or 0)
+                if status == "cancelled" or archived == 1:
+                    msg = "🛑 检测到任务已取消/归档，终止当前 CLI 执行"
+                    lines.append(msg)
+                    self._post_output_bg(msg)
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
         hb = asyncio.create_task(heartbeat())
         iar = asyncio.create_task(idle_auto_reply())
+        cwatch = asyncio.create_task(cancel_watcher())
         try:
             await asyncio.wait_for(
                 asyncio.gather(drain(proc.stdout), drain(proc.stderr)),
@@ -266,6 +334,7 @@ class BaseAgent:
         finally:
             hb.cancel()
             iar.cancel()
+            cwatch.cancel()
 
         await proc.wait()
         return proc.returncode, "\n".join(lines)
@@ -420,11 +489,14 @@ class BaseAgent:
                         await self.set_agent_status("busy", task["title"])
                         self._post_output_bg(f"▶ 任务: {task['title']}")
                         try:
+                            self._active_task_id = task["id"]
                             await self.process_task(task)
                         except Exception as e:
                             await self.add_log(task["id"], f"错误: {e}")
                             self._post_output_bg(f"✗ 错误: {e}")
                             print(f"[{self.name}] Error: {e}")
+                        finally:
+                            self._active_task_id = None
                         await self.set_agent_status("idle")
                         self._post_output_bg("─── 等待下一个任务 ───")
                 except Exception as e:

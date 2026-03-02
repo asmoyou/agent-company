@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
+CANCELLED_STATUS = "cancelled"
 
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
@@ -241,7 +242,7 @@ def reset_stuck_tasks():
         poll = json.loads(row["poll_statuses"] or "[]")
         reset_to = poll[0] if poll else "todo"
         conn.execute(
-            "UPDATE tasks SET status=?, assignee=NULL WHERE status=?",
+            "UPDATE tasks SET status=?, assignee=NULL WHERE status=? AND archived=0",
             (reset_to, working),
         )
     conn.commit()
@@ -389,6 +390,21 @@ def list_tasks(project_id: str | None = None) -> list[dict]:
 
 def update_task(task_id: str, **fields) -> dict | None:
     conn = get_conn()
+    current = conn.execute(
+        "SELECT status FROM tasks WHERE id=?",
+        (task_id,),
+    ).fetchone()
+    if not current:
+        conn.close()
+        return None
+    # Canceled tasks are immutable by normal updates so late agent writes
+    # cannot resurrect them.
+    if current["status"] == CANCELLED_STATUS:
+        row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
     if not fields:
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
@@ -423,6 +439,73 @@ def get_tasks_by_status(status: str, project_id: str | None = None) -> list[dict
     return [dict(r) for r in rows]
 
 
+def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | None:
+    """
+    Cancel a task (and optionally all descendants), archive it, and make it non-runnable.
+    Returns updated rows with joined project fields in deterministic order, or None if task missing.
+    """
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        root = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not root:
+            conn.rollback()
+            return None
+
+        if include_subtasks:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE task_tree(id) AS (
+                    SELECT id FROM tasks WHERE id=?
+                    UNION ALL
+                    SELECT t.id
+                    FROM tasks t
+                    JOIN task_tree tt ON t.parent_task_id = tt.id
+                )
+                SELECT id FROM task_tree
+                """,
+                (task_id,),
+            ).fetchall()
+            task_ids = [r["id"] for r in rows]
+        else:
+            task_ids = [task_id]
+
+        now = _now()
+        placeholders = ",".join("?" for _ in task_ids)
+        conn.execute(
+            f"""
+            UPDATE tasks
+               SET status=?,
+                   archived=1,
+                   assignee=NULL,
+                   updated_at=?
+             WHERE id IN ({placeholders})
+            """,
+            [CANCELLED_STATUS, now, *task_ids],
+        )
+
+        conn.commit()
+
+        # Root first, then descendants (recursive query order).
+        ordered = []
+        root_row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
+        ).fetchone()
+        if root_row:
+            ordered.append(dict(root_row))
+        for tid in task_ids:
+            if tid == task_id:
+                continue
+            row = conn.execute(
+                _join_project("SELECT * FROM tasks WHERE id=?"), (tid,)
+            ).fetchone()
+            if row:
+                ordered.append(dict(row))
+        return ordered
+    finally:
+        conn.close()
+
+
 def claim_task(status: str, working_status: str, agent: str, agent_key: str,
                respect_assignment: bool = True,
                project_id: str | None = None) -> dict | None:
@@ -434,7 +517,7 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        where = ["status=?"]
+        where = ["status=?", "archived=0"]
         params: list[str] = [status]
 
         if project_id:
@@ -455,7 +538,7 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
 
         now = _now()
         cur = conn.execute(
-            "UPDATE tasks SET status=?, assignee=?, updated_at=? WHERE id=? AND status=?",
+            "UPDATE tasks SET status=?, assignee=?, updated_at=? WHERE id=? AND status=? AND archived=0",
             (working_status, agent, now, row["id"], status),
         )
         if cur.rowcount != 1:
