@@ -108,25 +108,25 @@ def _seed_builtin_agents(conn):
         {
             "key": "leader",
             "name": "分解专家",
-            "description": "将复杂任务分解为子任务并分配给合适的 Agent",
-            "poll_statuses": '["decompose"]',
+            "description": "评估新任务复杂度：简单任务直接推进开发，复杂任务自动分解为子任务",
+            "poll_statuses": '["triage","decompose"]',
             "next_status": "decomposed",
-            "working_status": "decomposing",
+            "working_status": "triaging",
             "prompt": (
-                "你是一个专业的项目分解专家。请将以下任务分解为可执行的子任务。\n\n"
+                "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
                 "## 任务标题\n{task_title}\n\n"
                 "## 任务描述\n{task_description}\n\n"
                 "## 可用 Agent 类型\n{agent_list}\n\n"
-                "## 分解要求\n"
-                "1. 分解为 2-5 个具体、独立、可验收的子任务\n"
-                "2. 每个子任务有明确的完成标准和验收条件\n"
-                "3. 为每个子任务指定最合适的 agent（使用上方列表中的 key）\n"
-                "4. 子任务按合理的执行顺序排列\n\n"
-                "## 输出格式\n"
-                "只输出 JSON 数组，不要任何其他文字：\n"
-                "[\n"
+                "## 评估标准\n"
+                "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
+                "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
+                "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
+                "如果是简单任务：\n"
+                '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
+                "如果是复杂任务：\n"
+                '{"action": "decompose", "subtasks": [\n'
                 '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
-                "]"
+                "]}"
             ),
         },
     ]
@@ -142,6 +142,12 @@ def _seed_builtin_agents(conn):
                  b.get("prompt", ""),
                  b["poll_statuses"], b["next_status"], b["working_status"], "claude", now),
             )
+    # Migrate existing leader record to new triage-aware config
+    conn.execute(
+        """UPDATE agent_types
+           SET poll_statuses='["triage","decompose"]', working_status='triaging'
+           WHERE key='leader' AND (poll_statuses='["decompose"]' OR working_status='decomposing')"""
+    )
 
 
 def _now():
@@ -230,7 +236,8 @@ def _join_project(base_sql: str) -> str:
 
 def create_task(title: str, description: str, project_id: str | None = None,
                 parent_task_id: str | None = None,
-                assigned_agent: str | None = None) -> dict:
+                assigned_agent: str | None = None,
+                status: str = "triage") -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
     now = _now()
@@ -238,8 +245,9 @@ def create_task(title: str, description: str, project_id: str | None = None,
         """INSERT INTO tasks
            (id, project_id, title, description, status,
             parent_task_id, assigned_agent, created_at, updated_at)
-           VALUES (?,?,?,?,'todo',?,?,?,?)""",
-        (tid, project_id, title, description, parent_task_id, assigned_agent, now, now),
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (tid, project_id, title, description, status,
+         parent_task_id, assigned_agent, now, now),
     )
     conn.commit()
     row = conn.execute(
