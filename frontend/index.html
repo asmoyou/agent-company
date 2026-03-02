@@ -75,9 +75,10 @@
   <div class="ml-auto flex items-center gap-2">
     <!-- Project path indicator -->
     <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs">
-      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-400 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:280px" id="project-path-text" title="点击打开文件浏览器"></button>
-      <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制项目路径">📋</button>
-      <span class="text-slate-700 mx-0.5">|</span>
+      <span class="text-slate-500 shrink-0">项目目录</span>
+      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-300 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:240px" id="project-path-text" title="点击打开文件浏览器"></button>
+      <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制路径">📋</button>
+      <span class="text-slate-700">|</span>
     </div>
     <!-- Archive toggle -->
     <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
@@ -89,6 +90,12 @@
       class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
       title="编辑 Agent 提示词">
       ⚙ 提示词
+    </button>
+    <!-- Agent management -->
+    <button onclick="openAgentsModal()"
+      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      title="管理 Agent 类型">
+      🤖 Agents
     </button>
     <button onclick="openCreateModal()" id="btn-create-task"
       class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition disabled:opacity-40"
@@ -116,46 +123,11 @@
 <div class="border-t border-slate-700 bg-slate-900 sticky bottom-0 z-10">
   <div class="flex items-center gap-4 px-4 py-2 cursor-pointer select-none" onclick="toggleTerminals()">
     <span class="text-xs font-semibold text-slate-400 uppercase tracking-widest">🖥 Agent 终端</span>
-    <div class="flex items-center gap-4">
-      <span id="ab-developer" class="flex items-center gap-1 text-xs">
-        <span id="dot-developer" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-        <span class="text-slate-500">developer</span>
-      </span>
-      <span id="ab-reviewer" class="flex items-center gap-1 text-xs">
-        <span id="dot-reviewer" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-        <span class="text-slate-500">reviewer</span>
-      </span>
-      <span id="ab-manager" class="flex items-center gap-1 text-xs">
-        <span id="dot-manager" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-        <span class="text-slate-500">manager</span>
-      </span>
-    </div>
+    <div id="agent-status-badges" class="flex items-center gap-4"></div>
     <span id="terminal-chevron" class="ml-auto text-slate-500 text-sm">▲</span>
   </div>
   <div id="terminal-panel" style="height:200px;">
-    <div class="grid grid-cols-3 gap-3 px-4 pb-3" style="height:184px;">
-      <div>
-        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
-          <span id="dot2-developer" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-          developer · <span id="status-developer" class="text-slate-600">idle</span>
-        </div>
-        <div class="terminal" id="term-developer"></div>
-      </div>
-      <div>
-        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
-          <span id="dot2-reviewer" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-          reviewer · <span id="status-reviewer" class="text-slate-600">idle</span>
-        </div>
-        <div class="terminal" id="term-reviewer"></div>
-      </div>
-      <div>
-        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
-          <span id="dot2-manager" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-          manager · <span id="status-manager" class="text-slate-600">idle</span>
-        </div>
-        <div class="terminal" id="term-manager"></div>
-      </div>
-    </div>
+    <div id="terminal-grid" class="flex gap-3 px-4 pb-3 overflow-x-auto" style="height:184px;"></div>
   </div>
 </div>
 
@@ -852,6 +824,21 @@ async function syncProjects() {
   setTimeout(() => { btn.textContent = "↻ 同步"; btn.disabled = false; }, 2000);
 }
 
+async function autoSyncProjects() {
+  // 静默检查：目录不存在的项目自动清理，无需用户手动点击
+  try {
+    const res = await fetch(`${API}/projects/sync`, {method:"POST"});
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.deleted.length > 0) {
+      // 已通过 WebSocket project_deleted 事件更新了 UI，仅更新按钮提示
+      const btn = document.getElementById("btn-sync");
+      btn.textContent = `✓ 自动清理 ${data.deleted.length} 个`;
+      setTimeout(() => { btn.textContent = "↻ 同步"; }, 3000);
+    }
+  } catch { /* 静默失败 */ }
+}
+
 // ── Create Task Modal ─────────────────────────────────────────────────────────
 function openCreateModal() {
   if (!currentProjectId) return;
@@ -900,6 +887,7 @@ function connectWS() {
       buildBoard();
       refreshBoard();
       initAgentOutputs(msg.agent_outputs);
+      autoSyncProjects();  // 启动时静默检查已删除的项目
     } else if (msg.event==="project_created") {
       projects[msg.project.id]=msg.project;
       const sel=document.getElementById("project-select");
