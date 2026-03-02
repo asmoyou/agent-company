@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from base import BaseAgent, get_project_dirs
+from base import BaseAgent, get_project_dirs, load_prompt
 
 
 class ReviewerAgent(BaseAgent):
@@ -20,44 +20,33 @@ class ReviewerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
-        _, worktree_dev = get_project_dirs(task)
+        proj_root, worktree_dev = get_project_dirs(task)
 
         await self.update_task(task_id, status="reviewing", assignee=self.name)
         await self.add_log(task_id, "Reviewer 开始审查")
 
         diff = await self.get_diff(worktree_dev)
-        await self.add_log(task_id, f"获取到 diff，共 {len(diff)} 字符")
+        await self.add_log(task_id, f"获取到 diff ({len(diff)} 字符)")
 
-        prompt = f"""你是资深代码审查工程师。请认真审查以下代码变更。
-
-任务：{task['title']}
-需求：{task['description']}
-
-代码变更：
-```
-{diff[:8000]}
-```
-
-审查要点：
-- 功能是否完整实现
-- 是否有 bug 或边界情况遗漏
-- 代码质量和可读性
-- 是否满足需求描述
-
-审查完毕后，在回复最后输出决定（JSON，后面不要再有任何文字）：
-
-同意合并：
-{{"decision": "approve", "comment": "审查意见"}}
-
-需要修改：
-{{"decision": "request_changes", "feedback": "具体要修改的内容，条列说明"}}
-"""
+        # ── Build prompt from template ────────────────────────────────────────
+        template = load_prompt("reviewer", project_path=proj_root)
+        if template:
+            prompt = template.format(
+                task_title=task["title"],
+                task_description=task["description"] or "(无额外描述)",
+                diff=diff[:8000],
+            )
+        else:
+            prompt = (
+                f"审查任务「{task['title']}」的代码变更：\n\n```\n{diff[:8000]}\n```\n\n"
+                "输出 JSON 决定：{\"decision\":\"approve\",\"comment\":\"...\"} "
+                "或 {\"decision\":\"request_changes\",\"feedback\":\"...\"}"
+            )
 
         returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
         await self.add_log(task_id, f"审查输出:\n{output[:400]}")
 
         decision = self.parse_json_decision(output)
-
         if decision is None:
             low = output.lower()
             if any(w in low for w in ["approve", "lgtm", "looks good", "合格", "通过", "同意"]):
