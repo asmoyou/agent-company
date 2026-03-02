@@ -52,12 +52,16 @@ class ConnectionManager:
         self.active -= dead
 
 
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+PROMPTS_DIR.mkdir(exist_ok=True)
+
 manager = ConnectionManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    db.reset_stuck_tasks()   # Reset tasks stuck in transient states from last crash
     yield
 
 
@@ -272,6 +276,75 @@ async def get_task_files(task_id: str):
         "files": files,
         "has_real_commit": has_real_commit,
     }
+
+
+# ── Prompts endpoints ─────────────────────────────────────────────────────────
+ALLOWED_AGENTS = {"developer", "reviewer"}
+
+class PromptUpdate(BaseModel):
+    content: str
+
+@app.get("/prompts/{agent_name}")
+async def get_prompt(agent_name: str):
+    if agent_name not in ALLOWED_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    path = PROMPTS_DIR / f"{agent_name}.md"
+    return {
+        "agent": agent_name,
+        "content": path.read_text(encoding="utf-8") if path.exists() else "",
+        "source": "global",
+    }
+
+@app.put("/prompts/{agent_name}")
+async def update_prompt(agent_name: str, body: PromptUpdate):
+    if agent_name not in ALLOWED_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    path = PROMPTS_DIR / f"{agent_name}.md"
+    path.write_text(body.content, encoding="utf-8")
+    return {"ok": True}
+
+@app.get("/projects/{project_id}/prompts/{agent_name}")
+async def get_project_prompt(project_id: str, agent_name: str):
+    if agent_name not in ALLOWED_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    override = Path(p["path"]) / ".opc" / f"{agent_name}.md"
+    if override.exists():
+        return {"agent": agent_name, "content": override.read_text(encoding="utf-8"), "source": "project"}
+    # Fall back to global
+    glob = PROMPTS_DIR / f"{agent_name}.md"
+    return {
+        "agent": agent_name,
+        "content": glob.read_text(encoding="utf-8") if glob.exists() else "",
+        "source": "global",
+    }
+
+@app.put("/projects/{project_id}/prompts/{agent_name}")
+async def update_project_prompt(project_id: str, agent_name: str, body: PromptUpdate):
+    if agent_name not in ALLOWED_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    opc_dir = Path(p["path"]) / ".opc"
+    opc_dir.mkdir(exist_ok=True)
+    (opc_dir / f"{agent_name}.md").write_text(body.content, encoding="utf-8")
+    return {"ok": True}
+
+@app.delete("/projects/{project_id}/prompts/{agent_name}")
+async def delete_project_prompt(project_id: str, agent_name: str):
+    """Remove project-level override, falling back to global prompt."""
+    if agent_name not in ALLOWED_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    override = Path(p["path"]) / ".opc" / f"{agent_name}.md"
+    if override.exists():
+        override.unlink()
+    return {"ok": True}
 
 
 # ── Agent terminal endpoints ──────────────────────────────────────────────────

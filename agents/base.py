@@ -8,11 +8,12 @@ from pathlib import Path
 
 import httpx
 
-PROJECT_ROOT = Path(__file__).parent.parent
-SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8080")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
-CLI_TIMEOUT = int(os.getenv("CLI_TIMEOUT", "300"))
-HEARTBEAT_INTERVAL = 45  # seconds between "still working" log entries
+PROJECT_ROOT    = Path(__file__).parent.parent
+PROMPTS_DIR     = PROJECT_ROOT / "prompts"
+SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
+POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
+CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
+HEARTBEAT_SECS  = 45
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -31,10 +32,25 @@ def get_project_dirs(task: dict) -> tuple[Path, Path]:
     if project_path:
         root = Path(project_path)
     else:
-        # Fallback: isolated scratch dir so we never touch OPC-demo itself
         root = PROJECT_ROOT / ".worktrees" / "scratch"
         root.mkdir(parents=True, exist_ok=True)
     return root, root / ".worktrees" / "dev"
+
+
+def load_prompt(agent_name: str, project_path: Path | None = None) -> str:
+    """
+    Load prompt template for an agent.
+    Priority: {project_path}/.opc/{agent}.md  >  prompts/{agent}.md
+    Returns empty string if neither exists.
+    """
+    if project_path:
+        override = project_path / ".opc" / f"{agent_name}.md"
+        if override.exists():
+            return override.read_text(encoding="utf-8")
+    default = PROMPTS_DIR / f"{agent_name}.md"
+    if default.exists():
+        return default.read_text(encoding="utf-8")
+    return ""
 
 
 class BaseAgent:
@@ -42,7 +58,8 @@ class BaseAgent:
     poll_statuses: list[str] = []
     cli_name: str = "claude"
 
-    def __init__(self):
+    def __init__(self, shutdown_event: asyncio.Event | None = None):
+        self.shutdown = shutdown_event or asyncio.Event()
         self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30)
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
@@ -71,7 +88,7 @@ class BaseAgent:
         except Exception:
             pass
 
-    # ── Agent terminal stream ─────────────────────────────────────────────────
+    # ── Agent terminal output ─────────────────────────────────────────────────
 
     def _post_output_bg(self, line: str):
         async def _send():
@@ -93,12 +110,11 @@ class BaseAgent:
         except Exception:
             pass
 
-    # ── Git helpers ──────────────────────────────────────────────────────────
+    # ── Git ───────────────────────────────────────────────────────────────────
 
     async def git(self, *args: str, cwd: Path) -> str:
         proc = await asyncio.create_subprocess_exec(
-            "git", *args,
-            cwd=str(cwd),
+            "git", *args, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -107,16 +123,15 @@ class BaseAgent:
             raise RuntimeError(f"git {' '.join(args)} failed: {stderr.decode().strip()}")
         return stdout.decode().strip()
 
-    # ── CLI runner with streaming + heartbeat ─────────────────────────────────
+    # ── CLI runner ────────────────────────────────────────────────────────────
 
     async def run_cli(self, prompt: str, cwd: Path, task_id: str | None = None) -> tuple[int, str]:
         cmd = build_cli_cmd(self.cli_name, prompt)
-        print(f"[{self.name}] Spawning {cmd[0]} in {cwd}")
-        self._post_output_bg(f"$ {cmd[0]} (cwd: {cwd.name})")
+        print(f"[{self.name}] Spawning {cmd[0]} (cwd={cwd.name})")
+        self._post_output_bg(f"$ {cmd[0]}  cwd={cwd}")
 
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(cwd),
+            *cmd, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
@@ -133,16 +148,15 @@ class BaseAgent:
                     self._post_output_bg(line)
 
         async def heartbeat():
-            """Post a 'still alive' log every HEARTBEAT_INTERVAL seconds."""
             while True:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                await asyncio.sleep(HEARTBEAT_SECS)
                 elapsed = int(time.monotonic() - start_time)
                 msg = f"⏳ 仍在工作中... 已运行 {elapsed}s"
                 self._post_output_bg(msg)
                 if task_id:
                     await self.add_log(task_id, msg)
 
-        hb_task = asyncio.create_task(heartbeat())
+        hb = asyncio.create_task(heartbeat())
         try:
             await asyncio.wait_for(
                 asyncio.gather(drain(proc.stdout), drain(proc.stderr)),
@@ -153,7 +167,7 @@ class BaseAgent:
             lines.append(f"[TIMEOUT after {CLI_TIMEOUT}s]")
             self._post_output_bg(f"⚠ TIMEOUT after {CLI_TIMEOUT}s")
         finally:
-            hb_task.cancel()
+            hb.cancel()
 
         await proc.wait()
         return proc.returncode, "\n".join(lines)
@@ -163,21 +177,21 @@ class BaseAgent:
     def parse_json_decision(self, text: str) -> dict | None:
         for m in reversed(re.findall(r"```(?:json)?\s*(\{[\s\S]+?\})\s*```", text)):
             try:
-                data = json.loads(m)
-                if "decision" in data:
-                    return data
+                d = json.loads(m)
+                if "decision" in d:
+                    return d
             except json.JSONDecodeError:
                 pass
         for m in reversed(re.findall(r"\{[^{}]*\}", text)):
             try:
-                data = json.loads(m)
-                if "decision" in data:
-                    return data
+                d = json.loads(m)
+                if "decision" in d:
+                    return d
             except json.JSONDecodeError:
                 pass
         return None
 
-    # ── Main loop ────────────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def process_task(self, task: dict):
         raise NotImplementedError
@@ -185,17 +199,18 @@ class BaseAgent:
     async def run(self):
         if not shutil.which(self.cli_name):
             print(f"[{self.name}] WARNING: '{self.cli_name}' not found in PATH")
-
         print(f"[{self.name}] Starting (CLI={self.cli_name}, polls={self.poll_statuses})")
         await self.set_agent_status("idle")
 
-        while True:
+        while not self.shutdown.is_set():
             for status in self.poll_statuses:
+                if self.shutdown.is_set():
+                    break
                 try:
-                    tasks = await self.fetch_tasks(status)
-                    for task in tasks:
-                        title = task["title"][:40]
-                        print(f"[{self.name}] → '{title}' ({status})")
+                    for task in await self.fetch_tasks(status):
+                        if self.shutdown.is_set():
+                            break
+                        print(f"[{self.name}] → '{task['title'][:40]}' ({status})")
                         await self.set_agent_status("busy", task["title"])
                         self._post_output_bg(f"▶ 任务: {task['title']}")
                         try:
@@ -208,4 +223,13 @@ class BaseAgent:
                         self._post_output_bg("─── 等待下一个任务 ───")
                 except Exception as e:
                     print(f"[{self.name}] Poll error ({status}): {e}")
-            await asyncio.sleep(POLL_INTERVAL)
+
+            # Sleep for POLL_INTERVAL, but wake up early if shutdown is set
+            try:
+                await asyncio.wait_for(self.shutdown.wait(), timeout=POLL_INTERVAL)
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, continue polling
+
+        self._post_output_bg(f"[{self.name}] 已收到关闭信号，停止接受新任务")
+        print(f"[{self.name}] Stopped.")
+        await self.http.aclose()

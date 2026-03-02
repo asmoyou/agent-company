@@ -63,6 +63,12 @@
       <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
       显示已归档
     </label>
+    <!-- Prompts editor -->
+    <button onclick="openPromptsModal()"
+      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      title="编辑 Agent 提示词">
+      ⚙ 提示词
+    </button>
     <button onclick="openCreateModal()" id="btn-create-task"
       class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition disabled:opacity-40"
       disabled>
@@ -264,6 +270,147 @@
     </form>
   </div>
 </div>
+
+<!-- Prompts Editor Modal -->
+<div id="modal-prompts" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl flex flex-col" style="max-height:85vh">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+      <div>
+        <h3 class="font-semibold text-white">Agent 提示词</h3>
+        <p class="text-xs text-slate-500 mt-0.5">
+          全局模板 → <code class="text-slate-400">prompts/{agent}.md</code> ；
+          项目覆盖 → <code class="text-slate-400">{project}/.opc/{agent}.md</code>（优先级更高）
+        </p>
+      </div>
+      <button onclick="closePromptsModal()" class="text-slate-400 hover:text-white text-xl shrink-0">&times;</button>
+    </div>
+    <!-- Scope tabs -->
+    <div class="px-6 pt-3 flex items-center gap-3 shrink-0 flex-wrap">
+      <span class="text-xs text-slate-400">范围：</span>
+      <button id="prompt-scope-global" onclick="setPromptScope('global')"
+        class="text-xs px-3 py-1 rounded-full bg-indigo-600 text-white">全局默认</button>
+      <button id="prompt-scope-project" onclick="setPromptScope('project')"
+        class="text-xs px-3 py-1 rounded-full bg-slate-700 text-slate-400">
+        项目覆盖 <span id="prompt-project-name" class="opacity-70"></span>
+      </button>
+      <span id="prompt-override-hint" class="hidden text-xs text-amber-400">⚠ 当前项目有自定义提示词</span>
+      <button id="btn-delete-project-prompt" onclick="deleteProjectPrompt()"
+        class="hidden text-xs text-red-400 hover:text-red-300">✕ 删除项目覆盖</button>
+    </div>
+    <!-- Agent tabs -->
+    <div class="px-6 pt-3 flex gap-2 shrink-0">
+      <button onclick="setPromptAgent('developer')" id="ptab-developer"
+        class="text-xs px-3 py-1.5 rounded-lg bg-blue-900/60 text-blue-300 font-medium">Developer</button>
+      <button onclick="setPromptAgent('reviewer')" id="ptab-reviewer"
+        class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 text-slate-400">Reviewer</button>
+    </div>
+    <div class="flex-1 overflow-hidden px-6 pb-4 pt-3 flex flex-col gap-2">
+      <div class="text-xs text-slate-500 flex flex-wrap items-center gap-2">
+        <span>占位符：</span>
+        <code class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{task_title}</code>
+        <code class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{task_description}</code>
+        <code id="ph-rework" class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{rework_section}</code>
+        <code id="ph-diff" class="hidden text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{diff}</code>
+      </div>
+      <textarea id="prompt-editor"
+        class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-200 font-mono resize-none focus:outline-none focus:border-indigo-500"
+        style="min-height:280px" placeholder="加载中..."></textarea>
+      <div class="flex justify-between items-center">
+        <button onclick="resetPromptToDefault()"
+          class="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg">重置为默认</button>
+        <button onclick="savePrompt()"
+          class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Prompts editor ────────────────────────────────────────────────────────────
+let promptAgent = "developer";
+let promptScope = "global";
+
+const DEFAULT_PROMPTS = {
+  developer: `你是一名专业软件工程师，负责实现以下任务。\n\n## 任务信息\n\n**标题**：{task_title}\n\n**需求描述**：\n{task_description}\n\n{rework_section}\n\n## 工作要求\n\n1. 所有成果必须写入文件，不要只在终端打印输出\n2. 代码任务 → 创建对应语言的源文件；文档任务 → 创建 .md 文件\n3. 至少创建一个文件\n4. 直接开始实现，不需要解释计划`,
+  reviewer: `你是资深代码/文档审查工程师。\n\n## 任务：{task_title}\n\n需求：{task_description}\n\n## 变更\n\n\`\`\`\n{diff}\n\`\`\`\n\n审查完后在最后输出 JSON 决定（后不附任何文字）：\n同意：{"decision":"approve","comment":"..."}\n修改：{"decision":"request_changes","feedback":"..."}`,
+};
+
+function openPromptsModal() {
+  document.getElementById("modal-prompts").classList.remove("hidden");
+  const proj = projects[currentProjectId];
+  document.getElementById("prompt-project-name").textContent = proj ? `(${proj.name})` : "(未选项目)";
+  document.getElementById("prompt-scope-project").disabled = !currentProjectId;
+  setPromptAgent("developer");
+  setPromptScope("global");
+}
+function closePromptsModal() {
+  document.getElementById("modal-prompts").classList.add("hidden");
+}
+function setPromptAgent(agent) {
+  promptAgent = agent;
+  ["developer","reviewer"].forEach(a => {
+    document.getElementById(`ptab-${a}`).className = a === agent
+      ? "text-xs px-3 py-1.5 rounded-lg bg-blue-900/60 text-blue-300 font-medium"
+      : "text-xs px-3 py-1.5 rounded-lg bg-slate-700 text-slate-400";
+  });
+  document.getElementById("ph-rework").classList.toggle("hidden", agent !== "developer");
+  document.getElementById("ph-diff").classList.toggle("hidden", agent !== "reviewer");
+  loadPromptContent();
+}
+function setPromptScope(scope) {
+  promptScope = scope;
+  ["global","project"].forEach(s => {
+    document.getElementById(`prompt-scope-${s}`).className = s === scope
+      ? "text-xs px-3 py-1 rounded-full bg-indigo-600 text-white"
+      : "text-xs px-3 py-1 rounded-full bg-slate-700 text-slate-400";
+  });
+  loadPromptContent();
+}
+async function loadPromptContent() {
+  const ta = document.getElementById("prompt-editor");
+  ta.value = "加载中...";
+  try {
+    const url = promptScope === "project" && currentProjectId
+      ? `${API}/projects/${currentProjectId}/prompts/${promptAgent}`
+      : `${API}/prompts/${promptAgent}`;
+    const data = await (await fetch(url)).json();
+    ta.value = data.content || DEFAULT_PROMPTS[promptAgent] || "";
+
+    // Check override status
+    const hint   = document.getElementById("prompt-override-hint");
+    const delBtn = document.getElementById("btn-delete-project-prompt");
+    if (currentProjectId) {
+      const pd = await (await fetch(`${API}/projects/${currentProjectId}/prompts/${promptAgent}`)).json();
+      const hasOverride = pd.source === "project";
+      hint.classList.toggle("hidden", !hasOverride);
+      delBtn.classList.toggle("hidden", !(hasOverride && promptScope === "project"));
+    } else {
+      hint.classList.add("hidden"); delBtn.classList.add("hidden");
+    }
+  } catch { ta.value = DEFAULT_PROMPTS[promptAgent] || ""; }
+}
+async function savePrompt() {
+  const content = document.getElementById("prompt-editor").value;
+  const url = promptScope === "project" && currentProjectId
+    ? `${API}/projects/${currentProjectId}/prompts/${promptAgent}`
+    : `${API}/prompts/${promptAgent}`;
+  const res = await fetch(url, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({content})});
+  if (res.ok) {
+    const btn = document.querySelector("#modal-prompts button[onclick='savePrompt()']");
+    const orig = btn.textContent; btn.textContent = "✓ 已保存";
+    setTimeout(()=>btn.textContent=orig, 1500);
+    loadPromptContent();
+  } else { alert("保存失败: "+await res.text()); }
+}
+async function deleteProjectPrompt() {
+  if (!currentProjectId||!confirm("删除项目级提示词，恢复使用全局默认？")) return;
+  await fetch(`${API}/projects/${currentProjectId}/prompts/${promptAgent}`,{method:"DELETE"});
+  loadPromptContent();
+}
+function resetPromptToDefault() {
+  document.getElementById("prompt-editor").value = DEFAULT_PROMPTS[promptAgent]||"";
+}
+</script>
 
 <script>
 const WS_URL = `ws://${location.host}/ws`;

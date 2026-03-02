@@ -64,6 +64,22 @@ def _now():
     return datetime.utcnow().isoformat()
 
 
+def reset_stuck_tasks():
+    """
+    On server startup, reset tasks left in transient agent states
+    back to the last stable state (in case of a crash/restart).
+    """
+    conn = get_conn()
+    # in_progress → todo  (developer was working, didn't finish)
+    conn.execute("UPDATE tasks SET status='todo',    assignee=NULL WHERE status='in_progress'")
+    # reviewing   → in_review  (reviewer was working)
+    conn.execute("UPDATE tasks SET status='in_review', assignee=NULL WHERE status='reviewing'")
+    # merging     → approved   (manager was merging)
+    conn.execute("UPDATE tasks SET status='approved',  assignee=NULL WHERE status='merging'")
+    conn.commit()
+    conn.close()
+
+
 # ── Projects ──────────────────────────────────────────────────────────────────
 
 def create_project(name: str, path: str) -> dict:
