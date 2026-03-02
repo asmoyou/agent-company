@@ -20,6 +20,21 @@ import db
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
+
+def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
+    raw = (agent_key or default).strip().lower()
+    safe = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
+    return safe or default
+
+
+def task_dev_agent(task: dict) -> str:
+    return normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or "developer")
+
+
+def task_dev_branch(task: dict) -> str:
+    return f"agent/{task_dev_agent(task)}"
+
+
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
 AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=200))
 AGENT_STATUS: dict = defaultdict(lambda: {"status": "idle", "task": ""})
@@ -87,11 +102,14 @@ class TaskCreate(BaseModel):
     project_id: str | None = None
     parent_task_id: str | None = None
     assigned_agent: str | None = None
+    dev_agent: str | None = None
     status: str = "triage"   # default: all new tasks enter triage first
 
 class TaskUpdate(BaseModel):
     status: str | None = None
     assignee: str | None = None
+    assigned_agent: str | None = None
+    dev_agent: str | None = None
     review_feedback: str | None = None
     commit_hash: str | None = None
     archived: int | None = None
@@ -132,6 +150,14 @@ class GeneratePromptRequest(BaseModel):
 
 class MkdirRequest(BaseModel):
     path: str
+
+class TaskClaim(BaseModel):
+    status: str
+    working_status: str
+    agent: str
+    agent_key: str
+    respect_assignment: bool = True
+    project_id: str | None = None
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
@@ -180,14 +206,13 @@ async def sync_projects():
 
 @app.post("/projects/{project_id}/setup")
 async def setup_project(project_id: str):
-    """Initialize git repo + dev worktree in the project directory."""
+    """Initialize git repo in the project directory (without shared dev worktree)."""
     p = db.get_project(project_id)
     if not p:
         raise HTTPException(404, "Project not found")
 
     proj_path = Path(p["path"])
     proj_path.mkdir(parents=True, exist_ok=True)
-    worktree_dev = proj_path / ".worktrees" / "dev"
 
     def run(*args, cwd=None):
         result = subprocess.run(
@@ -213,19 +238,7 @@ async def setup_project(project_id: str):
         run("git", "config", "user.email", "agent@opc-demo.local")
         run("git", "config", "user.name", "OPC Agent")
         log.append("git repo already exists")
-
-    # Create dev branch + worktree
-    if not worktree_dev.exists():
-        rc, out, err = run("git", "branch", "dev")
-        log.append(f"branch dev: {out or err or 'ok'}")
-        worktree_dev.parent.mkdir(parents=True, exist_ok=True)
-        rc, out, err = run("git", "worktree", "add", str(worktree_dev), "dev")
-        log.append(f"worktree add: {out or err or 'ok'}")
-        # Configure git in dev worktree
-        run("git", "config", "user.email", "agent@opc-demo.local", cwd=worktree_dev)
-        run("git", "config", "user.name", "OPC Agent", cwd=worktree_dev)
-    else:
-        log.append("dev worktree already exists")
+    log.append("shared dev worktree disabled; agents create their own worktrees on demand")
 
     return {"ok": True, "log": log, "path": str(proj_path)}
 
@@ -238,7 +251,7 @@ async def list_tasks(project_id: str | None = None):
 @app.post("/tasks", status_code=201)
 async def create_task(body: TaskCreate):
     task = db.create_task(body.title, body.description, body.project_id,
-                          body.parent_task_id, body.assigned_agent, body.status)
+                          body.parent_task_id, body.assigned_agent, body.dev_agent, body.status)
     await manager.broadcast({"event": "task_created", "task": task})
     return task
 
@@ -246,6 +259,20 @@ async def create_task(body: TaskCreate):
 @app.get("/tasks/status/{status}")
 async def tasks_by_status(status: str, project_id: str | None = None):
     return db.get_tasks_by_status(status, project_id)
+
+@app.post("/tasks/claim")
+async def claim_task(body: TaskClaim):
+    task = db.claim_task(
+        status=body.status,
+        working_status=body.working_status,
+        agent=body.agent,
+        agent_key=body.agent_key,
+        respect_assignment=body.respect_assignment,
+        project_id=body.project_id,
+    )
+    if task:
+        await manager.broadcast({"event": "task_updated", "task": task})
+    return {"task": task}
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):
@@ -256,7 +283,7 @@ async def get_task(task_id: str):
 
 @app.patch("/tasks/{task_id}")
 async def update_task(task_id: str, body: TaskUpdate):
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    fields = body.model_dump(exclude_unset=True)
     task = db.update_task(task_id, **fields)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -294,7 +321,8 @@ async def get_task_files(task_id: str):
         return {"location": "(未关联项目)", "branch": "-", "files": [], "has_real_commit": False}
 
     proj_root   = Path(project_path)
-    worktree_dev = proj_root / ".worktrees" / "dev"
+    dev_key = task_dev_agent(task)
+    worktree_dev = proj_root / ".worktrees" / dev_key
     status       = task.get("status", "")
     commit_hash  = task.get("commit_hash", "")
 
@@ -304,8 +332,8 @@ async def get_task_files(task_id: str):
         rel_base    = ""
     else:
         inspect_dir = worktree_dev
-        branch      = "dev"
-        rel_base    = ".worktrees/dev/"
+        branch      = task_dev_branch(task)
+        rel_base    = f".worktrees/{dev_key}/"
 
     files = []
     has_real_commit = False

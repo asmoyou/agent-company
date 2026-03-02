@@ -69,6 +69,7 @@ def init_db():
         ("archived",       "INTEGER NOT NULL DEFAULT 0"),
         ("parent_task_id", "TEXT"),
         ("assigned_agent", "TEXT"),
+        ("dev_agent",      "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {defn}")
@@ -237,6 +238,7 @@ def _join_project(base_sql: str) -> str:
 def create_task(title: str, description: str, project_id: str | None = None,
                 parent_task_id: str | None = None,
                 assigned_agent: str | None = None,
+                dev_agent: str | None = None,
                 status: str = "triage") -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
@@ -244,10 +246,10 @@ def create_task(title: str, description: str, project_id: str | None = None,
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, description, status,
-            parent_task_id, assigned_agent, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+            parent_task_id, assigned_agent, dev_agent, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (tid, project_id, title, description, status,
-         parent_task_id, assigned_agent, now, now),
+         parent_task_id, assigned_agent, dev_agent, now, now),
     )
     conn.commit()
     row = conn.execute(
@@ -316,6 +318,12 @@ def list_tasks(project_id: str | None = None) -> list[dict]:
 
 def update_task(task_id: str, **fields) -> dict | None:
     conn = get_conn()
+    if not fields:
+        row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
     fields["updated_at"] = _now()
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
@@ -342,6 +350,54 @@ def get_tasks_by_status(status: str, project_id: str | None = None) -> list[dict
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def claim_task(status: str, working_status: str, agent: str, agent_key: str,
+               respect_assignment: bool = True,
+               project_id: str | None = None) -> dict | None:
+    """
+    Atomically claim the next task in `status` and move it to `working_status`.
+    Returns the claimed task row (with joined project fields) or None.
+    """
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        where = ["status=?"]
+        params: list[str] = [status]
+
+        if project_id:
+            where.append("project_id=?")
+            params.append(project_id)
+
+        if respect_assignment:
+            where.append("(assigned_agent IS NULL OR assigned_agent=?)")
+            params.append(agent_key)
+
+        row = conn.execute(
+            f"SELECT id FROM tasks WHERE {' AND '.join(where)} ORDER BY updated_at ASC LIMIT 1",
+            tuple(params),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+
+        now = _now()
+        cur = conn.execute(
+            "UPDATE tasks SET status=?, assignee=?, updated_at=? WHERE id=? AND status=?",
+            (working_status, agent, now, row["id"], status),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+
+        conn.commit()
+        claimed = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+    finally:
+        conn.close()
 
 
 def add_log(task_id: str, agent: str, message: str) -> dict:

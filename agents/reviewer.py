@@ -1,13 +1,17 @@
 import asyncio
 import os
 
-from base import BaseAgent, get_project_dirs, load_prompt
+from base import BaseAgent, get_task_dev_agent, load_prompt
 
 
 class ReviewerAgent(BaseAgent):
     name = "reviewer"
     poll_statuses = ["in_review"]
     cli_name = os.getenv("REVIEWER_CLI", "claude")
+    working_status = "reviewing"
+
+    def respect_assignment_for(self, status: str) -> bool:
+        return False
 
     async def get_diff(self, worktree_dev) -> str:
         try:
@@ -20,10 +24,10 @@ class ReviewerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
-        proj_root, worktree_dev = get_project_dirs(task)
+        dev_agent = get_task_dev_agent(task)
+        proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=dev_agent)
 
-        await self.update_task(task_id, status="reviewing", assignee=self.name)
-        await self.add_log(task_id, "Reviewer 开始审查")
+        await self.add_log(task_id, f"Reviewer 开始审查（dev_agent={dev_agent}, 分支={branch}）")
 
         diff = await self.get_diff(worktree_dev)
         await self.add_log(task_id, f"获取到 diff ({len(diff)} 字符)")
@@ -59,11 +63,18 @@ class ReviewerAgent(BaseAgent):
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")
             await self.add_log(task_id, f"✅ 审查通过: {comment[:200]}")
-            await self.update_task(task_id, status="approved", review_feedback=comment)
+            await self.update_task(task_id, status="approved", assignee=None, review_feedback=comment)
         else:
             feedback = decision.get("feedback", "请修复问题")
             await self.add_log(task_id, f"↩ 需修改: {feedback[:200]}")
-            await self.update_task(task_id, status="needs_changes", review_feedback=feedback)
+            await self.update_task(
+                task_id,
+                status="needs_changes",
+                assignee=None,
+                assigned_agent=dev_agent,
+                dev_agent=dev_agent,
+                review_feedback=feedback,
+            )
 
 
 if __name__ == "__main__":

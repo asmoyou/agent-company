@@ -386,6 +386,14 @@
         <textarea id="task-desc" rows="4" placeholder="详细描述功能要求、输入输出、边界条件..."
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
       </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">指定执行 Agent（可选）</label>
+        <select id="task-assigned-agent"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+          <option value="">未指定（任何可执行 Agent 可认领）</option>
+        </select>
+        <div class="text-xs text-slate-500 mt-1">仅显示轮询 `todo` 的 Agent 类型</div>
+      </div>
       <div class="flex justify-end gap-3">
         <button type="button" onclick="closeCreateModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建</button>
@@ -581,6 +589,26 @@ function loadAgentTypes(list) {
   list.forEach(at => agentTypes[at.key] = at);
   renderAgentStatusBadges();
   renderTerminals();
+  renderTaskAssigneeOptions();
+}
+
+function parsePollStatuses(at) {
+  try {
+    if (Array.isArray(at.poll_statuses)) return at.poll_statuses;
+    return JSON.parse(at.poll_statuses || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function renderTaskAssigneeOptions() {
+  const sel = document.getElementById("task-assigned-agent");
+  if (!sel) return;
+  const options = Object.values(agentTypes)
+    .filter(at => parsePollStatuses(at).includes("todo"))
+    .map(at => `<option value="${escHtml(at.key)}">${escHtml(at.name || at.key)} (${escHtml(at.key)})</option>`)
+    .join("");
+  sel.innerHTML = `<option value="">未指定（任何可执行 Agent 可认领）</option>${options}`;
 }
 
 function renderAgentStatusBadges() {
@@ -1149,7 +1177,7 @@ async function submitNewProject(e) {
     });
     if (!res.ok) throw new Error(await res.text());
     const proj = await res.json();
-    // Initialize git + worktree
+    // Initialize git repo (agent worktrees are created on demand)
     const setupRes = await fetch(`${API}/projects/${proj.id}/setup`,{method:"POST"});
     const setupData = await setupRes.json();
     console.log("Setup log:", setupData.log);
@@ -1209,6 +1237,7 @@ function openCreateModal() {
   if (!currentProjectId) return;
   const proj = projects[currentProjectId];
   document.getElementById("modal-task-project").textContent = proj?`@ ${proj.name}`:"";
+  renderTaskAssigneeOptions();
   document.getElementById("modal-task").classList.remove("hidden");
 }
 function closeCreateModal() { document.getElementById("modal-task").classList.add("hidden"); }
@@ -1216,15 +1245,22 @@ async function submitTask(e) {
   e.preventDefault();
   const title=document.getElementById("task-title").value.trim();
   const desc =document.getElementById("task-desc").value.trim();
+  const assignedAgent = document.getElementById("task-assigned-agent").value || null;
   if (!title) return;
   try {
     const res=await fetch(`${API}/tasks`,{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({title,description:desc,project_id:currentProjectId}),
+      body:JSON.stringify({
+        title,
+        description:desc,
+        project_id:currentProjectId,
+        assigned_agent: assignedAgent,
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
     document.getElementById("task-title").value="";
     document.getElementById("task-desc").value="";
+    document.getElementById("task-assigned-agent").value="";
     closeCreateModal();
   } catch(err){alert("创建失败: "+err.message);}
 }
@@ -1258,16 +1294,19 @@ function connectWS() {
       agentTypes[msg.agent_type.key] = msg.agent_type;
       renderAgentStatusBadges();
       renderTerminals();
+      renderTaskAssigneeOptions();
       renderAgentTypesList();
     } else if (msg.event==="agent_type_updated") {
       agentTypes[msg.agent_type.key] = msg.agent_type;
       renderAgentStatusBadges();
       renderTerminals();
+      renderTaskAssigneeOptions();
       renderAgentTypesList();
     } else if (msg.event==="agent_type_deleted") {
       delete agentTypes[msg.agent_key];
       renderAgentStatusBadges();
       renderTerminals();
+      renderTaskAssigneeOptions();
       renderAgentTypesList();
     } else if (msg.event==="project_created") {
       projects[msg.project.id]=msg.project;

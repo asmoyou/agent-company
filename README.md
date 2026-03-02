@@ -21,7 +21,9 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
 
 ~/projects/my-app/     ← 用户创建的项目（独立 git 仓库）
 ├── .git/
-├── .worktrees/dev/    ← Developer Agent 工作目录
+├── .worktrees/{key}/  ← 各 Agent 的独立工作目录（例如 developer-a）
+├── branch: main
+├── branch: agent/{key}
 └── （agent 交付的文件）
 ```
 

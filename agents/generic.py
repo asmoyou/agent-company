@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from base import BaseAgent, get_project_dirs
+from base import BaseAgent
 
 
 class GenericAgent(BaseAgent):
@@ -23,12 +23,14 @@ class GenericAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
-        proj_root, worktree_dev = get_project_dirs(task)
+        proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
 
-        await self.update_task(task_id, status=self._working_status, assignee=self.name)
-        await self.add_log(task_id, f"{self._display_name} 接手，工作目录: {worktree_dev}")
+        await self.add_log(
+            task_id, f"{self._display_name} 接手，分支: {branch}，工作目录: {worktree_dev}"
+        )
 
-        is_rework = task.get("review_feedback") and task.get("status") == "needs_changes"
+        prev_status = task.get("_claimed_from_status", task.get("status"))
+        is_rework = task.get("review_feedback") and prev_status == "needs_changes"
         rework_section = (
             f"## 审查反馈（必须全部修复）\n\n{task['review_feedback']}"
             if is_rework else ""
@@ -81,13 +83,28 @@ class GenericAgent(BaseAgent):
                 )
                 commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
                 await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
-                await self.update_task(task_id, status=self.next_status, commit_hash=commit_hash)
+                update_fields = {
+                    "status": self.next_status,
+                    "assignee": None,
+                    "commit_hash": commit_hash,
+                }
+                if self.next_status == "in_review":
+                    update_fields["assigned_agent"] = self.name
+                    update_fields["dev_agent"] = self.name
+                await self.update_task(task_id, **update_fields)
                 return
             except Exception as e:
                 await self.add_log(task_id, f"提交失败: {e}")
 
         await self.add_log(task_id, f"无文件变更，推进至 {self.next_status}")
-        await self.update_task(task_id, status=self.next_status)
+        update_fields = {"status": self.next_status, "assignee": None}
+        if self.next_status == "in_review":
+            update_fields["assigned_agent"] = self.name
+            update_fields["dev_agent"] = self.name
+        await self.update_task(task_id, **update_fields)
+
+    def working_status_for(self, status: str) -> str:
+        return self._working_status or status
 
 
 if __name__ == "__main__":
