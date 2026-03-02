@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多智能体任务看板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    .card { transition: transform 0.15s, box-shadow 0.15s; }
+    .card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.4); }
+    .badge { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em; }
+    #panel { transition: transform 0.25s; }
+    #panel.hidden-panel { transform: translateX(100%); }
+    .ws-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .ws-dot.connected { background: #22c55e; }
+    .ws-dot.disconnected { background: #ef4444; }
+    .log-entry { border-left: 3px solid #334155; padding-left: 8px; margin-bottom: 6px; }
+
+    /* Terminal */
+    .terminal {
+      background: #0a0a0f;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-y: auto;
+      height: 180px;
+      padding: 8px;
+      color: #a3e635;
+    }
+    .terminal .t-line { white-space: pre-wrap; word-break: break-all; }
+    .terminal .t-line.dim { color: #475569; }
+    .terminal .t-line.warn { color: #fbbf24; }
+    .terminal .t-line.err  { color: #f87171; }
+    .agent-busy .agent-dot { animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    #terminal-panel { transition: height 0.25s ease; overflow: hidden; }
+    #terminal-panel.collapsed { height: 0 !important; }
+
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="min-h-screen font-sans flex flex-col" style="padding-bottom: 0;">
+
+<!-- Header -->
+<header class="bg-slate-900 border-b border-slate-700 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
+  <div class="flex items-center gap-3">
+    <div class="w-7 h-7 bg-indigo-500 rounded-lg flex items-center justify-center text-xs font-bold">AI</div>
+    <h1 class="text-base font-semibold text-white">多智能体任务看板</h1>
+    <span class="flex items-center gap-1.5 text-xs text-slate-400">
+      <span class="ws-dot disconnected" id="ws-dot"></span>
+      <span id="ws-label">连接中...</span>
+    </span>
+  </div>
+  <button onclick="openCreateModal()"
+    class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition">
+    + 创建任务
+  </button>
+</header>
+
+<!-- Kanban Board -->
+<main class="flex-1 p-3 overflow-x-auto">
+  <div id="board" class="flex gap-2" style="min-width: 1300px;"></div>
+</main>
+
+<!-- ── Agent Terminals Bar ─────────────────────────────────────────────── -->
+<div class="border-t border-slate-700 bg-slate-900 sticky bottom-0 z-10">
+  <!-- Toggle bar -->
+  <div class="flex items-center gap-4 px-4 py-2 cursor-pointer select-none" onclick="toggleTerminals()">
+    <span class="text-xs font-semibold text-slate-400 uppercase tracking-widest">🖥 Agent 终端</span>
+    <div class="flex items-center gap-3">
+      <span id="agent-badge-developer" class="flex items-center gap-1 text-xs">
+        <span class="agent-dot w-2 h-2 rounded-full bg-slate-600 inline-block"></span>
+        <span class="text-slate-500">developer</span>
+      </span>
+      <span id="agent-badge-reviewer" class="flex items-center gap-1 text-xs">
+        <span class="agent-dot w-2 h-2 rounded-full bg-slate-600 inline-block"></span>
+        <span class="text-slate-500">reviewer</span>
+      </span>
+      <span id="agent-badge-manager" class="flex items-center gap-1 text-xs">
+        <span class="agent-dot w-2 h-2 rounded-full bg-slate-600 inline-block"></span>
+        <span class="text-slate-500">manager</span>
+      </span>
+    </div>
+    <span id="terminal-chevron" class="ml-auto text-slate-500 text-sm">▲</span>
+  </div>
+
+  <!-- Terminal panels -->
+  <div id="terminal-panel" style="height: 220px;">
+    <div class="grid grid-cols-3 gap-2 px-4 pb-3" style="height: 200px;">
+
+      <div>
+        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-2">
+          <span id="dot-developer" class="agent-dot w-2 h-2 rounded-full bg-slate-600"></span>
+          developer
+          <span id="status-developer" class="text-slate-600">idle</span>
+        </div>
+        <div class="terminal" id="term-developer"></div>
+      </div>
+
+      <div>
+        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-2">
+          <span id="dot-reviewer" class="agent-dot w-2 h-2 rounded-full bg-slate-600"></span>
+          reviewer
+          <span id="status-reviewer" class="text-slate-600">idle</span>
+        </div>
+        <div class="terminal" id="term-reviewer"></div>
+      </div>
+
+      <div>
+        <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-2">
+          <span id="dot-manager" class="agent-dot w-2 h-2 rounded-full bg-slate-600"></span>
+          manager
+          <span id="status-manager" class="text-slate-600">idle</span>
+        </div>
+        <div class="terminal" id="term-manager"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Task Detail Side Panel -->
+<div id="panel" class="hidden-panel fixed top-0 right-0 h-full w-96 bg-slate-800 border-l border-slate-700 z-20 flex flex-col shadow-2xl" style="bottom: 0;">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-slate-700">
+    <h2 class="font-semibold text-white text-sm" id="panel-title">任务详情</h2>
+    <button onclick="closePanel()" class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+  </div>
+  <div class="flex-1 overflow-y-auto p-5 space-y-4">
+    <div>
+      <div class="text-xs text-slate-400 mb-1">状态</div>
+      <div id="panel-status"></div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400 mb-1">描述</div>
+      <div id="panel-desc" class="text-sm text-slate-300 whitespace-pre-wrap"></div>
+    </div>
+
+    <!-- File location -->
+    <div id="panel-files-wrap">
+      <div class="text-xs text-slate-400 mb-1">文件位置</div>
+      <div id="panel-files-location" class="text-xs font-mono text-cyan-400 bg-slate-900 rounded px-3 py-2 mb-2 break-all"></div>
+      <div id="panel-files-list" class="text-xs text-slate-400 space-y-0.5"></div>
+    </div>
+
+    <div id="panel-feedback-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-1">审查反馈</div>
+      <div id="panel-feedback" class="text-sm text-amber-300 bg-amber-900/20 rounded p-3 whitespace-pre-wrap"></div>
+    </div>
+    <div id="panel-commit-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-1">提交哈希</div>
+      <div id="panel-commit" class="text-sm font-mono text-green-400"></div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400 mb-2">操作日志</div>
+      <div id="panel-logs" class="space-y-2 text-xs"></div>
+    </div>
+  </div>
+</div>
+<div id="panel-overlay" onclick="closePanel()" class="hidden fixed inset-0 bg-black/40 z-10"></div>
+
+<!-- Create Task Modal -->
+<div id="modal" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+      <h3 class="font-semibold text-white">创建新任务</h3>
+      <button onclick="closeCreateModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <form onsubmit="submitTask(event)" class="p-6 space-y-4">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">任务标题 *</label>
+        <input id="task-title" type="text" required placeholder="例如：写一个 Python 斐波那契函数"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">任务描述</label>
+        <textarea id="task-desc" rows="4" placeholder="详细描述需求、验收标准..."
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button type="button" onclick="closeCreateModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
+        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+const WS_URL = `ws://${location.host}/ws`;
+const API    = `${location.protocol}//${location.host}`;
+
+const COLUMNS = [
+  { status: "todo",               label: "待开发",   dot: "bg-slate-500"  },
+  { status: "in_progress",        label: "开发中",   dot: "bg-blue-500"   },
+  { status: "in_review",          label: "待审查",   dot: "bg-yellow-500" },
+  { status: "reviewing",          label: "审查中",   dot: "bg-orange-500" },
+  { status: "needs_changes",      label: "需修改",   dot: "bg-red-500"    },
+  { status: "approved",           label: "审查通过", dot: "bg-green-500"  },
+  { status: "merging",            label: "合并中",   dot: "bg-purple-500" },
+  { status: "pending_acceptance", label: "待验收",   dot: "bg-teal-500"   },
+];
+
+const STATUS_BADGE = {
+  todo:               "bg-slate-700 text-slate-300",
+  in_progress:        "bg-blue-900 text-blue-300",
+  in_review:          "bg-yellow-900 text-yellow-300",
+  reviewing:          "bg-orange-900 text-orange-300",
+  needs_changes:      "bg-red-900 text-red-300",
+  approved:           "bg-green-900 text-green-300",
+  merging:            "bg-purple-900 text-purple-300",
+  pending_acceptance: "bg-teal-900 text-teal-300",
+};
+const STATUS_LABEL = Object.fromEntries(COLUMNS.map(c => [c.status, c.label]));
+
+// ── State ────────────────────────────────────────────────────────────────────
+let tasks = {};
+let ws = null;
+let currentTaskId = null;
+let terminalsVisible = true;
+
+// ── Board ────────────────────────────────────────────────────────────────────
+function buildBoard() {
+  const board = document.getElementById("board");
+  board.innerHTML = COLUMNS.map(col => `
+    <div class="flex-1 min-w-36">
+      <div class="flex items-center gap-1.5 mb-2 px-1">
+        <span class="w-2 h-2 rounded-full ${col.dot}"></span>
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${col.label}</span>
+        <span id="count-${col.status}" class="ml-auto text-xs text-slate-600 font-mono">0</span>
+      </div>
+      <div id="col-${col.status}" class="space-y-2 rounded-xl bg-slate-800/40 p-2 min-h-24"></div>
+    </div>`).join("");
+}
+
+function renderCard(task) {
+  const b = STATUS_BADGE[task.status] || "bg-slate-700 text-slate-400";
+  const l = STATUS_LABEL[task.status] || task.status;
+  return `
+    <div class="card bg-slate-800 border border-slate-700 rounded-lg p-3 cursor-pointer"
+         onclick="openPanel('${task.id}')">
+      <div class="text-sm font-medium text-white mb-2 leading-snug">${escHtml(task.title)}</div>
+      <div class="flex items-center justify-between gap-2">
+        <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
+        ${task.assignee ? `<span class="text-slate-500 text-xs">${task.assignee}</span>` : ""}
+      </div>
+      ${task.commit_hash ? `<div class="mt-1.5 text-xs font-mono text-green-500">${task.commit_hash}</div>` : ""}
+    </div>`;
+}
+
+function refreshBoard() {
+  COLUMNS.forEach(col => {
+    document.getElementById(`col-${col.status}`).innerHTML = "";
+    document.getElementById(`count-${col.status}`).textContent = "0";
+  });
+  const counts = {};
+  Object.values(tasks).forEach(task => {
+    const col = document.getElementById(`col-${task.status}`);
+    if (col) {
+      col.insertAdjacentHTML("beforeend", renderCard(task));
+      counts[task.status] = (counts[task.status] || 0) + 1;
+    }
+  });
+  Object.entries(counts).forEach(([s, n]) => {
+    const el = document.getElementById(`count-${s}`);
+    if (el) el.textContent = n;
+  });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ── Terminal panel ────────────────────────────────────────────────────────────
+function toggleTerminals() {
+  terminalsVisible = !terminalsVisible;
+  const panel = document.getElementById("terminal-panel");
+  const chevron = document.getElementById("terminal-chevron");
+  if (terminalsVisible) {
+    panel.classList.remove("collapsed");
+    chevron.textContent = "▲";
+  } else {
+    panel.classList.add("collapsed");
+    chevron.textContent = "▼";
+  }
+}
+
+function appendTermLine(agent, line) {
+  const term = document.getElementById(`term-${agent}`);
+  if (!term) return;
+  const div = document.createElement("div");
+  div.className = "t-line" +
+    (line.startsWith("✗") || line.includes("错误") || line.includes("failed") ? " err" :
+     line.startsWith("⚠") || line.includes("TIMEOUT") ? " warn" :
+     line.startsWith("─") || line.startsWith("▶") ? " dim" : "");
+  div.textContent = line;
+  term.appendChild(div);
+  // Auto-scroll if near bottom
+  if (term.scrollHeight - term.scrollTop < term.clientHeight + 60) {
+    term.scrollTop = term.scrollHeight;
+  }
+  // Trim to 200 lines
+  while (term.children.length > 200) term.removeChild(term.firstChild);
+}
+
+function setAgentStatus(agent, status, taskTitle) {
+  const dot = document.getElementById(`dot-${agent}`);
+  const badge = document.getElementById(`agent-badge-${agent}`);
+  const statusEl = document.getElementById(`status-${agent}`);
+
+  if (status === "busy") {
+    dot?.classList.remove("bg-slate-600", "bg-green-500");
+    dot?.classList.add("bg-blue-400");
+    badge?.classList.add("agent-busy");
+    if (statusEl) statusEl.textContent = taskTitle ? `● ${taskTitle.slice(0,30)}` : "● 工作中";
+    statusEl?.classList.remove("text-slate-600", "text-green-500");
+    statusEl?.classList.add("text-blue-400");
+  } else {
+    dot?.classList.remove("bg-blue-400", "bg-slate-600");
+    dot?.classList.add("bg-green-500");
+    badge?.classList.remove("agent-busy");
+    if (statusEl) statusEl.textContent = "idle";
+    statusEl?.classList.remove("text-blue-400", "text-slate-600");
+    statusEl?.classList.add("text-slate-600");
+  }
+}
+
+function initAgentOutputs(agentOutputs) {
+  for (const [agent, data] of Object.entries(agentOutputs || {})) {
+    const term = document.getElementById(`term-${agent}`);
+    if (!term) continue;
+    term.innerHTML = "";
+    for (const line of (data.lines || [])) {
+      appendTermLine(agent, line);
+    }
+    setAgentStatus(agent, data.status?.status || "idle", data.status?.task || "");
+  }
+}
+
+// ── Side panel ────────────────────────────────────────────────────────────────
+async function openPanel(id) {
+  currentTaskId = id;
+  const task = tasks[id];
+  if (!task) return;
+
+  document.getElementById("panel-title").textContent = task.title;
+  document.getElementById("panel-desc").textContent  = task.description || "(无描述)";
+
+  const b = STATUS_BADGE[task.status] || "bg-slate-700 text-slate-400";
+  const l = STATUS_LABEL[task.status] || task.status;
+  document.getElementById("panel-status").innerHTML =
+    `<span class="badge px-2 py-1 rounded-full text-xs ${b}">${l}</span>`;
+
+  const fbWrap = document.getElementById("panel-feedback-wrap");
+  if (task.review_feedback) {
+    fbWrap.classList.remove("hidden");
+    document.getElementById("panel-feedback").textContent = task.review_feedback;
+  } else { fbWrap.classList.add("hidden"); }
+
+  const cmWrap = document.getElementById("panel-commit-wrap");
+  if (task.commit_hash) {
+    cmWrap.classList.remove("hidden");
+    document.getElementById("panel-commit").textContent = task.commit_hash;
+  } else { cmWrap.classList.add("hidden"); }
+
+  // Load files
+  await loadTaskFiles(id, task.status);
+
+  // Load logs
+  try {
+    const res = await fetch(`${API}/tasks/${id}/logs`);
+    renderLogs(await res.json());
+  } catch(e) {
+    document.getElementById("panel-logs").innerHTML = "<div class='text-slate-500'>无法加载日志</div>";
+  }
+
+  document.getElementById("panel").classList.remove("hidden-panel");
+  document.getElementById("panel-overlay").classList.remove("hidden");
+}
+
+async function loadTaskFiles(taskId, status) {
+  const wrap = document.getElementById("panel-files-wrap");
+  const locEl = document.getElementById("panel-files-location");
+  const listEl = document.getElementById("panel-files-list");
+
+  const inDev = ["in_progress","in_review","reviewing","needs_changes","approved","merging"].includes(status);
+  const inMain = status === "pending_acceptance";
+
+  if (status === "todo") {
+    locEl.textContent = "（任务尚未开始）";
+    listEl.innerHTML = "";
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/tasks/${taskId}/files`);
+    const data = await res.json();
+    locEl.textContent = `📁 ${data.location}  [${data.branch}]`;
+    if (data.files && data.files.length) {
+      listEl.innerHTML = data.files.map(f =>
+        `<div class="font-mono text-green-400">  ${escHtml(f)}</div>`
+      ).join("");
+    } else {
+      listEl.innerHTML = "<div class='text-slate-600'>（暂无文件变更记录）</div>";
+    }
+  } catch(e) {
+    locEl.textContent = inMain ? "项目根目录（已合并到 main）" : ".worktrees/dev/（开发中）";
+    listEl.innerHTML = "";
+  }
+}
+
+function renderLogs(logs) {
+  const el = document.getElementById("panel-logs");
+  if (!logs.length) { el.innerHTML = "<div class='text-slate-500'>暂无日志</div>"; return; }
+  el.innerHTML = logs.map(log => `
+    <div class="log-entry">
+      <div class="text-indigo-400 font-medium">${escHtml(log.agent)}</div>
+      <div class="text-slate-300 mt-0.5">${escHtml(log.message)}</div>
+      <div class="text-slate-600 mt-0.5">${log.created_at.replace("T"," ").slice(0,19)}</div>
+    </div>`).join("");
+}
+
+function closePanel() {
+  document.getElementById("panel").classList.add("hidden-panel");
+  document.getElementById("panel-overlay").classList.add("hidden");
+  currentTaskId = null;
+}
+
+// ── Create modal ──────────────────────────────────────────────────────────────
+function openCreateModal()  { document.getElementById("modal").classList.remove("hidden"); }
+function closeCreateModal() { document.getElementById("modal").classList.add("hidden"); }
+
+async function submitTask(e) {
+  e.preventDefault();
+  const title = document.getElementById("task-title").value.trim();
+  const desc  = document.getElementById("task-desc").value.trim();
+  if (!title) return;
+  try {
+    const res = await fetch(`${API}/tasks`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({title, description: desc}),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    document.getElementById("task-title").value = "";
+    document.getElementById("task-desc").value = "";
+    closeCreateModal();
+  } catch(err) { alert("创建失败: " + err.message); }
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById("ws-dot").className = "ws-dot connected";
+    document.getElementById("ws-label").textContent = "已连接";
+    setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 20000);
+  };
+
+  ws.onclose = () => {
+    document.getElementById("ws-dot").className = "ws-dot disconnected";
+    document.getElementById("ws-label").textContent = "已断开 — 重连中...";
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.event === "init") {
+      tasks = {};
+      msg.tasks.forEach(t => tasks[t.id] = t);
+      refreshBoard();
+      initAgentOutputs(msg.agent_outputs);
+      return;
+    }
+
+    if (msg.event === "task_created" || msg.event === "task_updated") {
+      tasks[msg.task.id] = msg.task;
+      refreshBoard();
+      if (currentTaskId === msg.task.id) openPanel(msg.task.id);
+      return;
+    }
+
+    if (msg.event === "log_added" && currentTaskId === msg.log.task_id) {
+      const el = document.getElementById("panel-logs");
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      entry.innerHTML = `
+        <div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
+        <div class="text-slate-300 mt-0.5">${escHtml(msg.log.message)}</div>
+        <div class="text-slate-600 mt-0.5">${msg.log.created_at.replace("T"," ").slice(0,19)}</div>`;
+      el.appendChild(entry);
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    if (msg.event === "agent_output") {
+      appendTermLine(msg.agent, msg.line);
+      return;
+    }
+
+    if (msg.event === "agent_status") {
+      setAgentStatus(msg.agent, msg.status, msg.task);
+      return;
+    }
+  };
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+buildBoard();
+connectWS();
+</script>
+</body>
+</html>
