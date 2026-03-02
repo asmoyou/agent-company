@@ -31,6 +31,16 @@
     ::-webkit-scrollbar-track{background:#1e293b;}
     ::-webkit-scrollbar-thumb{background:#475569;border-radius:3px;}
     .archived-card{opacity:0.45;}
+    /* File browser */
+    #file-panel{transition:transform 0.25s ease;transform:translateX(-100%);}
+    #file-panel.open{transform:translateX(0);}
+    #file-overlay{transition:opacity 0.2s;opacity:0;pointer-events:none;}
+    #file-overlay.open{opacity:1;pointer-events:auto;}
+    .fb-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;cursor:pointer;transition:background 0.12s;}
+    .fb-item:hover{background:#1e293b;}
+    .fb-item .fb-actions{opacity:0;display:flex;gap:4px;margin-left:auto;}
+    .fb-item:hover .fb-actions{opacity:1;}
+    .fb-drop-active{border:2px dashed #6366f1!important;background:rgba(99,102,241,0.08)!important;}
   </style>
 </head>
 <body class="min-h-screen font-sans flex flex-col">
@@ -63,6 +73,12 @@
   </div>
 
   <div class="ml-auto flex items-center gap-2">
+    <!-- Project path indicator -->
+    <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs">
+      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-400 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:280px" id="project-path-text" title="点击打开文件浏览器"></button>
+      <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制项目路径">📋</button>
+      <span class="text-slate-700 mx-0.5">|</span>
+    </div>
     <!-- Archive toggle -->
     <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
       <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
@@ -140,6 +156,39 @@
         <div class="terminal" id="term-manager"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- File Browser Drawer -->
+<div id="file-overlay" onclick="closeFileBrowser()" class="fixed inset-0 bg-black/40 z-10"></div>
+<div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl" style="width:380px;">
+  <!-- Header -->
+  <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700 shrink-0">
+    <span class="font-semibold text-white text-sm">📁 文件浏览器</span>
+    <div class="flex items-center gap-1.5">
+      <button onclick="fbCreateFolder()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="新建文件夹">+📁</button>
+      <label class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition cursor-pointer" title="上传文件">
+        ↑ 上传
+        <input type="file" multiple class="hidden" onchange="fbHandleUpload(event)">
+      </label>
+      <button onclick="closeFileBrowser()" class="text-slate-400 hover:text-white text-xl ml-1">&times;</button>
+    </div>
+  </div>
+  <!-- Breadcrumb -->
+  <div class="px-4 py-2 border-b border-slate-700/50 shrink-0 flex items-center gap-1 text-xs text-slate-400 overflow-x-auto" id="fb-breadcrumb" style="white-space:nowrap;">
+    <span class="cursor-pointer hover:text-white" onclick="fbNavigate('')">🏠 root</span>
+  </div>
+  <!-- File list (drop zone) -->
+  <div id="fb-list" class="flex-1 overflow-y-auto p-2"
+    ondragover="event.preventDefault();this.classList.add('fb-drop-active')"
+    ondragleave="this.classList.remove('fb-drop-active')"
+    ondrop="fbDrop(event)">
+    <div class="text-sm text-slate-500 text-center py-8">选择项目后点击 📁 打开</div>
+  </div>
+  <!-- Status bar -->
+  <div class="px-4 py-2 border-t border-slate-700 text-xs text-slate-500 shrink-0 flex justify-between" id="fb-statusbar">
+    <span id="fb-stats"></span>
+    <span id="fb-current-path" class="font-mono text-slate-600">/</span>
   </div>
 </div>
 
@@ -475,6 +524,7 @@ function updateProjectUI() {
   if (!hasProject && Object.keys(projects).length === 0) {
     document.getElementById("no-project-hint").classList.remove("hidden");
   }
+  updateProjectPath();
 }
 
 // ── Board ─────────────────────────────────────────────────────────────────────
@@ -886,8 +936,193 @@ function connectWS() {
       appendTermLine(msg.agent,msg.line);
     } else if (msg.event==="agent_status") {
       setAgentStatus(msg.agent,msg.status,msg.task);
+    } else if (msg.event==="files_changed") {
+      // Auto-refresh file browser if open and viewing the same project/path
+      if (msg.project_id === currentProjectId && document.getElementById("file-panel").classList.contains("open")) {
+        fbLoadDirectory(fbCurrentPath);
+      }
     }
   };
+}
+
+// ── File Browser ──────────────────────────────────────────────────────────────
+let fbCurrentPath = "";
+
+function openFileBrowser() {
+  if (!currentProjectId) return;
+  document.getElementById("file-panel").classList.add("open");
+  document.getElementById("file-overlay").classList.add("open");
+  fbNavigate("");
+}
+
+function closeFileBrowser() {
+  document.getElementById("file-panel").classList.remove("open");
+  document.getElementById("file-overlay").classList.remove("open");
+}
+
+async function fbLoadDirectory(path) {
+  if (!currentProjectId) return;
+  const listEl = document.getElementById("fb-list");
+  listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">加载中...</div>';
+  try {
+    const res = await fetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const items = await res.json();
+
+    if (items.length === 0) {
+      listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">空目录</div>';
+    } else {
+      let dirs = 0, files = 0;
+      listEl.innerHTML = items.map(item => {
+        if (item.is_dir) dirs++; else files++;
+        const icon = item.is_dir ? "📁" : fbFileIcon(item.name);
+        const sizeStr = item.is_dir ? "" : fbFormatSize(item.size);
+        return `<div class="fb-item" onclick="${item.is_dir ? `fbNavigate('${escAttr(item.path)}')` : ''}">
+          <span>${icon}</span>
+          <span class="text-sm text-slate-200 truncate" title="${escAttr(item.name)}">${escHtml(item.name)}</span>
+          <span class="text-xs text-slate-600 ml-auto mr-1">${sizeStr}</span>
+          <div class="fb-actions">
+            ${!item.is_dir ? `<button onclick="event.stopPropagation();fbDownload('${escAttr(item.path)}')" class="text-xs text-slate-400 hover:text-blue-400" title="下载">⬇</button>` : ''}
+            <button onclick="event.stopPropagation();fbDelete('${escAttr(item.path)}','${item.is_dir}')" class="text-xs text-slate-400 hover:text-red-400" title="删除">🗑</button>
+          </div>
+        </div>`;
+      }).join("");
+      document.getElementById("fb-stats").textContent = `${dirs} 个文件夹, ${files} 个文件`;
+    }
+    document.getElementById("fb-current-path").textContent = "/" + (path || "");
+  } catch (err) {
+    listEl.innerHTML = `<div class="text-sm text-red-400 text-center py-8">加载失败: ${escHtml(err.message)}</div>`;
+  }
+}
+
+function fbNavigate(path) {
+  fbCurrentPath = path;
+  fbLoadDirectory(path);
+  // Update breadcrumb
+  const bc = document.getElementById("fb-breadcrumb");
+  const parts = path ? path.split("/") : [];
+  let html = '<span class="cursor-pointer hover:text-white" onclick="fbNavigate(\'\')">🏠 root</span>';
+  let accumulated = "";
+  parts.forEach(part => {
+    accumulated += (accumulated ? "/" : "") + part;
+    const p = accumulated;
+    html += ` <span class="text-slate-600">/</span> <span class="cursor-pointer hover:text-white" onclick="fbNavigate('${escAttr(p)}')">${escHtml(part)}</span>`;
+  });
+  bc.innerHTML = html;
+}
+
+function fbDownload(path) {
+  if (!currentProjectId) return;
+  const a = document.createElement("a");
+  a.href = `${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(path)}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function fbHandleUpload(event) {
+  const fileList = event.target.files;
+  if (!fileList || !fileList.length || !currentProjectId) return;
+  const fd = new FormData();
+  for (const f of fileList) fd.append("files", f);
+  try {
+    const res = await fetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
+      method: "POST", body: fd
+    });
+    if (!res.ok) throw new Error(await res.text());
+    fbLoadDirectory(fbCurrentPath);
+  } catch (err) { alert("上传失败: " + err.message); }
+  event.target.value = "";
+}
+
+function fbDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove("fb-drop-active");
+  const files = event.dataTransfer.files;
+  if (!files || !files.length || !currentProjectId) return;
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  fetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
+    method: "POST", body: fd
+  }).then(res => {
+    if (!res.ok) throw new Error("Upload failed");
+    fbLoadDirectory(fbCurrentPath);
+  }).catch(err => alert("上传失败: " + err.message));
+}
+
+async function fbDelete(path, isDir) {
+  const name = path.split("/").pop();
+  const typeStr = isDir === "true" ? "文件夹" : "文件";
+  if (!confirm(`确定删除${typeStr} "${name}" 吗？`)) return;
+  try {
+    const res = await fetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`, {method:"DELETE"});
+    if (!res.ok) throw new Error(await res.text());
+    fbLoadDirectory(fbCurrentPath);
+  } catch (err) { alert("删除失败: " + err.message); }
+}
+
+async function fbCreateFolder() {
+  const name = prompt("输入文件夹名称:");
+  if (!name || !currentProjectId) return;
+  const newPath = fbCurrentPath ? fbCurrentPath + "/" + name : name;
+  try {
+    const res = await fetch(`${API}/projects/${currentProjectId}/files/mkdir`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({path: newPath})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    fbLoadDirectory(fbCurrentPath);
+  } catch (err) { alert("创建失败: " + err.message); }
+}
+
+function fbFileIcon(name) {
+  const ext = name.split(".").pop().toLowerCase();
+  const map = {
+    py:"🐍", js:"📜", ts:"📜", jsx:"⚛", tsx:"⚛",
+    html:"🌐", css:"🎨", json:"📋", md:"📝", txt:"📄",
+    yml:"⚙", yaml:"⚙", toml:"⚙", ini:"⚙", cfg:"⚙",
+    sh:"🔧", bash:"🔧", zsh:"🔧",
+    png:"🖼", jpg:"🖼", jpeg:"🖼", gif:"🖼", svg:"🖼", webp:"🖼",
+    zip:"📦", tar:"📦", gz:"📦",
+    pdf:"📕", doc:"📘", docx:"📘",
+  };
+  return map[ext] || "📄";
+}
+
+function fbFormatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + " KB";
+  return (bytes/1024/1024).toFixed(1) + " MB";
+}
+
+function escAttr(s) {
+  return String(s||"").replace(/'/g, "\\'").replace(/"/g, "&quot;");
+}
+
+// ── Project Path Indicator ───────────────────────────────────────────────────
+function updateProjectPath() {
+  const indicator = document.getElementById("project-path-indicator");
+  const textEl = document.getElementById("project-path-text");
+  const proj = projects[currentProjectId];
+  if (proj) {
+    indicator.classList.remove("hidden");
+    textEl.textContent = "📁 " + proj.path;
+    textEl.title = proj.path + " — 点击打开文件浏览器";
+  } else {
+    indicator.classList.add("hidden");
+  }
+}
+
+function copyProjectPath() {
+  const proj = projects[currentProjectId];
+  if (!proj) return;
+  navigator.clipboard.writeText(proj.path).then(() => {
+    const btn = document.querySelector('[onclick="copyProjectPath()"]');
+    const orig = btn.textContent;
+    btn.textContent = "✓";
+    setTimeout(() => btn.textContent = orig, 1200);
+  }).catch(() => alert("复制失败"));
 }
 
 buildBoard();

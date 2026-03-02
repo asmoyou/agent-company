@@ -1,11 +1,14 @@
 import asyncio
+import mimetypes
+import re
+import shutil
 import subprocess
-from collections import deque
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,17 +20,13 @@ import db
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
-# ── In-memory agent state ─────────────────────────────────────────────────────
-AGENT_OUTPUT: dict[str, deque] = {
-    "developer": deque(maxlen=200),
-    "reviewer":  deque(maxlen=200),
-    "manager":   deque(maxlen=200),
-}
-AGENT_STATUS: dict[str, dict] = {
-    "developer": {"status": "idle", "task": ""},
-    "reviewer":  {"status": "idle", "task": ""},
-    "manager":   {"status": "idle", "task": ""},
-}
+# ── In-memory agent state (auto-expands for custom agents) ────────────────────
+AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=200))
+AGENT_STATUS: dict = defaultdict(lambda: {"status": "idle", "task": ""})
+# Pre-populate built-ins so they appear on init
+for _k in ("developer", "reviewer", "manager"):
+    AGENT_OUTPUT[_k]
+    AGENT_STATUS[_k]
 
 
 # ── WebSocket manager ─────────────────────────────────────────────────────────
@@ -61,7 +60,11 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    db.reset_stuck_tasks()   # Reset tasks stuck in transient states from last crash
+    db.reset_stuck_tasks()
+    # Pre-populate AGENT_OUTPUT/STATUS for all known agent types
+    for at in db.list_agent_types():
+        AGENT_OUTPUT[at["key"]]
+        AGENT_STATUS[at["key"]]
     yield
 
 
@@ -100,6 +103,32 @@ class AgentOutput(BaseModel):
 class AgentStatusUpdate(BaseModel):
     status: str
     task: str = ""
+
+class AgentTypeCreate(BaseModel):
+    key: str
+    name: str
+    description: str = ""
+    prompt: str = ""
+    poll_statuses: list[str] = ["todo"]
+    next_status: str = "in_review"
+    working_status: str = "in_progress"
+    cli: str = "claude"
+
+class AgentTypeUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    prompt: str | None = None
+    poll_statuses: list[str] | None = None
+    next_status: str | None = None
+    working_status: str | None = None
+    cli: str | None = None
+
+class GeneratePromptRequest(BaseModel):
+    description: str
+    cli: str = "claude"
+
+class MkdirRequest(BaseModel):
+    path: str
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
@@ -360,6 +389,197 @@ async def delete_project_prompt(project_id: str, agent_name: str):
     override = Path(p["path"]) / ".opc" / f"{agent_name}.md"
     if override.exists():
         override.unlink()
+    return {"ok": True}
+
+
+# ── File management helpers ──────────────────────────────────────────────────
+def safe_resolve(project_path: str, relative: str) -> Path:
+    """Resolve relative path within project root, preventing path traversal."""
+    root = Path(project_path).resolve()
+    target = (root / relative).resolve()
+    if not (target == root or str(target).startswith(str(root) + "/")):
+        raise HTTPException(403, "Path traversal not allowed")
+    return target
+
+
+# ── File management endpoints ────────────────────────────────────────────────
+@app.get("/projects/{project_id}/files")
+async def list_project_files(project_id: str, path: str = ""):
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    target = safe_resolve(p["path"], path)
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(404, "Directory not found")
+
+    items = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            if entry.name.startswith("."):
+                continue
+            stat = entry.stat()
+            items.append({
+                "name": entry.name,
+                "path": str(entry.relative_to(Path(p["path"]).resolve())),
+                "is_dir": entry.is_dir(),
+                "size": stat.st_size if not entry.is_dir() else 0,
+                "modified": stat.st_mtime,
+            })
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+    return items
+
+
+@app.get("/projects/{project_id}/files/download")
+async def download_project_file(project_id: str, path: str):
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    target = safe_resolve(p["path"], path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "File not found")
+    mime, _ = mimetypes.guess_type(str(target))
+    return FileResponse(str(target), media_type=mime or "application/octet-stream", filename=target.name)
+
+
+@app.post("/projects/{project_id}/files/upload")
+async def upload_project_files(project_id: str, files: list[UploadFile] = FastAPIFile(...), path: str = ""):
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    target_dir = safe_resolve(p["path"], path)
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(404, "Directory not found")
+
+    uploaded = []
+    for f in files:
+        # Sanitize filename — strip path components
+        safe_name = Path(f.filename).name if f.filename else "untitled"
+        dest = target_dir / safe_name
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(f.file, out)
+        uploaded.append(safe_name)
+
+    await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": path})
+    return {"uploaded": uploaded}
+
+
+@app.delete("/projects/{project_id}/files")
+async def delete_project_file(project_id: str, path: str):
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    if not path:
+        raise HTTPException(400, "Cannot delete project root")
+    target = safe_resolve(p["path"], path)
+    if not target.exists():
+        raise HTTPException(404, "File not found")
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    parent_rel = str(Path(path).parent) if str(Path(path).parent) != "." else ""
+    await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": parent_rel})
+    return {"ok": True}
+
+
+@app.post("/projects/{project_id}/files/mkdir")
+async def mkdir_project(project_id: str, body: MkdirRequest):
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(404, "Project not found")
+    target = safe_resolve(p["path"], body.path)
+    if target.exists():
+        raise HTTPException(400, "Path already exists")
+    target.mkdir(parents=True, exist_ok=True)
+    parent_rel = str(Path(body.path).parent) if str(Path(body.path).parent) != "." else ""
+    await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": parent_rel})
+    return {"ok": True}
+
+
+# ── Agent Types ────────────────────────────────────────────────────────────────
+
+@app.get("/agent-types")
+async def list_agent_types():
+    return db.list_agent_types()
+
+# NOTE: specific routes must come before parametric /{agent_key}
+@app.post("/agent-types/generate-prompt")
+async def generate_agent_prompt(body: GeneratePromptRequest):
+    """Call the local CLI to generate a prompt template for a new agent."""
+    meta_prompt = (
+        "你是一个专业的AI Agent提示词工程师。"
+        f"请为以下用途的AI Agent编写一个详细的提示词模板：\n\n{body.description}\n\n"
+        "要求：\n"
+        "1. 提示词清晰、具体、可操作\n"
+        "2. 按需使用以下占位符变量（用花括号包裹）：\n"
+        "   {task_title} - 任务标题\n"
+        "   {task_description} - 任务的详细需求描述\n"
+        "   {rework_section} - 审查反馈（返工时会有内容，初次为空）\n"
+        "3. 只输出提示词内容本身，不要任何前缀说明或解释"
+    )
+    cli = body.cli if body.cli in ("claude", "codex") else "claude"
+    cmd = ["claude", "--dangerously-skip-permissions", "-p", meta_prompt] if cli == "claude" \
+          else ["codex", "--full-auto", meta_prompt]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+        generated = stdout.decode(errors="replace").strip()
+        if not generated:
+            raise HTTPException(500, "生成结果为空")
+        return {"prompt": generated}
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, "生成超时（90s）")
+    except FileNotFoundError:
+        raise HTTPException(500, f"CLI 工具 '{cli}' 未找到，请先安装")
+
+@app.post("/agent-types", status_code=201)
+async def create_agent_type(body: AgentTypeCreate):
+    if not re.match(r'^[a-z][a-z0-9_-]*$', body.key):
+        raise HTTPException(400, "key 只能包含小写字母、数字、连字符和下划线，且以字母开头")
+    if db.get_agent_type(body.key):
+        raise HTTPException(400, f"key '{body.key}' 已存在")
+    at = db.create_agent_type(
+        body.key, body.name, body.description, body.prompt,
+        body.poll_statuses, body.next_status, body.working_status, body.cli,
+    )
+    AGENT_OUTPUT[body.key]  # pre-create entry
+    AGENT_STATUS[body.key]
+    await manager.broadcast({"event": "agent_type_created", "agent_type": at})
+    return at
+
+@app.get("/agent-types/{agent_key}")
+async def get_agent_type(agent_key: str):
+    at = db.get_agent_type(agent_key)
+    if not at:
+        raise HTTPException(404, "Not found")
+    return at
+
+@app.put("/agent-types/{agent_key}")
+async def update_agent_type(agent_key: str, body: AgentTypeUpdate):
+    if not db.get_agent_type(agent_key):
+        raise HTTPException(404, "Not found")
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        return db.get_agent_type(agent_key)
+    updated = db.update_agent_type(agent_key, **fields)
+    await manager.broadcast({"event": "agent_type_updated", "agent_type": updated})
+    return updated
+
+@app.delete("/agent-types/{agent_key}")
+async def delete_agent_type(agent_key: str):
+    at = db.get_agent_type(agent_key)
+    if not at:
+        raise HTTPException(404, "Not found")
+    if at["is_builtin"]:
+        raise HTTPException(403, "内置 Agent 不可删除")
+    db.delete_agent_type(agent_key)
+    await manager.broadcast({"event": "agent_type_deleted", "agent_key": agent_key})
     return {"ok": True}
 
 
