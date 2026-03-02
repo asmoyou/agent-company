@@ -1,10 +1,7 @@
 import asyncio
 import os
-from pathlib import Path
 
-from base import BaseAgent, PROJECT_ROOT
-
-WORKTREE_DEV = PROJECT_ROOT / ".worktrees" / "dev"
+from base import BaseAgent, get_project_dirs
 
 
 class DeveloperAgent(BaseAgent):
@@ -12,69 +9,79 @@ class DeveloperAgent(BaseAgent):
     poll_statuses = ["todo", "needs_changes"]
     cli_name = os.getenv("DEVELOPER_CLI", "claude")
 
-    @property
-    def worktree(self) -> Path:
-        return WORKTREE_DEV
-
     async def process_task(self, task: dict):
         task_id = task["id"]
+        _, worktree_dev = get_project_dirs(task)
 
-        # Claim the task
         await self.update_task(task_id, status="in_progress", assignee=self.name)
-        await self.add_log(task_id, f"Developer picked up task (was: {task['status']})")
+        await self.add_log(task_id, f"Developer 接手（来自: {task['status']}），工作目录: {worktree_dev}")
 
-        # Build prompt
-        prompt = f"""You are implementing a software task. Work in the current directory.
+        is_rework = task["status"] == "needs_changes" and task.get("review_feedback")
 
-Task: {task['title']}
+        prompt_lines = [
+            "你是一名专业工程师，需要完成以下任务。",
+            f"任务标题：{task['title']}",
+            f"任务描述：{task['description']}",
+            "",
+        ]
+        if is_rework:
+            prompt_lines += [
+                "【审查反馈，必须全部修复】",
+                task["review_feedback"],
+                "",
+            ]
+            await self.add_log(task_id, "根据审查意见返工")
 
-Description:
-{task['description']}
-"""
+        prompt_lines += [
+            "【重要要求】",
+            "所有内容必须写入文件保存到磁盘，不要只在终端输出文字。",
+            "- 代码任务 → 创建对应语言的源文件（.py / .js / .ts 等）",
+            "- 文档/方案任务 → 创建 .md 文件，把完整内容写入",
+            "- 至少创建一个文件，否则任务无法验收",
+            "现在开始，把所有内容写入文件。",
+        ]
 
-        if task["status"] == "needs_changes" and task.get("review_feedback"):
-            prompt += f"""
-Previous reviewer feedback (address ALL points):
-{task['review_feedback']}
+        returncode, output = await self.run_cli(
+            "\n".join(prompt_lines), cwd=worktree_dev, task_id=task_id
+        )
 
-Please fix the issues described above.
-"""
-            await self.add_log(task_id, "Re-implementing based on reviewer feedback")
-        else:
-            await self.add_log(task_id, "Starting implementation")
+        if output.strip():
+            await self.add_log(task_id, f"CLI 输出摘要:\n{output[:400]}")
 
-        prompt += "\nImplement this completely. Write all necessary files."
+        # Stage all changes
+        await self.git("add", "-A", cwd=worktree_dev)
+        diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
 
-        # Run the CLI tool in the dev worktree
-        returncode, output = await self.run_cli(prompt, cwd=self.worktree)
+        # Fallback: if CLI wrote nothing, save stdout as .md
+        if not diff.strip():
+            if output.strip() and len(output) > 50:
+                safe = "".join(
+                    c if c.isalnum() or c in "-_ " else "_"
+                    for c in task["title"][:40]
+                ).strip().replace(" ", "_")
+                fallback = worktree_dev / f"{safe or 'deliverable'}.md"
+                fallback.write_text(f"# {task['title']}\n\n{output}\n", encoding="utf-8")
+                await self.add_log(task_id, f"CLI 未创建文件，已将输出保存为 {fallback.name}")
+                await self.git("add", "-A", cwd=worktree_dev)
+                diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
 
-        # Log a summary of the output (first 500 chars)
-        summary = output[:500].strip()
-        if summary:
-            await self.add_log(task_id, f"CLI output: {summary}{'...' if len(output) > 500 else ''}")
+        if not diff.strip():
+            await self.add_log(task_id, "未检测到文件变更，仍提交审查")
+            await self.update_task(task_id, status="in_review")
+            return
 
-        if returncode != 0 and returncode != -1:
-            # Non-zero but not timeout — CLI may still have done useful work
-            await self.add_log(task_id, f"CLI exited with code {returncode}, checking for changes...")
-
-        # Commit whatever was produced
         try:
-            await self.git("add", "-A", cwd=self.worktree)
-            # Check if there's anything to commit
-            diff = await self.git("diff", "--cached", "--stat", cwd=self.worktree)
-            if not diff.strip():
-                await self.add_log(task_id, "No file changes detected — submitting for review anyway")
-                await self.update_task(task_id, status="in_review")
-                return
-
-            commit_msg = f"feat: {task['title'][:72]}\n\nTask ID: {task_id}"
-            await self.git("commit", "-m", commit_msg, cwd=self.worktree)
-            commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=self.worktree)
-            await self.add_log(task_id, f"Committed: {commit_hash}")
+            await self.git(
+                "-c", "user.email=agent@opc-demo.local",
+                "-c", "user.name=OPC Agent",
+                "commit", "-m", f"feat: {task['title'][:72]}\n\nTask ID: {task_id}",
+                cwd=worktree_dev,
+            )
+            commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
+            await self.add_log(task_id, f"已提交: {commit_hash}\n变更:\n{diff.strip()}")
             await self.update_task(task_id, status="in_review", commit_hash=commit_hash)
-
         except Exception as e:
-            await self.add_log(task_id, f"Git error: {e}")
+            await self.add_log(task_id, f"提交失败: {e}")
             await self.update_task(task_id, status="todo")
 
 
