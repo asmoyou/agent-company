@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 from pathlib import Path
 
 from base import BaseAgent, get_project_dirs, parse_status_list
@@ -33,6 +32,37 @@ FORCE_DECOMPOSE_PROMPT = (
     "]"
 )
 
+LEADER_SUBTASK_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "agent": {"type": "string"},
+    },
+    "required": ["title"],
+}
+
+LEADER_TRIAGE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": ["simple", "decompose"]},
+        "reason": {"type": "string"},
+        "subtasks": {
+            "type": "array",
+            "items": LEADER_SUBTASK_SCHEMA,
+        },
+    },
+    "required": ["action"],
+}
+
+LEADER_FORCE_DECOMPOSE_SCHEMA = {
+    "type": "array",
+    "minItems": 1,
+    "items": LEADER_SUBTASK_SCHEMA,
+}
+
 
 class LeaderAgent(BaseAgent):
     name = "leader"
@@ -64,63 +94,95 @@ class LeaderAgent(BaseAgent):
         except Exception:
             return "- developer: 开发者"
 
-    def _parse_triage(self, output: str) -> dict | None:
-        """Parse {"action": "simple"|"decompose", ...} from CLI output."""
-        for m in re.findall(r"```(?:json)?\s*(\{[\s\S]+?\})\s*```", output):
-            try:
-                d = json.loads(m)
-                if "action" in d:
-                    return d
-            except json.JSONDecodeError:
-                pass
-        for m in re.findall(r"\{[^{}]*\"action\"[^{}]*\}", output, re.DOTALL):
-            try:
-                d = json.loads(m)
-                if "action" in d:
-                    return d
-            except json.JSONDecodeError:
-                pass
-        # Bigger nested object with subtasks
+    def _load_json_file(self, path: Path):
+        if not path.exists():
+            return None
         try:
-            start = output.rfind('{"action"')
-            if start == -1:
-                start = output.rfind("{'action'")
-            if start != -1:
-                chunk = output[start:]
-                # find balanced brace
-                depth, end = 0, -1
-                for i, c in enumerate(chunk):
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            end = i + 1
-                            break
-                if end > 0:
-                    d = json.loads(chunk[:end])
-                    if "action" in d:
-                        return d
+            raw = path.read_text(encoding="utf-8", errors="replace").strip()
+            if not raw:
+                return None
+            return json.loads(raw)
         except Exception:
-            pass
+            return None
+
+    def _normalize_subtasks(self, raw_subtasks) -> list[dict]:
+        if not isinstance(raw_subtasks, list):
+            return []
+        out = []
+        for i, st in enumerate(raw_subtasks, 1):
+            if not isinstance(st, dict):
+                continue
+            title = str(st.get("title") or "").strip()
+            if not title:
+                continue
+            desc = str(st.get("description") or "").strip()
+            agent = str(st.get("agent") or "developer").strip() or "developer"
+            out.append(
+                {
+                    "title": title[:200],
+                    "description": desc[:3000],
+                    "agent": agent,
+                }
+            )
+        return out
+
+    def _normalize_triage_decision(self, raw_decision) -> dict | None:
+        if not isinstance(raw_decision, dict):
+            return None
+        action = str(raw_decision.get("action") or "").strip().lower()
+        if action == "simple":
+            reason = str(raw_decision.get("reason") or "").strip() or "判定为简单任务"
+            return {"action": "simple", "reason": reason[:500]}
+        if action == "decompose":
+            subtasks = self._normalize_subtasks(raw_decision.get("subtasks"))
+            if not subtasks:
+                return None
+            reason = str(raw_decision.get("reason") or "").strip()
+            out = {"action": "decompose", "subtasks": subtasks}
+            if reason:
+                out["reason"] = reason[:500]
+            return out
         return None
 
-    def _parse_subtasks_array(self, output: str) -> list[dict]:
-        for m in re.findall(r"```(?:json)?\s*(\[[\s\S]+?\])\s*```", output):
-            try:
-                d = json.loads(m)
-                if isinstance(d, list) and d:
-                    return d
-            except json.JSONDecodeError:
-                pass
-        for m in re.findall(r"\[\s*\{[\s\S]*?\}\s*\]", output):
-            try:
-                d = json.loads(m)
-                if isinstance(d, list) and d:
-                    return d
-            except json.JSONDecodeError:
-                pass
-        return []
+    async def _handle_structured_output_error(
+        self,
+        task: dict,
+        prev_status: str,
+        stage_code: str,
+        reason: str,
+        output: str = "",
+    ):
+        task_id = task["id"]
+        msg = f"[系统错误] Leader 结构化结果无效：{reason}"
+        await self.add_log(task_id, msg)
+        if output.strip():
+            await self.add_log(task_id, f"输出摘要:\n{output[:1000]}")
+        await self.add_alert(
+            summary="Leader 结构化结果无效，任务阻塞",
+            task_id=task_id,
+            message=msg,
+            kind="error",
+            code=stage_code,
+            stage="leader_failed",
+        )
+        await self.add_handoff(
+            task_id,
+            stage="leader_failed",
+            to_agent=self.name,
+            status_from=prev_status,
+            status_to="blocked",
+            title="Leader 结构化结果无效",
+            summary=msg,
+            conclusion="结构化结果无效，任务阻塞等待修复",
+            payload={"reason": reason, "stage_code": stage_code},
+        )
+        await self.update_task(
+            task_id,
+            status="blocked",
+            assignee=None,
+            assigned_agent=self.name,
+            review_feedback=msg,
+        )
 
     async def _create_subtasks(self, task: dict, subtasks: list[dict]) -> int:
         created = 0
@@ -202,8 +264,29 @@ class LeaderAgent(BaseAgent):
 
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
+        decision_dir = run_dir / ".opc" / "decisions"
+        decision_dir.mkdir(parents=True, exist_ok=True)
+        decision_file = decision_dir / f"{task_id}.leader-triage.json"
+        try:
+            decision_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-        returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        prompt += (
+            "\n\n## 结构化交付（必须）\n"
+            f"请把最终评估写入 JSON 文件：{decision_file}\n"
+            "仅允许以下二选一格式：\n"
+            '{"action":"simple","reason":"..."}\n'
+            '{"action":"decompose","subtasks":[{"title":"...","description":"...","agent":"developer"}]}\n'
+            "同时在回复最后一行输出同一个 JSON 对象。"
+        )
+
+        returncode, output = await self.run_cli(
+            prompt,
+            cwd=run_dir,
+            task_id=task_id,
+            output_schema=LEADER_TRIAGE_SCHEMA,
+        )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
                 return
@@ -237,7 +320,27 @@ class LeaderAgent(BaseAgent):
         if await self.stop_if_task_cancelled(task_id, "评估输出后"):
             return
 
-        decision = self._parse_triage(output)
+        raw_decision = self._load_json_file(decision_file)
+        if raw_decision is None:
+            await self._handle_structured_output_error(
+                task,
+                prev_status=task.get("_claimed_from_status", task.get("status", "triage")),
+                stage_code="leader_triage_invalid_output",
+                reason=f"未读取到有效结构化结果文件：{decision_file}",
+                output=output,
+            )
+            return
+        decision = self._normalize_triage_decision(raw_decision)
+        if decision is None:
+            await self._handle_structured_output_error(
+                task,
+                prev_status=task.get("_claimed_from_status", task.get("status", "triage")),
+                stage_code="leader_triage_invalid_schema",
+                reason=f"结构化结果字段不完整：{decision_file}",
+                output=output,
+            )
+            return
+        await self.add_log(task_id, f"已读取结构化评估结果文件: {decision_file}")
 
         if decision and decision.get("action") == "decompose":
             subtasks = decision.get("subtasks") or []
@@ -253,15 +356,16 @@ class LeaderAgent(BaseAgent):
                     title="任务分解完成",
                     summary=f"已分解为 {n} 个子任务并分配",
                     conclusion=f"复杂任务，已拆分为 {n} 个子任务",
-                    payload={"subtask_count": n},
+                    payload={"subtask_count": n, "decision": "decompose"},
+                    artifact_path=str(decision_file),
                 )
                 await self.update_task(task_id, status="decomposed", assignee=None)
                 await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
                 self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
                 return
 
-        # Simple task (or parse failed) — push to todo
-        reason = decision.get("reason", "判定为简单任务") if decision else "无法解析评估结果，按简单任务处理"
+        # Simple task — push to todo
+        reason = decision.get("reason", "判定为简单任务")
         await self.add_log(task_id, f"判断为简单任务：{reason}")
         await self.add_handoff(
             task_id,
@@ -273,6 +377,7 @@ class LeaderAgent(BaseAgent):
             summary=reason[:300],
             conclusion=reason[:300] or "判定为简单任务，转入开发",
             payload={"action": "simple"},
+            artifact_path=str(decision_file),
         )
         await self.update_task(task_id, status="todo", assignee=None)
         self._post_output_bg(f"✓ 简单任务，推进至 todo")
@@ -294,8 +399,27 @@ class LeaderAgent(BaseAgent):
 
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
+        decision_dir = run_dir / ".opc" / "decisions"
+        decision_dir.mkdir(parents=True, exist_ok=True)
+        decision_file = decision_dir / f"{task_id}.leader-force-decompose.json"
+        try:
+            decision_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-        returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        prompt += (
+            "\n\n## 结构化交付（必须）\n"
+            f"请把子任务数组写入 JSON 文件：{decision_file}\n"
+            "文件内容必须是 JSON 数组，每个元素包含：title/description/agent。\n"
+            "同时在回复最后一行输出同一个 JSON 数组。"
+        )
+
+        returncode, output = await self.run_cli(
+            prompt,
+            cwd=run_dir,
+            task_id=task_id,
+            output_schema=LEADER_FORCE_DECOMPOSE_SCHEMA,
+        )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):
                 return
@@ -329,21 +453,26 @@ class LeaderAgent(BaseAgent):
         if await self.stop_if_task_cancelled(task_id, "分解输出后"):
             return
 
-        subtasks = self._parse_subtasks_array(output)
-        if not subtasks:
-            await self.add_log(task_id, "⚠ 无法解析子任务，回退为 todo")
-            await self.add_handoff(
-                task_id,
-                stage="leader_to_todo",
-                to_agent=task.get("assigned_agent") or "developer",
-                status_from=task.get("_claimed_from_status", task.get("status")),
-                status_to="todo",
-                title="分解失败回退开发",
-                summary="无法解析子任务，回退为 todo",
-                conclusion="分解结果不可解析，回退到开发",
-                payload={"action": "fallback_todo"},
+        raw_subtasks = self._load_json_file(decision_file)
+        subtasks = self._normalize_subtasks(raw_subtasks)
+        if raw_subtasks is None:
+            await self._handle_structured_output_error(
+                task,
+                prev_status=task.get("_claimed_from_status", task.get("status", "decompose")),
+                stage_code="leader_force_decompose_invalid_output",
+                reason=f"未读取到有效结构化子任务文件：{decision_file}",
+                output=output,
             )
-            await self.update_task(task_id, status="todo", assignee=None)
+            return
+        await self.add_log(task_id, f"已读取结构化分解结果文件: {decision_file}")
+        if not subtasks:
+            await self._handle_structured_output_error(
+                task,
+                prev_status=task.get("_claimed_from_status", task.get("status", "decompose")),
+                stage_code="leader_force_decompose_invalid_schema",
+                reason=f"子任务数组为空或字段不完整：{decision_file}",
+                output=output,
+            )
             return
 
         n = await self._create_subtasks(task, subtasks)
@@ -357,6 +486,7 @@ class LeaderAgent(BaseAgent):
             summary=f"已强制分解为 {n} 个子任务",
             conclusion=f"强制分解完成，共 {n} 个子任务",
             payload={"subtask_count": n, "forced": True},
+            artifact_path=str(decision_file),
         )
         await self.update_task(task_id, status="decomposed", assignee=None)
         await self.add_log(task_id, f"✅ 强制分解完成，共创建 {n} 个子任务")
