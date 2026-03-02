@@ -130,6 +130,22 @@ async def get_project(project_id: str):
         raise HTTPException(404, "Project not found")
     return p
 
+@app.post("/projects/sync")
+async def sync_projects():
+    """Delete projects whose directories no longer exist on disk."""
+    all_projects = db.list_projects()
+    deleted = []
+    kept = []
+    for p in all_projects:
+        if Path(p["path"]).exists():
+            kept.append(p)
+        else:
+            db.delete_project(p["id"])
+            deleted.append(p)
+            await manager.broadcast({"event": "project_deleted", "project_id": p["id"]})
+    return {"deleted": deleted, "kept": kept}
+
+
 @app.post("/projects/{project_id}/setup")
 async def setup_project(project_id: str):
     """Initialize git repo + dev worktree in the project directory."""

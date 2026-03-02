@@ -110,6 +110,23 @@ def list_projects() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def delete_project(project_id: str) -> bool:
+    """Delete a project and all its tasks/logs. Returns True if deleted."""
+    conn = get_conn()
+    # Delete logs for all tasks in this project
+    conn.execute(
+        "DELETE FROM logs WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)",
+        (project_id,),
+    )
+    # Delete all tasks in this project
+    conn.execute("DELETE FROM tasks WHERE project_id=?", (project_id,))
+    # Delete the project itself
+    cur = conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
 def _join_project(base_sql: str) -> str:

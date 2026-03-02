@@ -39,34 +39,6 @@ fi
 echo "📦 Installing dependencies..."
 .venv/bin/pip install -q -r requirements.txt
 
-# ── Git setup ─────────────────────────────────────────────────────────────────
-WORKTREE_DIR=".worktrees/dev"
-
-if [ ! -d ".git" ]; then
-  echo "🗃️  Initialising git repository..."
-  git init
-  git checkout -b main 2>/dev/null || git checkout main
-  git config user.email "agent@opc-demo.local"
-  git config user.name "OPC Agent"
-  git commit --allow-empty -m "chore: initial commit"
-else
-  # Ensure git user is configured (needed for agent commits)
-  git config user.email "agent@opc-demo.local" 2>/dev/null || true
-  git config user.name "OPC Agent" 2>/dev/null || true
-fi
-
-if [ ! -d "$WORKTREE_DIR" ]; then
-  echo "🌿 Setting up dev worktree at $WORKTREE_DIR ..."
-  mkdir -p .worktrees
-
-  if ! git show-ref --verify --quiet refs/heads/dev; then
-    git branch dev
-  fi
-
-  git worktree add "$WORKTREE_DIR" dev
-  echo "✅ Dev worktree ready"
-fi
-
 # ── Start server ──────────────────────────────────────────────────────────────
 echo ""
 echo "🚀 Starting FastAPI server on http://localhost:8080 ..."
