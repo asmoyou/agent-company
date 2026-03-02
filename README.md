@@ -1,78 +1,150 @@
-# OPC-demo · 多智能体任务看板
+# OPC-demo
 
-基于本地 CLI 工具（Claude Code / Codex）的全自动多智能体协作系统。
+Multi-Agent Terminal Orchestrator (MVP)
+
+一个用于本地研发协作的多 Agent 看板系统。  
+目标是让你在一个地方统一管理 `Codex`、`Claude` 等终端 Agent，让任务自动流转、自动交接、自动推进。
+
+## 这是什么
+
+- 这是一个随手做的 MVP（最小可用原型），重点是验证流程能跑通，不追求大而全。
+- 核心链路：`任务分发 -> 开发 -> 审查 -> 合并 -> 验收`。
+- 适合拿来试验多 Agent 协作、提示词策略、结构化交接、自动化流程控制。
+
+## 解决的问题
+
+- 多个终端 Agent 并行干活时，任务交接靠聊天记录，容易丢信息。
+- 开发、审查、合并之间缺少统一状态机，容易“卡住”或重复执行。
+- 跨 worktree 协作时，谁改了什么、基于哪个 commit，很难追踪。
+
+OPC-demo 用结构化任务流和结构化交接材料来解决这些问题。
+
+## 核心能力
+
+- 一个看板统一管理多种 CLI Agent。
+- 内置 `leader`、`developer`、`reviewer`、`manager`，支持扩展自定义 Agent。
+- 支持配置 Codex / Claude 等终端 CLI。
+- 任务状态机 + 阻塞态恢复，减少“无限重试”和假进度。
+- 结构化 handoff（可审计、可回放、可追责）。
+- 基于 Git `worktree` 并行开发，每个 Agent 独立工作区。
+- 跨 Agent 自动同步提交（默认 `cherry-pick`）。
+- Leader 自动决策是否分解任务：简单任务不分解直接开发，复杂任务才分解并强制输出 `todo_steps / deliverables / acceptance_criteria`。
 
 ## 快速开始
 
+### 前置依赖
+
+- Python 3.10+
+- Git
+- 至少一个可用 Agent CLI（如 `codex` 或 `claude`）
+
+### 启动
+
 ```bash
-cp .env.example .env   # 按需修改服务轮询/超时配置
-bash start.sh          # 自动安装依赖、启动服务
-# 浏览器打开 http://localhost:8080
+cp .env.example .env
+bash start.sh
 ```
 
-## 架构
+打开 `http://localhost:8080`。
 
+`start.sh` 会自动执行这些动作：
+
+- 若不存在 `.venv`，自动创建 Python 虚拟环境。
+- 每次启动执行 `pip install -r requirements.txt`，自动补齐缺失依赖。
+- 启动后端服务和 Agent 轮询进程，并写入 `.pids/` 便于下次清理旧进程。
+
+### 数据库初始化说明
+
+- 使用本地 SQLite，数据库文件是项目根目录的 `tasks.db`。
+- 不需要手动建表：服务启动时会自动执行 `db.init_db()`，首次启动会自动创建所有表。
+- `tasks.db` 已在 `.gitignore` 中，新用户克隆仓库后不会拿到旧数据。
+
+如果你想手动初始化数据库，也可以执行：
+
+```bash
+python3 -c "from server import db; db.init_db(); print(f'initialized: {db.DB_PATH}')"
 ```
-OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
-├── server/            ← FastAPI + SQLite 后端
-├── agents/            ← Developer / Reviewer / Manager Agent
-├── frontend/          ← 看板 UI（WebSocket 实时更新）
+
+## 典型流程
+
+1. 创建项目并绑定本地 Git 仓库路径。
+2. 创建任务（默认进入 `triage`）。
+3. `leader` 评估复杂度：简单任务 -> `todo`；复杂任务 -> `decomposed` 并自动生成子任务清单。
+4. `developer` 提交代码 + handoff（包含 commit hash）。
+5. `reviewer` 基于 commit 审查并给出结构化结论。
+6. `manager` 合并到 `main`，进入验收。
+7. 用户在 `pending_acceptance` 验收，最终 `completed`。
+
+## 项目结构
+
+```text
+OPC-demo/
+├── server/       # FastAPI + SQLite
+├── agents/       # leader / developer / reviewer / manager / generic
+├── frontend/     # 看板 UI（WebSocket 实时更新）
 └── start.sh
 
-~/projects/my-app/     ← 用户创建的项目（独立 git 仓库）
+<your-project>/
 ├── .git/
-├── .worktrees/{key}/  ← 各 Agent 的独立工作目录（例如 developer-a）
-├── branch: main
-├── branch: agent/{key}
-└── （agent 交付的文件）
+└── .worktrees/<agent-key>/   # 每个 Agent 的独立工作目录
 ```
 
-## 任务流转
+## 任务状态流
 
-```
-待开发 → 开发中 → 待审查 → 审查中 → 需修改 ↗
-                                    ↘ 审查通过 → 合并中 → 待验收 → 已完成
-待审查/审查中 → 已阻塞（环境或系统错误，修复后可恢复到 in_review）
-任意状态 → 已取消（自动归档，不再执行）
-```
+```text
+triage -> todo -> in_progress -> in_review -> approved -> pending_acceptance -> completed
+             ^          |            |
+             |          |            v
+         needs_changes  |          blocked
+                        v
+                    cancelled
 
-Leader 分解规则：
-- 简单任务不分解，直接进入 `todo`。
-- 复杂任务才分解，且每个子任务必须包含具体 `TODO` 步骤、交付物与验收标准。
+decompose -> decomposed -> (subtasks in todo...)
+```
 
 ## 交接材料（Handoff）
 
-- 每个关键流转节点都会写入结构化交接记录（`from_agent/to_agent/stage/status/commit_hash/conclusion/payload`）。
-- 关键代码流转阶段（如 `dev_to_review/review_to_manager/merge_to_acceptance`）会强制携带 `commit_hash`。
-- 建议在 payload 中携带 `source_branch`，便于跨 worktree 审阅定位。
-- 后端接口：
-  - `GET /tasks/{task_id}/handoffs`
-  - `POST /tasks/{task_id}/handoffs`
-- 前端任务详情面板中的「交接记录」展示该任务的完整交接链路，便于多 Agent 共同审阅。
-- Leader 的 triage/decompose 结果同样采用结构化文件（`.opc/decisions/*.leader-*.json`）回传，不再以终端文本解析作为主流程。
+任务交接使用结构化记录，不依赖前端“猜文本”。
 
-## 结构化告警
+- 查询：`GET /tasks/{task_id}/handoffs`
+- 写入：`POST /tasks/{task_id}/handoffs`
+- 关键字段：`from_agent`、`to_agent`、`stage`、`status_from`/`status_to`、`commit_hash`、`conclusion`、`payload`（结构化详情）
 
-- 告警由 Agent 显式上报，不再依赖日志文本正则猜测。
-- 后端接口：
-  - `POST /alerts`
+建议每次交接都记录：
 
-## 跨 Agent 同步（Worktree）
+- 对应 commit hash
+- 本轮修改范围
+- 审查结论（pass / fail + 风险等级）
+- 下一步动作和责任 Agent
 
-- 默认启用 `HANDOFF_SYNC_STRATEGY=cherry-pick`：
-  - Generic Agent 领取任务后，会基于最近 handoff 的 `commit_hash/source_branch` 自动同步代码到本分支。
-- 可选策略：
-  - `HANDOFF_SYNC_STRATEGY=merge`
-  - `HANDOFF_SYNC_STRATEGY=none`（关闭自动同步）
-- 同步失败会写入结构化告警并将任务置为 `blocked`，避免静默继续执行。
+## 跨 Worktree 协作说明
 
-## 配置（.env）
+你关心的问题是对的：如果没合并到 `main`，其他 Agent 能不能看到 commit？
+
+- 在同一个 Git 仓库下的多个 `worktree`，共享同一套对象库（`.git/objects`）。
+- 所以只要开发 Agent 已经本地 commit，Reviewer 通常可以直接按 `commit_hash` 读取和审查，不必等合并到 `main`。
+- Manager 再根据策略把该提交同步到目标分支（如 `cherry-pick` 到 `main`）。
+- 只有在“不同 clone / 不同仓库”时，才需要通过 `push/fetch` 才能看到彼此提交。
+
+## 环境变量
 
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SERVER_URL`    | `http://localhost:8080` | Agent 请求后端的地址 |
-| `POLL_INTERVAL` | `5`      | 轮询间隔（秒） |
-| `CLI_TIMEOUT`   | `300`    | CLI 超时（秒） |
-| `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 codex 传 `--output-schema`（默认关闭，避免 schema 兼容报错） |
+|---|---|---|
+| `SERVER_URL` | `http://localhost:8080` | Agent 请求后端地址 |
+| `POLL_INTERVAL` | `5` | Agent 轮询间隔（秒） |
+| `CLI_TIMEOUT` | `300` | 单次 CLI 超时（秒） |
+| `HANDOFF_SYNC_STRATEGY` | `cherry-pick` | 跨 Agent 提交同步策略：`cherry-pick` / `merge` / `none` |
+| `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 Codex 传 `--output-schema`（默认关闭，降低兼容风险） |
 
-Agent CLI 类型（包括内置 `leader/developer/reviewer/manager`）在 Web 页面 `Agent 管理` 中配置。
+## 当前边界（MVP）
+
+- 仍在快速迭代，接口和行为可能变化。
+- 建议先在沙箱仓库验证流程，再接入正式项目。
+- 目标是“把协同链路跑顺”，不是一套完整企业级平台。
+
+## 开源说明
+
+这个仓库是公开的 MVP 版本，用于验证并分享多 Agent 协同方法。  
+我有一个真实业务里的更大版本，当前暂未开源。
+
+如果你对这个方向感兴趣，欢迎通过 GitHub `Issue` 或 `Discussion` 交流。

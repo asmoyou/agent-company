@@ -156,30 +156,72 @@ def init_db():
         );
     """)
 
-    # Migrations for existing DBs
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-    for col, defn in [
-        ("project_id",     "TEXT"),
-        ("archived",       "INTEGER NOT NULL DEFAULT 0"),
+    # Migrations for existing DBs: ensure all runtime-required columns exist.
+    _ensure_columns(conn, "projects", [
+        ("name", "TEXT NOT NULL DEFAULT ''"),
+        ("path", "TEXT NOT NULL DEFAULT ''"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "tasks", [
+        ("project_id", "TEXT"),
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("status", "TEXT NOT NULL DEFAULT 'todo'"),
+        ("assignee", "TEXT"),
+        ("review_feedback", "TEXT"),
+        ("commit_hash", "TEXT"),
+        ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("parent_task_id", "TEXT"),
         ("assigned_agent", "TEXT"),
-        ("dev_agent",      "TEXT"),
-    ]:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {defn}")
-
-    handoff_existing = {r[1] for r in conn.execute("PRAGMA table_info(task_handoffs)").fetchall()}
-    for col, defn in [
+        ("dev_agent", "TEXT"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "logs", [
+        ("task_id", "TEXT"),
+        ("agent", "TEXT"),
+        ("message", "TEXT"),
+        ("created_at", "TEXT"),
+    ])
+    _ensure_columns(conn, "task_handoffs", [
+        ("task_id", "TEXT"),
+        ("stage", "TEXT NOT NULL DEFAULT ''"),
+        ("from_agent", "TEXT NOT NULL DEFAULT ''"),
+        ("to_agent", "TEXT"),
+        ("status_from", "TEXT"),
+        ("status_to", "TEXT"),
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("summary", "TEXT NOT NULL DEFAULT ''"),
         ("commit_hash", "TEXT"),
         ("conclusion", "TEXT"),
-    ]:
-        if col not in handoff_existing:
-            conn.execute(f"ALTER TABLE task_handoffs ADD COLUMN {col} {defn}")
+        ("payload", "TEXT NOT NULL DEFAULT '{}'"),
+        ("artifact_path", "TEXT"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "agent_types", [
+        ("key", "TEXT"),
+        ("name", "TEXT"),
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("prompt", "TEXT NOT NULL DEFAULT ''"),
+        ("poll_statuses", "TEXT NOT NULL DEFAULT '[\"todo\"]'"),
+        ("next_status", "TEXT NOT NULL DEFAULT 'in_review'"),
+        ("working_status", "TEXT NOT NULL DEFAULT 'in_progress'"),
+        ("cli", "TEXT NOT NULL DEFAULT 'claude'"),
+        ("is_builtin", "INTEGER NOT NULL DEFAULT 0"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
 
     _seed_builtin_agents(conn)
     _recover_reviewer_stuck_tasks(conn)
     conn.commit()
     conn.close()
+
+
+def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]):
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, defn in columns:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
 
 
 def _seed_builtin_agents(conn):
