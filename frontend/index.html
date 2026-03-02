@@ -541,13 +541,218 @@ const STATUS_BADGE = {
   completed:"bg-emerald-900 text-emerald-300",
 };
 const STATUS_LABEL = Object.fromEntries(COLUMNS.map(c=>[c.status,c.label]));
+const ALL_STATUSES = COLUMNS.map(c => c.status);
 
 let tasks = {};
 let projects = {};
+let agentTypes = {};          // key → agent_type record
 let currentProjectId = null;
 let currentTaskId = null;
 let ws = null;
 let terminalsVisible = true;
+let _editingAgentKey = null;  // null = create mode
+
+// ── Agent Types ────────────────────────────────────────────────────────────────
+function loadAgentTypes(list) {
+  agentTypes = {};
+  list.forEach(at => agentTypes[at.key] = at);
+  renderAgentStatusBadges();
+  renderTerminals();
+}
+
+function renderAgentStatusBadges() {
+  const el = document.getElementById("agent-status-badges");
+  if (!el) return;
+  el.innerHTML = Object.values(agentTypes).map(at => `
+    <span id="ab-${at.key}" class="flex items-center gap-1 text-xs">
+      <span id="dot-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
+      <span class="text-slate-500">${escHtml(at.name || at.key)}</span>
+    </span>`).join("");
+}
+
+function renderTerminals() {
+  const grid = document.getElementById("terminal-grid");
+  if (!grid) return;
+  // Preserve existing terminal content before re-rendering
+  const savedContent = {};
+  Object.keys(agentTypes).forEach(key => {
+    const t = document.getElementById(`term-${key}`);
+    if (t) savedContent[key] = t.innerHTML;
+  });
+  grid.innerHTML = Object.values(agentTypes).map(at => `
+    <div style="min-width:220px;flex:1">
+      <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
+        <span id="dot2-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
+        ${escHtml(at.name||at.key)} · <span id="status-${at.key}" class="text-slate-600">idle</span>
+      </div>
+      <div class="terminal" id="term-${at.key}"></div>
+    </div>`).join("");
+  // Restore saved content
+  Object.entries(savedContent).forEach(([key, html]) => {
+    const t = document.getElementById(`term-${key}`);
+    if (t && html) t.innerHTML = html;
+  });
+}
+
+function ensureAgentTerminal(key) {
+  if (!agentTypes[key]) {
+    agentTypes[key] = {key, name: key, is_builtin: 0};
+    renderAgentStatusBadges();
+    renderTerminals();
+  }
+}
+
+// ── Agent modal ───────────────────────────────────────────────────────────────
+function openAgentsModal() {
+  renderAgentTypesList();
+  document.getElementById("modal-agents").classList.remove("hidden");
+  document.getElementById("agents-list-view").classList.remove("hidden");
+  document.getElementById("agents-form-view").classList.add("hidden");
+}
+function closeAgentsModal() {
+  document.getElementById("modal-agents").classList.add("hidden");
+}
+function renderAgentTypesList() {
+  const el = document.getElementById("agent-types-list");
+  const list = Object.values(agentTypes);
+  if (!list.length) { el.innerHTML = '<div class="text-slate-500 text-sm text-center py-4">暂无 Agent</div>'; return; }
+  el.innerHTML = list.map(at => {
+    const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]').join(', '); } catch { return at.poll_statuses||''; } })();
+    const builtin = at.is_builtin ? '<span class="text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">内置</span>' : '';
+    const actions = at.is_builtin ? '' : `
+      <button onclick="openAgentForm('${at.key}')" class="text-xs text-slate-400 hover:text-indigo-400 px-2 py-1 rounded hover:bg-slate-700 transition">编辑</button>
+      <button onclick="deleteAgentType('${at.key}')" class="text-xs text-slate-400 hover:text-red-400 px-2 py-1 rounded hover:bg-slate-700 transition">删除</button>`;
+    return `<div class="flex items-start justify-between bg-slate-700/40 rounded-lg px-4 py-3">
+      <div>
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-sm font-medium text-white">${escHtml(at.name)}</span>
+          <span class="text-xs font-mono text-slate-500">(${escHtml(at.key)})</span>
+          ${builtin}
+        </div>
+        <div class="text-xs text-slate-500">${escHtml(at.description||'')}</div>
+        <div class="text-xs text-slate-600 mt-0.5">轮询: <span class="text-slate-500">${escHtml(polls)}</span> → <span class="text-slate-500">${escHtml(at.next_status)}</span></div>
+      </div>
+      <div class="flex gap-1 shrink-0 ml-4">${actions}</div>
+    </div>`;
+  }).join("");
+}
+
+function _fillPollCheckboxes(selectedList) {
+  const el = document.getElementById("af-poll-checkboxes");
+  el.innerHTML = ALL_STATUSES.map(s => `
+    <label class="flex items-center gap-1.5 cursor-pointer hover:text-slate-200 text-slate-400">
+      <input type="checkbox" value="${s}" ${selectedList.includes(s)?'checked':''} class="rounded">
+      ${s}
+    </label>`).join("");
+}
+function _fillNextStatus(selected) {
+  const el = document.getElementById("af-next-status");
+  el.innerHTML = ALL_STATUSES.map(s =>
+    `<option value="${s}" ${s===selected?'selected':''}>${s}</option>`).join("");
+}
+
+function openAgentForm(key) {
+  _editingAgentKey = key;
+  document.getElementById("agents-list-view").classList.add("hidden");
+  document.getElementById("agents-form-view").classList.remove("hidden");
+
+  if (key) {
+    // Edit mode
+    const at = agentTypes[key];
+    document.getElementById("agent-form-title").textContent = `编辑 Agent — ${at.name}`;
+    document.getElementById("af-name").value = at.name || "";
+    document.getElementById("af-key").value = at.key;
+    document.getElementById("af-key").disabled = true;
+    document.getElementById("af-desc").value = at.description || "";
+    document.getElementById("af-prompt").value = at.prompt || "";
+    document.getElementById("af-cli").value = at.cli || "claude";
+    const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]'); } catch { return []; } })();
+    _fillPollCheckboxes(polls);
+    _fillNextStatus(at.next_status || "in_review");
+  } else {
+    // Create mode
+    document.getElementById("agent-form-title").textContent = "新建 Agent";
+    document.getElementById("af-name").value = "";
+    document.getElementById("af-key").value = "";
+    document.getElementById("af-key").disabled = false;
+    document.getElementById("af-desc").value = "";
+    document.getElementById("af-prompt").value = "";
+    document.getElementById("af-cli").value = "claude";
+    _fillPollCheckboxes(["todo"]);
+    _fillNextStatus("in_review");
+  }
+}
+function closeAgentForm() {
+  document.getElementById("agents-list-view").classList.remove("hidden");
+  document.getElementById("agents-form-view").classList.add("hidden");
+  _editingAgentKey = null;
+}
+
+async function aiGeneratePrompt() {
+  const desc = document.getElementById("af-desc").value.trim();
+  const name = document.getElementById("af-name").value.trim();
+  if (!desc && !name) { alert("请先填写「用途描述」或「名称」"); return; }
+  const btn = document.getElementById("btn-ai-gen");
+  btn.textContent = "生成中..."; btn.disabled = true;
+  try {
+    const cli = document.getElementById("af-cli").value;
+    const res = await fetch(`${API}/agent-types/generate-prompt`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({description: desc || name, cli}),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById("af-prompt").value = data.prompt;
+    btn.textContent = "✓ 已生成";
+  } catch(err) {
+    alert("生成失败: " + err.message);
+    btn.textContent = "✨ AI 生成";
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = "✨ AI 生成"; }, 2000);
+  }
+}
+
+async function saveAgentType() {
+  const name = document.getElementById("af-name").value.trim();
+  const key  = document.getElementById("af-key").value.trim();
+  if (!name) { alert("请填写名称"); return; }
+  const polls = Array.from(
+    document.querySelectorAll("#af-poll-checkboxes input:checked")
+  ).map(cb => cb.value);
+  const body = {
+    name,
+    description: document.getElementById("af-desc").value.trim(),
+    prompt:       document.getElementById("af-prompt").value,
+    poll_statuses: polls,
+    next_status:  document.getElementById("af-next-status").value,
+    cli:          document.getElementById("af-cli").value,
+  };
+  try {
+    let res;
+    if (_editingAgentKey) {
+      res = await fetch(`${API}/agent-types/${_editingAgentKey}`, {
+        method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+      });
+    } else {
+      if (!key) { alert("请填写标识符 key"); return; }
+      res = await fetch(`${API}/agent-types`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({...body, key, working_status:"in_progress"}),
+      });
+    }
+    if (!res.ok) throw new Error(await res.text());
+    closeAgentForm();
+  } catch(err) { alert("保存失败: " + err.message); }
+}
+
+async function deleteAgentType(key) {
+  if (!confirm(`确定删除 Agent「${agentTypes[key]?.name || key}」？此操作不可撤销。`)) return;
+  try {
+    const res = await fetch(`${API}/agent-types/${key}`, {method:"DELETE"});
+    if (!res.ok) throw new Error(await res.text());
+  } catch(err) { alert("删除失败: " + err.message); }
+}
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 function loadProjects(list) {
@@ -964,10 +1169,26 @@ function connectWS() {
       tasks={};
       msg.tasks.forEach(t=>tasks[t.id]=t);
       loadProjects(msg.projects||[]);
+      loadAgentTypes(msg.agent_types||[]);
       buildBoard();
       refreshBoard();
       initAgentOutputs(msg.agent_outputs);
-      autoSyncProjects();  // 启动时静默检查已删除的项目
+      autoSyncProjects();
+    } else if (msg.event==="agent_type_created") {
+      agentTypes[msg.agent_type.key] = msg.agent_type;
+      renderAgentStatusBadges();
+      renderTerminals();
+      renderAgentTypesList();
+    } else if (msg.event==="agent_type_updated") {
+      agentTypes[msg.agent_type.key] = msg.agent_type;
+      renderAgentStatusBadges();
+      renderTerminals();
+      renderAgentTypesList();
+    } else if (msg.event==="agent_type_deleted") {
+      delete agentTypes[msg.agent_key];
+      renderAgentStatusBadges();
+      renderTerminals();
+      renderAgentTypesList();
     } else if (msg.event==="project_created") {
       projects[msg.project.id]=msg.project;
       const sel=document.getElementById("project-select");
@@ -1001,6 +1222,7 @@ function connectWS() {
         <div class="text-slate-600 mt-0.5">${msg.log.created_at.replace("T"," ").slice(0,19)}</div>`;
       el.appendChild(d); el.scrollTop=el.scrollHeight;
     } else if (msg.event==="agent_output") {
+      ensureAgentTerminal(msg.agent);
       appendTermLine(msg.agent,msg.line);
     } else if (msg.event==="agent_status") {
       setAgentStatus(msg.agent,msg.status,msg.task);
