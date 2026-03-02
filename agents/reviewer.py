@@ -1,14 +1,20 @@
 import asyncio
-import os
 
-from base import BaseAgent, get_task_dev_agent, load_prompt
+from base import BaseAgent, get_task_dev_agent, load_prompt, parse_status_list
 
 
 class ReviewerAgent(BaseAgent):
     name = "reviewer"
     poll_statuses = ["in_review"]
-    cli_name = os.getenv("REVIEWER_CLI", "claude")
+    cli_name = "claude"
     working_status = "reviewing"
+
+    def __init__(self, shutdown_event=None, config: dict | None = None):
+        super().__init__(shutdown_event)
+        cfg = config or {}
+        self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["in_review"])
+        self.cli_name = str(cfg.get("cli") or "claude")
+        self.working_status = str(cfg.get("working_status") or "reviewing")
 
     def respect_assignment_for(self, status: str) -> bool:
         return False

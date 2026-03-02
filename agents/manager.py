@@ -1,14 +1,20 @@
 import asyncio
-import os
 
-from base import BaseAgent, get_task_dev_agent
+from base import BaseAgent, get_task_dev_agent, parse_status_list
 
 
 class ManagerAgent(BaseAgent):
     name = "manager"
     poll_statuses = ["approved"]
-    cli_name = os.getenv("MANAGER_CLI", "claude")
+    cli_name = "claude"
     working_status = "merging"
+
+    def __init__(self, shutdown_event=None, config: dict | None = None):
+        super().__init__(shutdown_event)
+        cfg = config or {}
+        self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["approved"])
+        self.cli_name = str(cfg.get("cli") or "claude")
+        self.working_status = str(cfg.get("working_status") or "merging")
 
     def respect_assignment_for(self, status: str) -> bool:
         return False

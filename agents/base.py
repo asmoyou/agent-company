@@ -35,6 +35,20 @@ def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
     return [arg.replace("{prompt}", prompt) for arg in template]
 
 
+def parse_status_list(raw, default: list[str]) -> list[str]:
+    """Parse poll_statuses from DB row (JSON string/list) with fallback."""
+    if isinstance(raw, list) and raw:
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, list) and decoded:
+                return [str(x) for x in decoded]
+        except Exception:
+            pass
+    return list(default)
+
+
 def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
     raw = (agent_key or default).strip().lower()
     safe = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")

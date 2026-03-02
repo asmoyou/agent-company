@@ -1,10 +1,9 @@
 import asyncio
 import json
-import os
 import re
 from pathlib import Path
 
-from base import BaseAgent, get_project_dirs
+from base import BaseAgent, get_project_dirs, parse_status_list
 
 TRIAGE_PROMPT_DEFAULT = (
     "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
@@ -38,8 +37,15 @@ FORCE_DECOMPOSE_PROMPT = (
 class LeaderAgent(BaseAgent):
     name = "leader"
     poll_statuses = ["triage", "decompose"]
-    cli_name = os.getenv("DEVELOPER_CLI", "claude")
+    cli_name = "claude"
     working_status = "triaging"
+
+    def __init__(self, shutdown_event=None, config: dict | None = None):
+        super().__init__(shutdown_event)
+        cfg = config or {}
+        self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["triage", "decompose"])
+        self.cli_name = str(cfg.get("cli") or "claude")
+        self.working_status = str(cfg.get("working_status") or "triaging")
 
     def respect_assignment_for(self, status: str) -> bool:
         return False
