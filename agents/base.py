@@ -18,8 +18,16 @@ HEARTBEAT_SECS  = 45
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
     # Use non-interactive subcommand to avoid TTY requirement in agent subprocesses.
-    "codex":  ["codex", "exec", "{prompt}"],
+    "codex":  ["codex", "exec", "--full-auto", "{prompt}"],
 }
+AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
+AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "20"))
+AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
+INTERACTIVE_PROMPT_RE = re.compile(
+    r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
+    r"\[y/n\]|\[y/N\]|\(y/n\)|yes/no|select\s+an?\s+option|choose\s+an?\s+option|"
+    r"请输入.*继续|input.*continue)"
+)
 
 
 def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
@@ -164,23 +172,60 @@ class BaseAgent:
         cmd = build_cli_cmd(self.cli_name, prompt)
         print(f"[{self.name}] Spawning {cmd[0]} (cwd={cwd.name})")
         self._post_output_bg(f"$ {cmd[0]}  cwd={cwd}")
+        env = os.environ.copy()
+        # Hint CLIs to avoid interactive flows.
+        env.setdefault("CI", "1")
+        env.setdefault("NONINTERACTIVE", "1")
 
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(cwd),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
+            env=env,
         )
 
         lines: list[str] = []
         start_time = time.monotonic()
+        last_output_at = time.monotonic()
+        auto_reply_count = 0
+        auto_reply_lock = asyncio.Lock()
+
+        async def auto_reply(reason: str):
+            nonlocal auto_reply_count
+            if AUTO_REPLY_MAX <= 0:
+                return
+            if proc.stdin is None or proc.returncode is not None:
+                return
+            if auto_reply_count >= AUTO_REPLY_MAX:
+                return
+            async with auto_reply_lock:
+                if proc.stdin is None or proc.returncode is not None:
+                    return
+                if auto_reply_count >= AUTO_REPLY_MAX:
+                    return
+                try:
+                    proc.stdin.write(AUTO_REPLY_TEXT.encode("utf-8", errors="ignore"))
+                    await proc.stdin.drain()
+                    auto_reply_count += 1
+                    msg = f"↩ 自动应答({auto_reply_count}/{AUTO_REPLY_MAX}) ENTER [{reason[:80]}]"
+                    lines.append(msg)
+                    self._post_output_bg(msg)
+                    if task_id:
+                        await self.add_log(task_id, msg)
+                except Exception:
+                    pass
 
         async def drain(stream):
+            nonlocal last_output_at
             async for raw in stream:
                 line = raw.decode(errors="replace").rstrip("\n")
                 if line:
+                    last_output_at = time.monotonic()
                     lines.append(line)
                     self._post_output_bg(line)
+                    if INTERACTIVE_PROMPT_RE.search(line):
+                        await auto_reply(f"检测到交互提示: {line}")
 
         async def heartbeat():
             while True:
@@ -191,7 +236,19 @@ class BaseAgent:
                 if task_id:
                     await self.add_log(task_id, msg)
 
+        async def idle_auto_reply():
+            if AUTO_REPLY_IDLE_SECS <= 0:
+                return
+            while True:
+                await asyncio.sleep(AUTO_REPLY_IDLE_SECS)
+                if proc.returncode is not None:
+                    return
+                idle = time.monotonic() - last_output_at
+                if idle >= AUTO_REPLY_IDLE_SECS:
+                    await auto_reply(f"idle {int(idle)}s")
+
         hb = asyncio.create_task(heartbeat())
+        iar = asyncio.create_task(idle_auto_reply())
         try:
             await asyncio.wait_for(
                 asyncio.gather(drain(proc.stdout), drain(proc.stderr)),
@@ -203,6 +260,7 @@ class BaseAgent:
             self._post_output_bg(f"⚠ TIMEOUT after {CLI_TIMEOUT}s")
         finally:
             hb.cancel()
+            iar.cancel()
 
         await proc.wait()
         return proc.returncode, "\n".join(lines)
