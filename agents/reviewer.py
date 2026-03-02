@@ -48,6 +48,20 @@ class ReviewerAgent(BaseAgent):
             )
 
         returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
+        if returncode != 0:
+            feedback = f"[系统错误] 审查器执行失败（exit={returncode}），请修复环境后重试。"
+            await self.add_log(task_id, feedback)
+            if output.strip():
+                await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.update_task(
+                task_id,
+                status="needs_changes",
+                assignee=None,
+                assigned_agent=dev_agent,
+                dev_agent=dev_agent,
+                review_feedback=feedback,
+            )
+            return
         await self.add_log(task_id, f"审查输出:\n{output[:400]}")
 
         decision = self.parse_json_decision(output)
@@ -58,7 +72,7 @@ class ReviewerAgent(BaseAgent):
             elif any(w in low for w in ["fix", "issue", "problem", "需要修改", "问题", "错误"]):
                 decision = {"decision": "request_changes", "feedback": output[:500].strip()}
             else:
-                decision = {"decision": "approve", "comment": "(auto-approved)"}
+                decision = {"decision": "request_changes", "feedback": "审查输出无法解析为有效 JSON，请补充明确审查意见并重试。"}
 
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")

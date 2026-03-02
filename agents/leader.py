@@ -184,7 +184,14 @@ class LeaderAgent(BaseAgent):
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
 
-        _, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        if returncode != 0:
+            prev_status = task.get("_claimed_from_status", task.get("status", "triage"))
+            await self.add_log(task_id, f"❌ Leader 评估失败（exit={returncode}），退回 {prev_status}")
+            if output.strip():
+                await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.update_task(task_id, status=prev_status, assignee=None)
+            return
         await self.add_log(task_id, f"评估输出:\n{output[:600]}")
 
         decision = self._parse_triage(output)
@@ -220,7 +227,14 @@ class LeaderAgent(BaseAgent):
         proj_root, _ = get_project_dirs(task)
         run_dir = proj_root if proj_root.exists() else Path.cwd()
 
-        _, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        returncode, output = await self.run_cli(prompt, cwd=run_dir, task_id=task_id)
+        if returncode != 0:
+            prev_status = task.get("_claimed_from_status", task.get("status", "decompose"))
+            await self.add_log(task_id, f"❌ Leader 分解失败（exit={returncode}），退回 {prev_status}")
+            if output.strip():
+                await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.update_task(task_id, status=prev_status, assignee=None)
+            return
         await self.add_log(task_id, f"分解输出:\n{output[:600]}")
 
         subtasks = self._parse_subtasks_array(output)

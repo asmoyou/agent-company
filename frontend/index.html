@@ -41,6 +41,19 @@
     .fb-item .fb-actions{opacity:0;display:flex;gap:4px;margin-left:auto;}
     .fb-item:hover .fb-actions{opacity:1;}
     .fb-drop-active{border:2px dashed #6366f1!important;background:rgba(99,102,241,0.08)!important;}
+    .toast-wrap{
+      position:fixed;right:14px;top:66px;z-index:60;display:flex;flex-direction:column;gap:8px;
+      pointer-events:none;max-width:min(460px,calc(100vw - 28px));
+    }
+    .toast{
+      pointer-events:auto;background:#111827;border:1px solid #334155;border-left:4px solid #475569;
+      border-radius:8px;padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.35);
+      animation:toast-in .16s ease-out;
+    }
+    .toast.error{border-left-color:#ef4444;}
+    .toast .t-title{font-size:12px;font-weight:600;color:#e2e8f0;margin-bottom:2px;}
+    .toast .t-msg{font-size:12px;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;}
+    @keyframes toast-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
   </style>
 </head>
 <body class="min-h-screen font-sans flex flex-col">
@@ -104,6 +117,7 @@
     </button>
   </div>
 </header>
+<div id="toast-wrap" class="toast-wrap"></div>
 
 <!-- Board -->
 <main class="flex-1 p-3 overflow-x-auto">
@@ -924,6 +938,26 @@ function escHtml(s) {
   return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+function isErrorText(text) {
+  return /错误|失败|timeout|exception|\berror\b|\bfail(ed)?\b/i.test(String(text || ""));
+}
+
+function showToast(title, message, kind = "error") {
+  const wrap = document.getElementById("toast-wrap");
+  if (!wrap) return;
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<div class="t-title">${escHtml(title)}</div><div class="t-msg">${escHtml(message)}</div>`;
+  wrap.appendChild(el);
+  while (wrap.children.length > 6) wrap.removeChild(wrap.firstChild);
+  setTimeout(() => {
+    el.style.opacity = "0";
+    el.style.transform = "translateY(-6px)";
+    el.style.transition = "all .18s ease-out";
+    setTimeout(() => el.remove(), 200);
+  }, 5200);
+}
+
 // ── Terminals ─────────────────────────────────────────────────────────────────
 function toggleTerminals() {
   terminalsVisible = !terminalsVisible;
@@ -1337,16 +1371,26 @@ function connectWS() {
       if (msg.task.parent_task_id && currentTaskId===msg.task.parent_task_id) {
         renderSubtaskList(msg.task.parent_task_id);
       }
-    } else if (msg.event==="log_added"&&currentTaskId===msg.log.task_id) {
-      const el=document.getElementById("panel-logs");
-      const d=document.createElement("div");d.className="log-entry";
-      d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
-        <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
-        <div class="text-slate-600 mt-0.5">${msg.log.created_at.replace("T"," ").slice(0,19)}</div>`;
-      el.appendChild(d); el.scrollTop=el.scrollHeight;
+    } else if (msg.event==="log_added") {
+      if (currentTaskId===msg.log.task_id) {
+        const el=document.getElementById("panel-logs");
+        const d=document.createElement("div");d.className="log-entry";
+        d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
+          <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
+          <div class="text-slate-600 mt-0.5">${msg.log.created_at.replace("T"," ").slice(0,19)}</div>`;
+        el.appendChild(d); el.scrollTop=el.scrollHeight;
+      }
+      if (isErrorText(msg.log.message)) {
+        const task = tasks[msg.log.task_id];
+        const title = task ? task.title : `任务 ${msg.log.task_id.slice(0,8)}`;
+        showToast(`⚠ ${msg.log.agent} · ${title}`, msg.log.message);
+      }
     } else if (msg.event==="agent_output") {
       ensureAgentTerminal(msg.agent);
       appendTermLine(msg.agent,msg.line);
+      if (isErrorText(msg.line)) {
+        showToast(`⚠ ${msg.agent} 终端错误`, msg.line);
+      }
     } else if (msg.event==="agent_status") {
       setAgentStatus(msg.agent,msg.status,msg.task);
     } else if (msg.event==="files_changed") {
