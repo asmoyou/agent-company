@@ -60,7 +60,8 @@ class BaseAgent:
 
     def __init__(self, shutdown_event: asyncio.Event | None = None):
         self.shutdown = shutdown_event or asyncio.Event()
-        self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30)
+        # trust_env=False: ignore system proxy (SOCKS etc.) for localhost calls
+        self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30, trust_env=False)
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
