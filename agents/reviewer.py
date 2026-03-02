@@ -13,24 +13,49 @@ class ReviewerAgent(BaseAgent):
     def respect_assignment_for(self, status: str) -> bool:
         return False
 
-    async def get_diff(self, worktree_dev) -> str:
-        try:
-            return await self.git("show", "HEAD", cwd=worktree_dev)
-        except Exception as e:
-            try:
-                return await self.git("diff", "HEAD", cwd=worktree_dev)
-            except Exception:
-                return f"(无法获取 diff: {e})"
+    async def get_diff_for_commit(self, worktree_dev, commit_hash: str) -> str:
+        return await self.git("show", commit_hash, cwd=worktree_dev)
 
     async def process_task(self, task: dict):
         task_id = task["id"]
         dev_agent = get_task_dev_agent(task)
+        commit_hash = (task.get("commit_hash") or "").strip()
         proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=dev_agent)
 
-        await self.add_log(task_id, f"Reviewer 开始审查（dev_agent={dev_agent}, 分支={branch}）")
+        if not commit_hash:
+            feedback = "[系统错误] 缺少 commit_hash，无法进行精确审查。请 developer 重新提交。"
+            await self.add_log(task_id, feedback)
+            await self.update_task(
+                task_id,
+                status="needs_changes",
+                assignee=None,
+                assigned_agent=dev_agent,
+                dev_agent=dev_agent,
+                review_feedback=feedback,
+            )
+            return
 
-        diff = await self.get_diff(worktree_dev)
-        await self.add_log(task_id, f"获取到 diff ({len(diff)} 字符)")
+        await self.add_log(
+            task_id,
+            f"Reviewer 开始审查（dev_agent={dev_agent}, 分支={branch}, commit={commit_hash}）",
+        )
+
+        try:
+            diff = await self.get_diff_for_commit(worktree_dev, commit_hash)
+        except Exception as e:
+            feedback = f"[系统错误] 无法读取目标 commit={commit_hash}：{e}"
+            await self.add_log(task_id, feedback[:500])
+            await self.update_task(
+                task_id,
+                status="needs_changes",
+                assignee=None,
+                assigned_agent=dev_agent,
+                dev_agent=dev_agent,
+                review_feedback=feedback[:500],
+            )
+            return
+
+        await self.add_log(task_id, f"获取到 commit diff ({len(diff)} 字符): {commit_hash}")
 
         # ── Build prompt from template ────────────────────────────────────────
         template = load_prompt("reviewer", project_path=proj_root)
@@ -38,11 +63,13 @@ class ReviewerAgent(BaseAgent):
             prompt = template.format(
                 task_title=task["title"],
                 task_description=task["description"] or "(无额外描述)",
+                commit_hash=commit_hash,
+                dev_agent=dev_agent,
                 diff=diff[:8000],
             )
         else:
             prompt = (
-                f"审查任务「{task['title']}」的代码变更：\n\n```\n{diff[:8000]}\n```\n\n"
+                f"审查任务「{task['title']}」的代码变更（commit={commit_hash}）：\n\n```\n{diff[:8000]}\n```\n\n"
                 "输出 JSON 决定：{\"decision\":\"approve\",\"comment\":\"...\"} "
                 "或 {\"decision\":\"request_changes\",\"feedback\":\"...\"}"
             )

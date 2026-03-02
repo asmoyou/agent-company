@@ -36,7 +36,7 @@ def task_dev_branch(task: dict) -> str:
 
 
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
-AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=200))
+AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=1000))
 AGENT_STATUS: dict = defaultdict(lambda: {"status": "idle", "task": ""})
 # Pre-populate built-ins so they appear on init
 for _k in ("developer", "reviewer", "manager"):

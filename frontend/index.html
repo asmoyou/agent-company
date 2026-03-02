@@ -978,7 +978,7 @@ function appendTermLine(agent, line) {
   term.appendChild(d);
   if (term.scrollHeight - term.scrollTop < term.clientHeight + 80)
     term.scrollTop = term.scrollHeight;
-  while (term.children.length > 200) term.removeChild(term.firstChild);
+  while (term.children.length > 1000) term.removeChild(term.firstChild);
 }
 
 function setAgentStatus(agent, status, taskTitle) {
