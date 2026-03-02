@@ -45,19 +45,11 @@ class LeaderAgent(BaseAgent):
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["triage", "decompose"])
         self.cli_name = str(cfg.get("cli") or "claude")
+        self.prompt_template = str(cfg.get("prompt") or TRIAGE_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "triaging")
 
     def respect_assignment_for(self, status: str) -> bool:
         return False
-
-    async def _get_prompt_template(self) -> str:
-        try:
-            r = await self.http.get("/agent-types/leader")
-            r.raise_for_status()
-            p = r.json().get("prompt", "")
-            return p if p else TRIAGE_PROMPT_DEFAULT
-        except Exception:
-            return TRIAGE_PROMPT_DEFAULT
 
     async def _get_agent_list(self) -> str:
         try:
@@ -177,14 +169,14 @@ class LeaderAgent(BaseAgent):
             return
 
         agent_list  = await self._get_agent_list()
-        prompt_tpl  = await self._get_prompt_template()
+        prompt_tpl  = self.prompt_template or TRIAGE_PROMPT_DEFAULT
         try:
             prompt = prompt_tpl.format(
                 task_title=task["title"],
                 task_description=task["description"] or "(无额外描述)",
                 agent_list=agent_list,
             )
-        except KeyError:
+        except Exception:
             prompt = prompt_tpl
 
         proj_root, _ = get_project_dirs(task)
@@ -227,7 +219,7 @@ class LeaderAgent(BaseAgent):
                 task_description=task["description"] or "(无额外描述)",
                 agent_list=agent_list,
             )
-        except KeyError:
+        except Exception:
             prompt = FORCE_DECOMPOSE_PROMPT
 
         proj_root, _ = get_project_dirs(task)

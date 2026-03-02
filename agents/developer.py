@@ -1,6 +1,24 @@
 import asyncio
 
-from base import BaseAgent, load_prompt, parse_status_list
+from base import BaseAgent, parse_status_list
+
+DEVELOPER_PROMPT_DEFAULT = (
+    "你是一名专业软件工程师，负责实现以下任务。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. **所有成果必须写入文件**，不要只在终端打印输出\n"
+    "   - 代码任务 → 创建对应语言的源文件（.py / .ts / .go 等）\n"
+    "   - 文档/方案任务 → 创建 `.md` 文件，把完整内容写入\n"
+    "   - 至少创建一个文件，否则任务无法通过审查\n\n"
+    "2. **质量标准**\n"
+    "   - 代码需有适当注释，边界情况需处理\n"
+    "   - 文档需完整、结构清晰\n\n"
+    "3. 直接开始实现，不需要解释计划"
+)
 
 
 class DeveloperAgent(BaseAgent):
@@ -14,11 +32,12 @@ class DeveloperAgent(BaseAgent):
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["todo", "needs_changes"])
         self.cli_name = str(cfg.get("cli") or "claude")
+        self.prompt_template = str(cfg.get("prompt") or DEVELOPER_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "in_progress")
 
     async def process_task(self, task: dict):
         task_id = task["id"]
-        proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
+        _, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
 
         await self.add_log(task_id, f"Developer 接手，分支: {branch}，工作目录: {worktree_dev}")
 
@@ -32,13 +51,16 @@ class DeveloperAgent(BaseAgent):
         if is_rework:
             rework_section = f"## 审查反馈（必须全部修复）\n\n{task['review_feedback']}"
 
-        template = load_prompt("developer", project_path=proj_root)
+        template = (self.prompt_template or "").strip()
         if template:
-            prompt = template.format(
-                task_title=task["title"],
-                task_description=task["description"] or "(无额外描述)",
-                rework_section=rework_section,
-            )
+            try:
+                prompt = template.format(
+                    task_title=task["title"],
+                    task_description=task["description"] or "(无额外描述)",
+                    rework_section=rework_section,
+                )
+            except Exception:
+                prompt = template
         else:
             # Built-in fallback (should rarely be used)
             prompt = (

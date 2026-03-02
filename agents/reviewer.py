@@ -1,6 +1,33 @@
 import asyncio
 
-from base import BaseAgent, get_task_dev_agent, load_prompt, parse_status_list
+from base import BaseAgent, get_task_dev_agent, parse_status_list
+
+REVIEWER_PROMPT_DEFAULT = (
+    "你是资深代码/文档审查工程师，负责审查以下变更。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "## 变更内容\n\n"
+    "```\n"
+    "{diff}\n"
+    "```\n\n"
+    "## 审查要点\n\n"
+    "- 是否完整实现了需求描述中的所有要求\n"
+    "- 代码/内容是否正确，有无明显错误或遗漏\n"
+    "- 代码质量、可读性、边界情况处理\n"
+    "- 文件结构是否合理\n\n"
+    "## 输出格式\n\n"
+    "审查完毕后，在回复**最后**输出决定 JSON（后面不要再有任何文字）：\n\n"
+    "**同意合并：**\n"
+    "```json\n"
+    '{{"decision": "approve", "comment": "简要说明通过原因"}}\n'
+    "```\n\n"
+    "**需要修改：**\n"
+    "```json\n"
+    '{{"decision": "request_changes", "feedback": "条列说明需要修改的具体内容"}}\n'
+    "```"
+)
 
 
 class ReviewerAgent(BaseAgent):
@@ -14,6 +41,7 @@ class ReviewerAgent(BaseAgent):
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["in_review"])
         self.cli_name = str(cfg.get("cli") or "claude")
+        self.prompt_template = str(cfg.get("prompt") or REVIEWER_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "reviewing")
 
     def respect_assignment_for(self, status: str) -> bool:
@@ -26,7 +54,9 @@ class ReviewerAgent(BaseAgent):
         task_id = task["id"]
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
-        proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=dev_agent)
+        _, worktree_dev, branch = await self.ensure_agent_workspace(
+            task, agent_key=dev_agent, sync_with_main=False
+        )
 
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法进行精确审查。请 developer 重新提交。"
@@ -64,15 +94,18 @@ class ReviewerAgent(BaseAgent):
         await self.add_log(task_id, f"获取到 commit diff ({len(diff)} 字符): {commit_hash}")
 
         # ── Build prompt from template ────────────────────────────────────────
-        template = load_prompt("reviewer", project_path=proj_root)
+        template = (self.prompt_template or "").strip()
         if template:
-            prompt = template.format(
-                task_title=task["title"],
-                task_description=task["description"] or "(无额外描述)",
-                commit_hash=commit_hash,
-                dev_agent=dev_agent,
-                diff=diff[:8000],
-            )
+            try:
+                prompt = template.format(
+                    task_title=task["title"],
+                    task_description=task["description"] or "(无额外描述)",
+                    commit_hash=commit_hash,
+                    dev_agent=dev_agent,
+                    diff=diff[:8000],
+                )
+            except Exception:
+                prompt = template
         else:
             prompt = (
                 f"审查任务「{task['title']}」的代码变更（commit={commit_hash}）：\n\n```\n{diff[:8000]}\n```\n\n"

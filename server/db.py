@@ -6,6 +6,81 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
 
+DEVELOPER_PROMPT_DEFAULT = (
+    "你是一名专业软件工程师，负责实现以下任务。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. **所有成果必须写入文件**，不要只在终端打印输出\n"
+    "   - 代码任务 → 创建对应语言的源文件（.py / .ts / .go 等）\n"
+    "   - 文档/方案任务 → 创建 `.md` 文件，把完整内容写入\n"
+    "   - 至少创建一个文件，否则任务无法通过审查\n\n"
+    "2. **质量标准**\n"
+    "   - 代码需有适当注释，边界情况需处理\n"
+    "   - 文档需完整、结构清晰\n\n"
+    "3. 直接开始实现，不需要解释计划"
+)
+
+REVIEWER_PROMPT_DEFAULT = (
+    "你是资深代码/文档审查工程师，负责审查以下变更。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "## 变更内容\n\n"
+    "```\n"
+    "{diff}\n"
+    "```\n\n"
+    "## 审查要点\n\n"
+    "- 是否完整实现了需求描述中的所有要求\n"
+    "- 代码/内容是否正确，有无明显错误或遗漏\n"
+    "- 代码质量、可读性、边界情况处理\n"
+    "- 文件结构是否合理\n\n"
+    "## 输出格式\n\n"
+    "审查完毕后，在回复**最后**输出决定 JSON（后面不要再有任何文字）：\n\n"
+    "**同意合并：**\n"
+    "```json\n"
+    '{{"decision": "approve", "comment": "简要说明通过原因"}}\n'
+    "```\n\n"
+    "**需要修改：**\n"
+    "```json\n"
+    '{{"decision": "request_changes", "feedback": "条列说明需要修改的具体内容"}}\n'
+    "```"
+)
+
+MANAGER_PROMPT_DEFAULT = (
+    "你是发布合并管理者，负责把经审查通过的 commit 合并到主分支。\n\n"
+    "任务标题：{task_title}\n"
+    "请确保只合并经过审查的目标 commit，并在冲突时停止自动流程。"
+)
+
+LEADER_PROMPT_DEFAULT = (
+    "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
+    "## 任务标题\n{task_title}\n\n"
+    "## 任务描述\n{task_description}\n\n"
+    "## 可用 Agent 类型\n{agent_list}\n\n"
+    "## 评估标准\n"
+    "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
+    "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
+    "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
+    "如果是简单任务：\n"
+    '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
+    "如果是复杂任务：\n"
+    '{"action": "decompose", "subtasks": [\n'
+    '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
+    "]}"
+)
+
+BUILTIN_PROMPTS = {
+    "developer": DEVELOPER_PROMPT_DEFAULT,
+    "reviewer": REVIEWER_PROMPT_DEFAULT,
+    "manager": MANAGER_PROMPT_DEFAULT,
+    "leader": LEADER_PROMPT_DEFAULT,
+}
+
 
 def get_conn():
     conn = sqlite3.connect(str(DB_PATH))
@@ -86,6 +161,7 @@ def _seed_builtin_agents(conn):
             "key": "developer",
             "name": "开发者",
             "description": "实现任务需求，编写代码并提交到 dev 分支",
+            "prompt": BUILTIN_PROMPTS["developer"],
             "poll_statuses": '["todo","needs_changes"]',
             "next_status": "in_review",
             "working_status": "in_progress",
@@ -94,6 +170,7 @@ def _seed_builtin_agents(conn):
             "key": "reviewer",
             "name": "审查者",
             "description": "审查代码变更，决定通过或要求修改",
+            "prompt": BUILTIN_PROMPTS["reviewer"],
             "poll_statuses": '["in_review"]',
             "next_status": "approved",
             "working_status": "reviewing",
@@ -102,6 +179,7 @@ def _seed_builtin_agents(conn):
             "key": "manager",
             "name": "合并管理者",
             "description": "将审查通过的代码合并到主分支",
+            "prompt": BUILTIN_PROMPTS["manager"],
             "poll_statuses": '["approved"]',
             "next_status": "pending_acceptance",
             "working_status": "merging",
@@ -113,22 +191,7 @@ def _seed_builtin_agents(conn):
             "poll_statuses": '["triage","decompose"]',
             "next_status": "decomposed",
             "working_status": "triaging",
-            "prompt": (
-                "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
-                "## 任务标题\n{task_title}\n\n"
-                "## 任务描述\n{task_description}\n\n"
-                "## 可用 Agent 类型\n{agent_list}\n\n"
-                "## 评估标准\n"
-                "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
-                "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
-                "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
-                "如果是简单任务：\n"
-                '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
-                "如果是复杂任务：\n"
-                '{"action": "decompose", "subtasks": [\n'
-                '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
-                "]}"
-            ),
+            "prompt": BUILTIN_PROMPTS["leader"],
         },
     ]
     now = _now()
@@ -149,6 +212,14 @@ def _seed_builtin_agents(conn):
            SET poll_statuses='["triage","decompose"]', working_status='triaging'
            WHERE key='leader' AND (poll_statuses='["decompose"]' OR working_status='decomposing')"""
     )
+    # Migrate legacy rows where built-in prompt was empty.
+    for key, prompt in BUILTIN_PROMPTS.items():
+        conn.execute(
+            """UPDATE agent_types
+               SET prompt=?
+               WHERE key=? AND is_builtin=1 AND TRIM(COALESCE(prompt, ''))=''""",
+            (prompt, key),
+        )
 
 
 def _now():

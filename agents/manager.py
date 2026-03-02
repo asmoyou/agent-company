@@ -23,7 +23,10 @@ class ManagerAgent(BaseAgent):
         task_id = task["id"]
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
-        proj_root, _, dev_branch = await self.ensure_agent_workspace(task, agent_key=dev_agent)
+        target_commit = commit_hash
+        proj_root, _, dev_branch = await self.ensure_agent_workspace(
+            task, agent_key=dev_agent, sync_with_main=False
+        )
 
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法精确合并。退回开发重提。"
@@ -103,6 +106,23 @@ class ManagerAgent(BaseAgent):
                 await self.git("merge", "--abort", cwd=proj_root)
             except Exception:
                 pass
+            low = err.lower()
+            is_conflict = ("conflict" in low) or ("automatic merge failed" in low) or ("冲突" in err)
+            if is_conflict:
+                feedback = (
+                    f"[合并冲突] main 与 {dev_branch} 在合并 commit {target_commit} 时发生冲突，"
+                    f"请 {dev_agent} 在其分支解决冲突后重新提交。"
+                )
+                await self.add_log(task_id, f"↩ 发生合并冲突，退回 {dev_agent} 处理")
+                await self.update_task(
+                    task_id,
+                    status="needs_changes",
+                    assignee=None,
+                    assigned_agent=dev_agent,
+                    dev_agent=dev_agent,
+                    review_feedback=feedback,
+                )
+                return
             await self.update_task(task_id, status="approved", assignee=None)
 
 
