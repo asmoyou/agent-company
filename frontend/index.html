@@ -116,7 +116,7 @@
       + 新建第一个项目
     </button>
   </div>
-  <div id="board" class="flex gap-2 hidden" style="min-width:1760px;"></div>
+  <div id="board" class="flex gap-2 hidden" style="min-width:1920px;"></div>
 </main>
 
 <!-- Agent Terminals -->
@@ -293,11 +293,11 @@
       </button>
     </div>
 
-    <!-- 分解按钮 (todo only, non-subtask) -->
+    <!-- 分解按钮 (todo only, non-subtask) — 强制让 leader 分解 -->
     <div id="panel-decompose-btn" class="hidden">
       <button onclick="decomposeCurrentTask()"
         class="w-full bg-fuchsia-900/40 hover:bg-fuchsia-900/70 text-fuchsia-300 text-sm py-2 rounded-lg border border-fuchsia-900/50 transition">
-        🧩 分解此任务（Leader Agent 自动拆分）
+        🧩 强制分解（让 Leader 拆分为子任务）
       </button>
     </div>
 
@@ -540,8 +540,9 @@ const WS_URL = `ws://${location.host}/ws`;
 const API    = `${location.protocol}//${location.host}`;
 
 const COLUMNS = [
-  { status:"decompose",          label:"待分解",   dot:"bg-fuchsia-500"  },
-  { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400"  },
+  { status:"triage",             label:"待评估",   dot:"bg-violet-500"  },
+  { status:"decompose",          label:"强制分解",  dot:"bg-fuchsia-500" },
+  { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400" },
   { status:"todo",               label:"待开发",   dot:"bg-slate-500"   },
   { status:"in_progress",        label:"开发中",   dot:"bg-blue-500"    },
   { status:"in_review",          label:"待审查",   dot:"bg-yellow-500"  },
@@ -553,6 +554,7 @@ const COLUMNS = [
   { status:"completed",          label:"已完成",   dot:"bg-emerald-400" },
 ];
 const STATUS_BADGE = {
+  triage:"bg-violet-900 text-violet-300",   triaging:"bg-violet-900 text-violet-300",
   decompose:"bg-fuchsia-900 text-fuchsia-300", decomposed:"bg-fuchsia-900/60 text-fuchsia-300",
   decomposing:"bg-fuchsia-900 text-fuchsia-300",
   todo:"bg-slate-700 text-slate-300", in_progress:"bg-blue-900 text-blue-300",
