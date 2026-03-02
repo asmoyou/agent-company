@@ -36,6 +36,7 @@ Thumbs.db
 
 # Git worktrees (runtime-created)
 .worktrees/
+.pids/
 
 # Claude project metadata
 .claude/
