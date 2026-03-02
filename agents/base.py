@@ -17,7 +17,7 @@ HEARTBEAT_SECS  = 45
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
     # Use non-interactive subcommand to avoid TTY requirement in agent subprocesses.
-    "codex":  ["codex", "exec", "--full-auto", "{prompt}"],
+    "codex":  ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
 }
 AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
 # Idle fallback auto-reply is disabled by default to avoid blind ENTER loops.

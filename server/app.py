@@ -567,7 +567,7 @@ async def generate_agent_prompt(body: GeneratePromptRequest):
     )
     cli = body.cli if body.cli in ("claude", "codex") else "claude"
     cmd = ["claude", "--dangerously-skip-permissions", "-p", meta_prompt] if cli == "claude" \
-          else ["codex", "--full-auto", meta_prompt]
+          else ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", meta_prompt]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
