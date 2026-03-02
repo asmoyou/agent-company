@@ -116,7 +116,7 @@
       + 新建第一个项目
     </button>
   </div>
-  <div id="board" class="flex gap-2 hidden" style="min-width:1440px;"></div>
+  <div id="board" class="flex gap-2 hidden" style="min-width:1760px;"></div>
 </main>
 
 <!-- Agent Terminals -->
@@ -291,6 +291,23 @@
         class="w-full bg-slate-700 hover:bg-slate-600 text-slate-400 text-sm py-2 rounded-lg">
         📦 归档此任务
       </button>
+    </div>
+
+    <!-- 分解按钮 (todo only, non-subtask) -->
+    <div id="panel-decompose-btn" class="hidden">
+      <button onclick="decomposeCurrentTask()"
+        class="w-full bg-fuchsia-900/40 hover:bg-fuchsia-900/70 text-fuchsia-300 text-sm py-2 rounded-lg border border-fuchsia-900/50 transition">
+        🧩 分解此任务（Leader Agent 自动拆分）
+      </button>
+    </div>
+
+    <!-- 子任务列表 (decomposed only) -->
+    <div id="panel-subtasks-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-2 flex items-center justify-between">
+        <span>子任务</span>
+        <span id="panel-subtasks-progress" class="text-fuchsia-400 text-xs"></span>
+      </div>
+      <div id="panel-subtasks-list" class="space-y-1.5"></div>
     </div>
 
     <!-- 交付文件 -->
@@ -523,6 +540,8 @@ const WS_URL = `ws://${location.host}/ws`;
 const API    = `${location.protocol}//${location.host}`;
 
 const COLUMNS = [
+  { status:"decompose",          label:"待分解",   dot:"bg-fuchsia-500"  },
+  { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400"  },
   { status:"todo",               label:"待开发",   dot:"bg-slate-500"   },
   { status:"in_progress",        label:"开发中",   dot:"bg-blue-500"    },
   { status:"in_review",          label:"待审查",   dot:"bg-yellow-500"  },
@@ -534,6 +553,8 @@ const COLUMNS = [
   { status:"completed",          label:"已完成",   dot:"bg-emerald-400" },
 ];
 const STATUS_BADGE = {
+  decompose:"bg-fuchsia-900 text-fuchsia-300", decomposed:"bg-fuchsia-900/60 text-fuchsia-300",
+  decomposing:"bg-fuchsia-900 text-fuchsia-300",
   todo:"bg-slate-700 text-slate-300", in_progress:"bg-blue-900 text-blue-300",
   in_review:"bg-yellow-900 text-yellow-300", reviewing:"bg-orange-900 text-orange-300",
   needs_changes:"bg-red-900 text-red-300", approved:"bg-green-900 text-green-300",
@@ -815,6 +836,22 @@ function renderCard(task) {
   const pendingBadge = task.status === "pending_acceptance"
     ? `<span class="text-xs text-teal-400 animate-pulse">● 待验收</span>` : "";
 
+  // Subtask progress (for decomposed parent tasks)
+  let subtaskBadge = "";
+  if (task.status === "decomposed") {
+    const subtasks = Object.values(tasks).filter(t => t.parent_task_id === task.id);
+    const done = subtasks.filter(t => t.status === "completed").length;
+    subtaskBadge = `<span class="text-xs text-fuchsia-400">${done}/${subtasks.length} 子任务</span>`;
+  }
+
+  // Parent link badge (for subtasks)
+  const parentBadge = task.parent_task_id
+    ? `<span class="text-xs text-fuchsia-600/70">↳ 子任务</span>` : "";
+
+  // Assigned agent hint
+  const agentBadge = task.assigned_agent && !task.assignee
+    ? `<span class="text-xs text-slate-600">→${task.assigned_agent}</span>` : "";
+
   return `
     <div class="card bg-slate-800 border border-slate-700 rounded-lg p-3 cursor-pointer ${task.archived?'archived-card':''}"
          onclick="openPanel('${task.id}')">
@@ -823,7 +860,7 @@ function renderCard(task) {
         <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
         ${task.assignee?`<span class="text-slate-500 text-xs">${task.assignee}</span>`:""}
         ${task.commit_hash?`<span class="text-xs font-mono text-green-600">${task.commit_hash}</span>`:""}
-        ${pendingBadge}${archiveBadge}
+        ${pendingBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}
       </div>
       ${feedbackSnippet}
     </div>`;
@@ -937,6 +974,19 @@ async function openPanel(id) {
   const archBtn = document.getElementById("panel-archive-btn");
   archBtn.classList.toggle("hidden", task.status!=="completed" || !!task.archived);
 
+  // Decompose button: show only for todo tasks that are not subtasks
+  const decompBtn = document.getElementById("panel-decompose-btn");
+  decompBtn.classList.toggle("hidden", task.status !== "todo" || !!task.parent_task_id);
+
+  // Subtasks section: show for decomposed tasks
+  const stWrap = document.getElementById("panel-subtasks-wrap");
+  if (task.status === "decomposed" || task.status === "decomposing") {
+    stWrap.classList.remove("hidden");
+    renderSubtaskList(task.id);
+  } else {
+    stWrap.classList.add("hidden");
+  }
+
   // Feedback
   const fbWrap = document.getElementById("panel-feedback-wrap");
   const goodFb = task.review_feedback && !task.review_feedback.startsWith("(auto-approved");
@@ -1036,6 +1086,34 @@ async function archiveCurrentTask() {
   await patchTask(currentTaskId,{archived:1});
   closePanel();
   refreshBoard();
+}
+async function decomposeCurrentTask() {
+  if (!currentTaskId) return;
+  if (!confirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？")) return;
+  await patchTask(currentTaskId, {status: "decompose"});
+}
+function renderSubtaskList(parentId) {
+  const listEl = document.getElementById("panel-subtasks-list");
+  const progEl = document.getElementById("panel-subtasks-progress");
+  const subtasks = Object.values(tasks).filter(t => t.parent_task_id === parentId);
+  if (!subtasks.length) {
+    listEl.innerHTML = '<div class="text-xs text-slate-500">子任务生成中...</div>';
+    progEl.textContent = "";
+    return;
+  }
+  const done = subtasks.filter(t => t.status === "completed").length;
+  progEl.textContent = `${done}/${subtasks.length} 完成`;
+  listEl.innerHTML = subtasks.map(st => {
+    const b = STATUS_BADGE[st.status]||"bg-slate-700 text-slate-400";
+    const l = STATUS_LABEL[st.status]||st.status;
+    return `<div class="flex items-center gap-2 bg-slate-700/30 rounded px-3 py-1.5 cursor-pointer hover:bg-slate-700/60"
+                 onclick="openPanel('${st.id}')">
+      <span class="text-xs font-mono text-fuchsia-700">↳</span>
+      <span class="text-xs text-slate-300 flex-1 truncate">${escHtml(st.title)}</span>
+      <span class="badge text-xs px-1.5 py-0.5 rounded-full ${b} shrink-0">${l}</span>
+      ${st.assigned_agent?`<span class="text-xs text-slate-600 shrink-0">${st.assigned_agent}</span>`:''}
+    </div>`;
+  }).join("");
 }
 async function patchTask(id,fields) {
   const res=await fetch(`${API}/tasks/${id}`,{
@@ -1214,6 +1292,10 @@ function connectWS() {
       tasks[msg.task.id]=msg.task;
       refreshBoard();
       if (currentTaskId===msg.task.id) openPanel(msg.task.id);
+      // If current panel shows parent of updated task, refresh subtask list
+      if (msg.task.parent_task_id && currentTaskId===msg.task.parent_task_id) {
+        renderSubtaskList(msg.task.parent_task_id);
+      }
     } else if (msg.event==="log_added"&&currentTaskId===msg.log.task_id) {
       const el=document.getElementById("panel-logs");
       const d=document.createElement("div");d.className="log-entry";
