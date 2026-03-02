@@ -66,9 +66,6 @@ class ConnectionManager:
         self.active -= dead
 
 
-PROMPTS_DIR = PROJECT_ROOT / "prompts"
-PROMPTS_DIR.mkdir(exist_ok=True)
-
 manager = ConnectionManager()
 
 
@@ -365,73 +362,81 @@ async def get_task_files(task_id: str):
     }
 
 
-# ── Prompts endpoints ─────────────────────────────────────────────────────────
-ALLOWED_AGENTS = {"developer", "reviewer"}
+# ── Prompts endpoints (database-backed) ───────────────────────────────────────
+ALLOWED_PROMPT_AGENTS = {"developer", "reviewer", "manager", "leader"}
+
 
 class PromptUpdate(BaseModel):
     content: str
 
+
+def _get_prompt_agent(agent_name: str) -> dict:
+    if agent_name not in ALLOWED_PROMPT_AGENTS:
+        raise HTTPException(400, "Invalid agent name")
+    at = db.get_agent_type(agent_name)
+    if not at:
+        raise HTTPException(404, "Agent type not found")
+    return at
+
+
+async def _update_prompt_and_broadcast(agent_name: str, content: str) -> dict:
+    updated = db.update_agent_type(agent_name, prompt=content)
+    if not updated:
+        raise HTTPException(404, "Agent type not found")
+    await manager.broadcast({"event": "agent_type_updated", "agent_type": updated})
+    return updated
+
+
 @app.get("/prompts/{agent_name}")
 async def get_prompt(agent_name: str):
-    if agent_name not in ALLOWED_AGENTS:
-        raise HTTPException(400, "Invalid agent name")
-    path = PROMPTS_DIR / f"{agent_name}.md"
+    at = _get_prompt_agent(agent_name)
     return {
         "agent": agent_name,
-        "content": path.read_text(encoding="utf-8") if path.exists() else "",
-        "source": "global",
+        "content": at.get("prompt", ""),
+        "source": "database",
     }
+
 
 @app.put("/prompts/{agent_name}")
 async def update_prompt(agent_name: str, body: PromptUpdate):
-    if agent_name not in ALLOWED_AGENTS:
-        raise HTTPException(400, "Invalid agent name")
-    path = PROMPTS_DIR / f"{agent_name}.md"
-    path.write_text(body.content, encoding="utf-8")
-    return {"ok": True}
+    _get_prompt_agent(agent_name)
+    await _update_prompt_and_broadcast(agent_name, body.content)
+    return {"ok": True, "source": "database"}
+
 
 @app.get("/projects/{project_id}/prompts/{agent_name}")
 async def get_project_prompt(project_id: str, agent_name: str):
-    if agent_name not in ALLOWED_AGENTS:
-        raise HTTPException(400, "Invalid agent name")
+    # Project-level prompt overrides are removed; keep endpoint for backward compatibility.
     p = db.get_project(project_id)
     if not p:
         raise HTTPException(404, "Project not found")
-    override = Path(p["path"]) / ".opc" / f"{agent_name}.md"
-    if override.exists():
-        return {"agent": agent_name, "content": override.read_text(encoding="utf-8"), "source": "project"}
-    # Fall back to global
-    glob = PROMPTS_DIR / f"{agent_name}.md"
+    at = _get_prompt_agent(agent_name)
     return {
         "agent": agent_name,
-        "content": glob.read_text(encoding="utf-8") if glob.exists() else "",
-        "source": "global",
+        "content": at.get("prompt", ""),
+        "source": "database",
     }
+
 
 @app.put("/projects/{project_id}/prompts/{agent_name}")
 async def update_project_prompt(project_id: str, agent_name: str, body: PromptUpdate):
-    if agent_name not in ALLOWED_AGENTS:
-        raise HTTPException(400, "Invalid agent name")
+    # Compatibility route: writes to global DB prompt.
     p = db.get_project(project_id)
     if not p:
         raise HTTPException(404, "Project not found")
-    opc_dir = Path(p["path"]) / ".opc"
-    opc_dir.mkdir(exist_ok=True)
-    (opc_dir / f"{agent_name}.md").write_text(body.content, encoding="utf-8")
-    return {"ok": True}
+    _get_prompt_agent(agent_name)
+    await _update_prompt_and_broadcast(agent_name, body.content)
+    return {"ok": True, "source": "database"}
+
 
 @app.delete("/projects/{project_id}/prompts/{agent_name}")
 async def delete_project_prompt(project_id: str, agent_name: str):
-    """Remove project-level override, falling back to global prompt."""
-    if agent_name not in ALLOWED_AGENTS:
-        raise HTTPException(400, "Invalid agent name")
+    # Compatibility route: project-level override no longer exists.
     p = db.get_project(project_id)
     if not p:
         raise HTTPException(404, "Project not found")
-    override = Path(p["path"]) / ".opc" / f"{agent_name}.md"
-    if override.exists():
-        override.unlink()
-    return {"ok": True}
+    _get_prompt_agent(agent_name)
+    return {"ok": True, "source": "database"}
 
 
 # ── File management helpers ──────────────────────────────────────────────────

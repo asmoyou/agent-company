@@ -9,7 +9,6 @@ from pathlib import Path
 import httpx
 
 PROJECT_ROOT    = Path(__file__).parent.parent
-PROMPTS_DIR     = PROJECT_ROOT / "prompts"
 SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
 CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
@@ -74,22 +73,6 @@ def get_project_dirs(task: dict, agent_key: str | None = None) -> tuple[Path, Pa
         root.mkdir(parents=True, exist_ok=True)
     key = normalize_agent_key(agent_key or get_task_dev_agent(task))
     return root, root / ".worktrees" / key
-
-
-def load_prompt(agent_name: str, project_path: Path | None = None) -> str:
-    """
-    Load prompt template for an agent.
-    Priority: {project_path}/.opc/{agent}.md  >  prompts/{agent}.md
-    Returns empty string if neither exists.
-    """
-    if project_path:
-        override = project_path / ".opc" / f"{agent_name}.md"
-        if override.exists():
-            return override.read_text(encoding="utf-8")
-    default = PROMPTS_DIR / f"{agent_name}.md"
-    if default.exists():
-        return default.read_text(encoding="utf-8")
-    return ""
 
 
 class BaseAgent:
@@ -287,8 +270,48 @@ class BaseAgent:
         await proc.wait()
         return proc.returncode, "\n".join(lines)
 
+    async def _sync_branch_with_main(self, root: Path, worktree: Path, branch: str) -> str:
+        """
+        Try to fast-sync agent branch by merging `main` into it.
+        Returns a short status string; never raises.
+        """
+        if branch == "main":
+            return "main"
+
+        has_main = bool((await self.git("branch", "--list", "main", cwd=root)).strip())
+        if not has_main:
+            return "no_main"
+
+        try:
+            dirty = await self.git("status", "--porcelain", cwd=worktree)
+        except Exception as e:
+            return f"status_error:{e}"
+        if dirty.strip():
+            return "dirty"
+
+        try:
+            before = await self.git("rev-parse", "HEAD", cwd=worktree)
+        except Exception as e:
+            return f"head_error:{e}"
+
+        try:
+            await self.git("merge", "--no-edit", "main", cwd=worktree)
+        except Exception as e:
+            err = str(e)
+            try:
+                await self.git("merge", "--abort", cwd=worktree)
+            except Exception:
+                pass
+            return f"conflict:{err}"
+
+        try:
+            after = await self.git("rev-parse", "HEAD", cwd=worktree)
+            return "merged" if before != after else "up_to_date"
+        except Exception:
+            return "synced"
+
     async def ensure_agent_workspace(
-        self, task: dict, agent_key: str | None = None
+        self, task: dict, agent_key: str | None = None, sync_with_main: bool = True
     ) -> tuple[Path, Path, str]:
         """
         Ensure git branch+worktree for a given agent key.
@@ -331,6 +354,14 @@ class BaseAgent:
 
         await self.git("config", "user.email", "agent@opc-demo.local", cwd=worktree)
         await self.git("config", "user.name", "OPC Agent", cwd=worktree)
+
+        if sync_with_main:
+            sync_result = await self._sync_branch_with_main(root, worktree, branch)
+            if sync_result == "merged":
+                print(f"[{self.name}] Synced {branch} with main")
+            elif sync_result in ("dirty",) or sync_result.startswith("conflict:"):
+                print(f"[{self.name}] WARN: main sync skipped for {branch}: {sync_result}")
+
         return root, worktree, branch
 
     # ── JSON decision parser ─────────────────────────────────────────────────

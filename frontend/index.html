@@ -423,25 +423,12 @@
       <div>
         <h3 class="font-semibold text-white">Agent 提示词</h3>
         <p class="text-xs text-slate-500 mt-0.5">
-          全局模板 → <code class="text-slate-400">prompts/{agent}.md</code> ；
-          项目覆盖 → <code class="text-slate-400">{project}/.opc/{agent}.md</code>（优先级更高）
+          提示词统一存储在数据库 <code class="text-slate-400">agent_types.prompt</code>，保存后自动热重载
         </p>
       </div>
       <button onclick="closePromptsModal()" class="text-slate-400 hover:text-white text-xl shrink-0">&times;</button>
     </div>
-    <!-- Scope tabs -->
-    <div class="px-6 pt-3 flex items-center gap-3 shrink-0 flex-wrap">
-      <span class="text-xs text-slate-400">范围：</span>
-      <button id="prompt-scope-global" onclick="setPromptScope('global')"
-        class="text-xs px-3 py-1 rounded-full bg-indigo-600 text-white">全局默认</button>
-      <button id="prompt-scope-project" onclick="setPromptScope('project')"
-        class="text-xs px-3 py-1 rounded-full bg-slate-700 text-slate-400">
-        项目覆盖 <span id="prompt-project-name" class="opacity-70"></span>
-      </button>
-      <span id="prompt-override-hint" class="hidden text-xs text-amber-400">⚠ 当前项目有自定义提示词</span>
-      <button id="btn-delete-project-prompt" onclick="deleteProjectPrompt()"
-        class="hidden text-xs text-red-400 hover:text-red-300">✕ 删除项目覆盖</button>
-    </div>
+    <div class="px-6 pt-3 text-xs text-slate-500 shrink-0">范围：全局（数据库）</div>
     <!-- Agent tabs -->
     <div class="px-6 pt-3 flex gap-2 shrink-0">
       <button onclick="setPromptAgent('developer')" id="ptab-developer"
@@ -473,7 +460,6 @@
 <script>
 // ── Prompts editor ────────────────────────────────────────────────────────────
 let promptAgent = "developer";
-let promptScope = "global";
 
 const DEFAULT_PROMPTS = {
   developer: `你是一名专业软件工程师，负责实现以下任务。\n\n## 任务信息\n\n**标题**：{task_title}\n\n**需求描述**：\n{task_description}\n\n{rework_section}\n\n## 工作要求\n\n1. 所有成果必须写入文件，不要只在终端打印输出\n2. 代码任务 → 创建对应语言的源文件；文档任务 → 创建 .md 文件\n3. 至少创建一个文件\n4. 直接开始实现，不需要解释计划`,
@@ -482,11 +468,7 @@ const DEFAULT_PROMPTS = {
 
 function openPromptsModal() {
   document.getElementById("modal-prompts").classList.remove("hidden");
-  const proj = projects[currentProjectId];
-  document.getElementById("prompt-project-name").textContent = proj ? `(${proj.name})` : "(未选项目)";
-  document.getElementById("prompt-scope-project").disabled = !currentProjectId;
   setPromptAgent("developer");
-  setPromptScope("global");
 }
 function closePromptsModal() {
   document.getElementById("modal-prompts").classList.add("hidden");
@@ -502,43 +484,18 @@ function setPromptAgent(agent) {
   document.getElementById("ph-diff").classList.toggle("hidden", agent !== "reviewer");
   loadPromptContent();
 }
-function setPromptScope(scope) {
-  promptScope = scope;
-  ["global","project"].forEach(s => {
-    document.getElementById(`prompt-scope-${s}`).className = s === scope
-      ? "text-xs px-3 py-1 rounded-full bg-indigo-600 text-white"
-      : "text-xs px-3 py-1 rounded-full bg-slate-700 text-slate-400";
-  });
-  loadPromptContent();
-}
 async function loadPromptContent() {
   const ta = document.getElementById("prompt-editor");
   ta.value = "加载中...";
   try {
-    const url = promptScope === "project" && currentProjectId
-      ? `${API}/projects/${currentProjectId}/prompts/${promptAgent}`
-      : `${API}/prompts/${promptAgent}`;
+    const url = `${API}/prompts/${promptAgent}`;
     const data = await (await fetch(url)).json();
     ta.value = data.content || DEFAULT_PROMPTS[promptAgent] || "";
-
-    // Check override status
-    const hint   = document.getElementById("prompt-override-hint");
-    const delBtn = document.getElementById("btn-delete-project-prompt");
-    if (currentProjectId) {
-      const pd = await (await fetch(`${API}/projects/${currentProjectId}/prompts/${promptAgent}`)).json();
-      const hasOverride = pd.source === "project";
-      hint.classList.toggle("hidden", !hasOverride);
-      delBtn.classList.toggle("hidden", !(hasOverride && promptScope === "project"));
-    } else {
-      hint.classList.add("hidden"); delBtn.classList.add("hidden");
-    }
   } catch { ta.value = DEFAULT_PROMPTS[promptAgent] || ""; }
 }
 async function savePrompt() {
   const content = document.getElementById("prompt-editor").value;
-  const url = promptScope === "project" && currentProjectId
-    ? `${API}/projects/${currentProjectId}/prompts/${promptAgent}`
-    : `${API}/prompts/${promptAgent}`;
+  const url = `${API}/prompts/${promptAgent}`;
   const res = await fetch(url, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({content})});
   if (res.ok) {
     const btn = document.querySelector("#modal-prompts button[onclick='savePrompt()']");
@@ -546,11 +503,6 @@ async function savePrompt() {
     setTimeout(()=>btn.textContent=orig, 1500);
     loadPromptContent();
   } else { alert("保存失败: "+await res.text()); }
-}
-async function deleteProjectPrompt() {
-  if (!currentProjectId||!confirm("删除项目级提示词，恢复使用全局默认？")) return;
-  await fetch(`${API}/projects/${currentProjectId}/prompts/${promptAgent}`,{method:"DELETE"});
-  loadPromptContent();
 }
 function resetPromptToDefault() {
   document.getElementById("prompt-editor").value = DEFAULT_PROMPTS[promptAgent]||"";
