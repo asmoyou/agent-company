@@ -1,22 +1,23 @@
 import asyncio
 import os
 
-from base import BaseAgent, get_project_dirs, load_prompt
+from base import BaseAgent, load_prompt
 
 
 class DeveloperAgent(BaseAgent):
     name = "developer"
     poll_statuses = ["todo", "needs_changes"]
     cli_name = os.getenv("DEVELOPER_CLI", "claude")
+    working_status = "in_progress"
 
     async def process_task(self, task: dict):
         task_id = task["id"]
-        proj_root, worktree_dev = get_project_dirs(task)
+        proj_root, worktree_dev, branch = await self.ensure_agent_workspace(task, agent_key=self.name)
 
-        await self.update_task(task_id, status="in_progress", assignee=self.name)
-        await self.add_log(task_id, f"Developer 接手，工作目录: {worktree_dev}")
+        await self.add_log(task_id, f"Developer 接手，分支: {branch}，工作目录: {worktree_dev}")
 
-        is_rework = task["status"] == "needs_changes" and task.get("review_feedback")
+        prev_status = task.get("_claimed_from_status", task.get("status"))
+        is_rework = prev_status == "needs_changes" and task.get("review_feedback")
         if is_rework:
             await self.add_log(task_id, "根据审查意见返工")
 
@@ -63,7 +64,13 @@ class DeveloperAgent(BaseAgent):
 
         if not diff.strip():
             await self.add_log(task_id, "无文件变更，提交审查")
-            await self.update_task(task_id, status="in_review")
+            await self.update_task(
+                task_id,
+                status="in_review",
+                assignee=None,
+                assigned_agent=self.name,
+                dev_agent=self.name,
+            )
             return
 
         try:
@@ -75,10 +82,17 @@ class DeveloperAgent(BaseAgent):
             )
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
             await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
-            await self.update_task(task_id, status="in_review", commit_hash=commit_hash)
+            await self.update_task(
+                task_id,
+                status="in_review",
+                assignee=None,
+                assigned_agent=self.name,
+                dev_agent=self.name,
+                commit_hash=commit_hash,
+            )
         except Exception as e:
             await self.add_log(task_id, f"提交失败: {e}")
-            await self.update_task(task_id, status="todo")
+            await self.update_task(task_id, status="todo", assignee=None)
 
 
 if __name__ == "__main__":

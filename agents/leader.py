@@ -39,6 +39,10 @@ class LeaderAgent(BaseAgent):
     name = "leader"
     poll_statuses = ["triage", "decompose"]
     cli_name = os.getenv("DEVELOPER_CLI", "claude")
+    working_status = "triaging"
+
+    def respect_assignment_for(self, status: str) -> bool:
+        return False
 
     async def _get_prompt_template(self) -> str:
         try:
@@ -144,10 +148,8 @@ class LeaderAgent(BaseAgent):
         return created
 
     async def process_task(self, task: dict):
-        original_status = task["status"]   # "triage" or "decompose"
+        original_status = task.get("_claimed_from_status", task.get("status"))  # "triage" or "decompose"
         task_id = task["id"]
-
-        await self.update_task(task_id, status="triaging", assignee=self.name)
 
         if original_status == "decompose":
             # User explicitly requested decomposition — skip evaluation
@@ -165,7 +167,7 @@ class LeaderAgent(BaseAgent):
         r = await self.http.get(f"/tasks/{task_id}/subtasks")
         if r.status_code == 200 and r.json():
             await self.add_log(task_id, "已有子任务，标记为 decomposed（崩溃恢复）")
-            await self.update_task(task_id, status="decomposed")
+            await self.update_task(task_id, status="decomposed", assignee=None)
             return
 
         agent_list  = await self._get_agent_list()
@@ -192,7 +194,7 @@ class LeaderAgent(BaseAgent):
             if subtasks:
                 await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
                 n = await self._create_subtasks(task, subtasks)
-                await self.update_task(task_id, status="decomposed")
+                await self.update_task(task_id, status="decomposed", assignee=None)
                 await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
                 self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
                 return
@@ -200,7 +202,7 @@ class LeaderAgent(BaseAgent):
         # Simple task (or parse failed) — push to todo
         reason = decision.get("reason", "判定为简单任务") if decision else "无法解析评估结果，按简单任务处理"
         await self.add_log(task_id, f"判断为简单任务：{reason}")
-        await self.update_task(task_id, status="todo")
+        await self.update_task(task_id, status="todo", assignee=None)
         self._post_output_bg(f"✓ 简单任务，推进至 todo")
 
     async def _force_decompose(self, task: dict):
@@ -224,11 +226,11 @@ class LeaderAgent(BaseAgent):
         subtasks = self._parse_subtasks_array(output)
         if not subtasks:
             await self.add_log(task_id, "⚠ 无法解析子任务，回退为 todo")
-            await self.update_task(task_id, status="todo")
+            await self.update_task(task_id, status="todo", assignee=None)
             return
 
         n = await self._create_subtasks(task, subtasks)
-        await self.update_task(task_id, status="decomposed")
+        await self.update_task(task_id, status="decomposed", assignee=None)
         await self.add_log(task_id, f"✅ 强制分解完成，共创建 {n} 个子任务")
         self._post_output_bg(f"✓ 强制分解完成: {n} 个子任务")
 

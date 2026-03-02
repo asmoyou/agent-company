@@ -26,15 +26,30 @@ def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
     return [arg.replace("{prompt}", prompt) for arg in template]
 
 
-def get_project_dirs(task: dict) -> tuple[Path, Path]:
-    """Return (project_root, dev_worktree) for the given task."""
+def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
+    raw = (agent_key or default).strip().lower()
+    safe = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
+    return safe or default
+
+
+def get_task_dev_agent(task: dict, fallback: str = "developer") -> str:
+    return normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or fallback)
+
+
+def get_agent_branch(agent_key: str) -> str:
+    return f"agent/{normalize_agent_key(agent_key)}"
+
+
+def get_project_dirs(task: dict, agent_key: str | None = None) -> tuple[Path, Path]:
+    """Return (project_root, worktree_for_agent)."""
     project_path = task.get("project_path")
     if project_path:
         root = Path(project_path)
     else:
         root = PROJECT_ROOT / ".worktrees" / "scratch"
         root.mkdir(parents=True, exist_ok=True)
-    return root, root / ".worktrees" / "dev"
+    key = normalize_agent_key(agent_key or get_task_dev_agent(task))
+    return root, root / ".worktrees" / key
 
 
 def load_prompt(agent_name: str, project_path: Path | None = None) -> str:
@@ -57,6 +72,7 @@ class BaseAgent:
     name: str = "base"
     poll_statuses: list[str] = []
     cli_name: str = "claude"
+    working_status: str = ""
 
     def __init__(self, shutdown_event: asyncio.Event | None = None):
         self.shutdown = shutdown_event or asyncio.Event()
@@ -69,6 +85,23 @@ class BaseAgent:
         r = await self.http.get(f"/tasks/status/{status}")
         r.raise_for_status()
         return r.json()
+
+    async def claim_task(
+        self, status: str, working_status: str, respect_assignment: bool, project_id: str | None = None
+    ) -> dict | None:
+        r = await self.http.post(
+            "/tasks/claim",
+            json={
+                "status": status,
+                "working_status": working_status,
+                "agent": self.name,
+                "agent_key": self.name,
+                "respect_assignment": respect_assignment,
+                "project_id": project_id,
+            },
+        )
+        r.raise_for_status()
+        return r.json().get("task")
 
     async def update_task(self, task_id: str, **fields) -> dict:
         r = await self.http.patch(f"/tasks/{task_id}", json=fields)
@@ -173,6 +206,52 @@ class BaseAgent:
         await proc.wait()
         return proc.returncode, "\n".join(lines)
 
+    async def ensure_agent_workspace(
+        self, task: dict, agent_key: str | None = None
+    ) -> tuple[Path, Path, str]:
+        """
+        Ensure git branch+worktree for a given agent key.
+        Branch: agent/{key}
+        Worktree: .worktrees/{key}
+        """
+        key = normalize_agent_key(agent_key or get_task_dev_agent(task))
+        branch = get_agent_branch(key)
+        root, worktree = get_project_dirs(task, agent_key=key)
+        root.mkdir(parents=True, exist_ok=True)
+
+        # Bootstrap repo for scratch or non-initialized project paths.
+        if not (root / ".git").exists():
+            await self.git("init", cwd=root)
+            await self.git("config", "user.email", "agent@opc-demo.local", cwd=root)
+            await self.git("config", "user.name", "OPC Agent", cwd=root)
+            try:
+                await self.git("checkout", "-b", "main", cwd=root)
+            except Exception:
+                pass
+            try:
+                await self.git("commit", "--allow-empty", "-m", "chore: init project", cwd=root)
+            except Exception:
+                pass
+
+        has_main = bool((await self.git("branch", "--list", "main", cwd=root)).strip())
+        has_agent_branch = bool((await self.git("branch", "--list", branch, cwd=root)).strip())
+        if not has_agent_branch:
+            base_ref = "main" if has_main else "HEAD"
+            await self.git("branch", branch, base_ref, cwd=root)
+
+        if not worktree.exists():
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            await self.git("worktree", "add", str(worktree), branch, cwd=root)
+        else:
+            try:
+                await self.git("checkout", branch, cwd=worktree)
+            except Exception:
+                pass
+
+        await self.git("config", "user.email", "agent@opc-demo.local", cwd=worktree)
+        await self.git("config", "user.name", "OPC Agent", cwd=worktree)
+        return root, worktree, branch
+
     # ── JSON decision parser ─────────────────────────────────────────────────
 
     def parse_json_decision(self, text: str) -> dict | None:
@@ -197,6 +276,12 @@ class BaseAgent:
     async def process_task(self, task: dict):
         raise NotImplementedError
 
+    def working_status_for(self, status: str) -> str:
+        return self.working_status or status
+
+    def respect_assignment_for(self, status: str) -> bool:
+        return True
+
     async def run(self):
         if not shutil.which(self.cli_name):
             print(f"[{self.name}] WARNING: '{self.cli_name}' not found in PATH")
@@ -208,7 +293,15 @@ class BaseAgent:
                 if self.shutdown.is_set():
                     break
                 try:
-                    for task in await self.fetch_tasks(status):
+                    while not self.shutdown.is_set():
+                        task = await self.claim_task(
+                            status=status,
+                            working_status=self.working_status_for(status),
+                            respect_assignment=self.respect_assignment_for(status),
+                        )
+                        if not task:
+                            break
+                        task["_claimed_from_status"] = status
                         if self.shutdown.is_set():
                             break
                         print(f"[{self.name}] → '{task['title'][:40]}' ({status})")
