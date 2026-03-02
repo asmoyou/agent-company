@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from datetime import datetime
@@ -45,6 +46,20 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
+
+        CREATE TABLE IF NOT EXISTS agent_types (
+            id             TEXT PRIMARY KEY,
+            key            TEXT NOT NULL UNIQUE,
+            name           TEXT NOT NULL,
+            description    TEXT NOT NULL DEFAULT '',
+            prompt         TEXT NOT NULL DEFAULT '',
+            poll_statuses  TEXT NOT NULL DEFAULT '["todo"]',
+            next_status    TEXT NOT NULL DEFAULT 'in_review',
+            working_status TEXT NOT NULL DEFAULT 'in_progress',
+            cli            TEXT NOT NULL DEFAULT 'claude',
+            is_builtin     INTEGER NOT NULL DEFAULT 0,
+            created_at     TEXT NOT NULL
+        );
     """)
 
     # Migrations for existing DBs
@@ -56,8 +71,50 @@ def init_db():
         if col not in existing:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {defn}")
 
+    _seed_builtin_agents(conn)
     conn.commit()
     conn.close()
+
+
+def _seed_builtin_agents(conn):
+    """Insert built-in agent records if they don't exist yet."""
+    builtins = [
+        {
+            "key": "developer",
+            "name": "开发者",
+            "description": "实现任务需求，编写代码并提交到 dev 分支",
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "reviewer",
+            "name": "审查者",
+            "description": "审查代码变更，决定通过或要求修改",
+            "poll_statuses": '["in_review"]',
+            "next_status": "approved",
+            "working_status": "reviewing",
+        },
+        {
+            "key": "manager",
+            "name": "合并管理者",
+            "description": "将审查通过的代码合并到主分支",
+            "poll_statuses": '["approved"]',
+            "next_status": "pending_acceptance",
+            "working_status": "merging",
+        },
+    ]
+    now = _now()
+    for b in builtins:
+        exists = conn.execute("SELECT id FROM agent_types WHERE key=?", (b["key"],)).fetchone()
+        if not exists:
+            conn.execute(
+                """INSERT INTO agent_types
+                   (id,key,name,description,prompt,poll_statuses,next_status,working_status,cli,is_builtin,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
+                (str(uuid.uuid4()), b["key"], b["name"], b["description"], "",
+                 b["poll_statuses"], b["next_status"], b["working_status"], "claude", now),
+            )
 
 
 def _now():
@@ -68,14 +125,20 @@ def reset_stuck_tasks():
     """
     On server startup, reset tasks left in transient agent states
     back to the last stable state (in case of a crash/restart).
+    Uses the agent_types table so custom agents are also handled.
     """
     conn = get_conn()
-    # in_progress → todo  (developer was working, didn't finish)
-    conn.execute("UPDATE tasks SET status='todo',    assignee=NULL WHERE status='in_progress'")
-    # reviewing   → in_review  (reviewer was working)
-    conn.execute("UPDATE tasks SET status='in_review', assignee=NULL WHERE status='reviewing'")
-    # merging     → approved   (manager was merging)
-    conn.execute("UPDATE tasks SET status='approved',  assignee=NULL WHERE status='merging'")
+    rows = conn.execute(
+        "SELECT poll_statuses, working_status FROM agent_types WHERE working_status != ''"
+    ).fetchall()
+    for row in rows:
+        working = row["working_status"]
+        poll = json.loads(row["poll_statuses"] or "[]")
+        reset_to = poll[0] if poll else "todo"
+        conn.execute(
+            "UPDATE tasks SET status=?, assignee=NULL WHERE status=?",
+            (reset_to, working),
+        )
     conn.commit()
     conn.close()
 
@@ -231,3 +294,61 @@ def get_logs(task_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Agent Types ────────────────────────────────────────────────────────────────
+
+def list_agent_types() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM agent_types ORDER BY is_builtin DESC, created_at ASC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_agent_type(key: str) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM agent_types WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_agent_type(key: str, name: str, description: str, prompt: str,
+                      poll_statuses: list, next_status: str,
+                      working_status: str, cli: str) -> dict:
+    conn = get_conn()
+    aid = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """INSERT INTO agent_types
+           (id,key,name,description,prompt,poll_statuses,next_status,working_status,cli,is_builtin,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,0,?)""",
+        (aid, key, name, description, prompt,
+         json.dumps(poll_statuses), next_status, working_status, cli, now),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM agent_types WHERE id=?", (aid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def update_agent_type(key: str, **fields) -> dict | None:
+    if "poll_statuses" in fields and isinstance(fields["poll_statuses"], list):
+        fields["poll_statuses"] = json.dumps(fields["poll_statuses"])
+    conn = get_conn()
+    set_clause = ", ".join(f"{k}=?" for k in fields)
+    values = list(fields.values()) + [key]
+    conn.execute(f"UPDATE agent_types SET {set_clause} WHERE key=?", values)
+    conn.commit()
+    row = conn.execute("SELECT * FROM agent_types WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_agent_type(key: str) -> bool:
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM agent_types WHERE key=? AND is_builtin=0", (key,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
