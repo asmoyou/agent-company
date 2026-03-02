@@ -65,8 +65,10 @@ def init_db():
     # Migrations for existing DBs
     existing = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
     for col, defn in [
-        ("project_id", "TEXT"),
-        ("archived",   "INTEGER NOT NULL DEFAULT 0"),
+        ("project_id",     "TEXT"),
+        ("archived",       "INTEGER NOT NULL DEFAULT 0"),
+        ("parent_task_id", "TEXT"),
+        ("assigned_agent", "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {defn}")
@@ -103,6 +105,30 @@ def _seed_builtin_agents(conn):
             "next_status": "pending_acceptance",
             "working_status": "merging",
         },
+        {
+            "key": "leader",
+            "name": "分解专家",
+            "description": "将复杂任务分解为子任务并分配给合适的 Agent",
+            "poll_statuses": '["decompose"]',
+            "next_status": "decomposed",
+            "working_status": "decomposing",
+            "prompt": (
+                "你是一个专业的项目分解专家。请将以下任务分解为可执行的子任务。\n\n"
+                "## 任务标题\n{task_title}\n\n"
+                "## 任务描述\n{task_description}\n\n"
+                "## 可用 Agent 类型\n{agent_list}\n\n"
+                "## 分解要求\n"
+                "1. 分解为 2-5 个具体、独立、可验收的子任务\n"
+                "2. 每个子任务有明确的完成标准和验收条件\n"
+                "3. 为每个子任务指定最合适的 agent（使用上方列表中的 key）\n"
+                "4. 子任务按合理的执行顺序排列\n\n"
+                "## 输出格式\n"
+                "只输出 JSON 数组，不要任何其他文字：\n"
+                "[\n"
+                '  {"title": "子任务标题", "description": "详细描述和验收标准", "agent": "developer"}\n'
+                "]"
+            ),
+        },
     ]
     now = _now()
     for b in builtins:
@@ -112,7 +138,8 @@ def _seed_builtin_agents(conn):
                 """INSERT INTO agent_types
                    (id,key,name,description,prompt,poll_statuses,next_status,working_status,cli,is_builtin,created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
-                (str(uuid.uuid4()), b["key"], b["name"], b["description"], "",
+                (str(uuid.uuid4()), b["key"], b["name"], b["description"],
+                 b.get("prompt", ""),
                  b["poll_statuses"], b["next_status"], b["working_status"], "claude", now),
             )
 
@@ -201,15 +228,18 @@ def _join_project(base_sql: str) -> str:
     """
 
 
-def create_task(title: str, description: str, project_id: str | None = None) -> dict:
+def create_task(title: str, description: str, project_id: str | None = None,
+                parent_task_id: str | None = None,
+                assigned_agent: str | None = None) -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
     now = _now()
     conn.execute(
         """INSERT INTO tasks
-           (id, project_id, title, description, status, created_at, updated_at)
-           VALUES (?,?,?,?,'todo',?,?)""",
-        (tid, project_id, title, description, now, now),
+           (id, project_id, title, description, status,
+            parent_task_id, assigned_agent, created_at, updated_at)
+           VALUES (?,?,?,?,'todo',?,?,?,?)""",
+        (tid, project_id, title, description, parent_task_id, assigned_agent, now, now),
     )
     conn.commit()
     row = conn.execute(
@@ -217,6 +247,39 @@ def create_task(title: str, description: str, project_id: str | None = None) -> 
     ).fetchone()
     conn.close()
     return dict(row)
+
+
+def list_subtasks(parent_task_id: str) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        _join_project("SELECT * FROM tasks WHERE parent_task_id=? ORDER BY created_at ASC"),
+        (parent_task_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def check_parent_completion(parent_task_id: str) -> bool:
+    """
+    If all subtasks of parent_task_id are 'completed', auto-complete the parent.
+    Returns True if parent was just completed.
+    """
+    conn = get_conn()
+    subtasks = conn.execute(
+        "SELECT status FROM tasks WHERE parent_task_id=?", (parent_task_id,)
+    ).fetchall()
+    if not subtasks:
+        conn.close()
+        return False
+    all_done = all(s["status"] == "completed" for s in subtasks)
+    if all_done:
+        conn.execute(
+            "UPDATE tasks SET status='completed', updated_at=? WHERE id=? AND status='decomposed'",
+            (_now(), parent_task_id),
+        )
+        conn.commit()
+    conn.close()
+    return all_done
 
 
 def get_task(task_id: str) -> dict | None:

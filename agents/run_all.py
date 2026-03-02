@@ -11,10 +11,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from developer import DeveloperAgent
 from reviewer  import ReviewerAgent
 from manager   import ManagerAgent
+from leader    import LeaderAgent
 from generic   import GenericAgent
 
 SERVER_URL   = os.getenv("SERVER_URL", "http://localhost:8080")
-BUILTIN_KEYS = {"developer", "reviewer", "manager"}
+BUILTIN_KEYS = {"developer", "reviewer", "manager", "leader"}
 
 
 async def load_custom_agents(shutdown: asyncio.Event) -> list:
@@ -50,6 +51,7 @@ async def main():
         DeveloperAgent(shutdown),
         ReviewerAgent(shutdown),
         ManagerAgent(shutdown),
+        LeaderAgent(shutdown),
     ]
 
     custom_agents = await load_custom_agents(shutdown)

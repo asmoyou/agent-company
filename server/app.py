@@ -85,6 +85,8 @@ class TaskCreate(BaseModel):
     title: str
     description: str = ""
     project_id: str | None = None
+    parent_task_id: str | None = None
+    assigned_agent: str | None = None
 
 class TaskUpdate(BaseModel):
     status: str | None = None
@@ -234,7 +236,8 @@ async def list_tasks(project_id: str | None = None):
 
 @app.post("/tasks", status_code=201)
 async def create_task(body: TaskCreate):
-    task = db.create_task(body.title, body.description, body.project_id)
+    task = db.create_task(body.title, body.description, body.project_id,
+                          body.parent_task_id, body.assigned_agent)
     await manager.broadcast({"event": "task_created", "task": task})
     return task
 
@@ -257,7 +260,17 @@ async def update_task(task_id: str, body: TaskUpdate):
     if not task:
         raise HTTPException(404, "Task not found")
     await manager.broadcast({"event": "task_updated", "task": task})
+    # Auto-complete parent when all subtasks are done
+    if "status" in fields and task.get("parent_task_id"):
+        if db.check_parent_completion(task["parent_task_id"]):
+            parent = db.get_task(task["parent_task_id"])
+            if parent:
+                await manager.broadcast({"event": "task_updated", "task": parent})
     return task
+
+@app.get("/tasks/{task_id}/subtasks")
+async def get_subtasks(task_id: str):
+    return db.list_subtasks(task_id)
 
 @app.get("/tasks/{task_id}/logs")
 async def get_logs(task_id: str):
