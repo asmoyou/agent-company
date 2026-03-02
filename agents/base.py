@@ -21,7 +21,8 @@ CLI_TEMPLATES = {
     "codex":  ["codex", "exec", "--full-auto", "{prompt}"],
 }
 AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
-AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "20"))
+# Idle fallback auto-reply is disabled by default to avoid blind ENTER loops.
+AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
 INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
@@ -203,10 +204,12 @@ class BaseAgent:
         start_time = time.monotonic()
         last_output_at = time.monotonic()
         auto_reply_count = 0
+        # At most one idle-triggered auto-reply for the same output phase.
+        idle_reply_output_marker: float | None = None
         auto_reply_lock = asyncio.Lock()
 
         async def auto_reply(reason: str):
-            nonlocal auto_reply_count
+            nonlocal auto_reply_count, idle_reply_output_marker
             if AUTO_REPLY_MAX <= 0:
                 return
             if proc.stdin is None or proc.returncode is not None:
@@ -222,6 +225,7 @@ class BaseAgent:
                     proc.stdin.write(AUTO_REPLY_TEXT.encode("utf-8", errors="ignore"))
                     await proc.stdin.drain()
                     auto_reply_count += 1
+                    idle_reply_output_marker = last_output_at
                     msg = f"↩ 自动应答({auto_reply_count}/{AUTO_REPLY_MAX}) ENTER [{reason[:80]}]"
                     lines.append(msg)
                     self._post_output_bg(msg)
@@ -258,8 +262,12 @@ class BaseAgent:
                 if proc.returncode is not None:
                     return
                 idle = time.monotonic() - last_output_at
-                if idle >= AUTO_REPLY_IDLE_SECS:
-                    await auto_reply(f"idle {int(idle)}s")
+                if idle < AUTO_REPLY_IDLE_SECS:
+                    continue
+                # Prevent blind periodic ENTER every interval with no new output.
+                if idle_reply_output_marker == last_output_at:
+                    continue
+                await auto_reply(f"idle {int(idle)}s")
 
         hb = asyncio.create_task(heartbeat())
         iar = asyncio.create_task(idle_auto_reply())
