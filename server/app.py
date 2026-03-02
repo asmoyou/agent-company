@@ -618,6 +618,7 @@ async def websocket_endpoint(ws: WebSocket):
             "event": "init",
             "tasks": tasks,
             "projects": projects,
+            "agent_types": db.list_agent_types(),
             "agent_outputs": {
                 name: {"lines": list(AGENT_OUTPUT[name]), "status": AGENT_STATUS.get(name, {})}
                 for name in AGENT_OUTPUT

@@ -131,6 +131,86 @@
   </div>
 </div>
 
+<!-- Agent Management Modal -->
+<div id="modal-agents" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl flex flex-col" style="max-height:85vh;">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+      <h3 class="font-semibold text-white">🤖 Agent 管理</h3>
+      <button onclick="closeAgentsModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <div id="agents-list-view" class="flex-1 overflow-y-auto p-4">
+      <div id="agent-types-list" class="space-y-2"></div>
+      <button onclick="openAgentForm(null)"
+        class="w-full mt-3 py-2 border border-dashed border-slate-600 text-slate-400 hover:text-indigo-400 hover:border-indigo-500 rounded-lg text-sm transition">
+        + 新建自定义 Agent
+      </button>
+    </div>
+    <div id="agents-form-view" class="hidden flex-1 overflow-y-auto p-5 space-y-4">
+      <div class="flex items-center gap-2">
+        <button onclick="closeAgentForm()" class="text-slate-400 hover:text-white text-sm">← 返回</button>
+        <h4 class="text-white font-medium" id="agent-form-title">新建 Agent</h4>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">名称 *</label>
+          <input id="af-name" type="text" placeholder="代码测试员"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">标识符 key * <span class="text-slate-600">小写字母/数字/连字符</span></label>
+          <input id="af-key" type="text" placeholder="tester"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono" />
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">用途描述（用于 AI 生成提示词）</label>
+        <input id="af-desc" type="text" placeholder="审查代码安全性，检查 OWASP Top 10 漏洞..."
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">轮询状态</label>
+          <div id="af-poll-checkboxes" class="space-y-1 bg-slate-900/50 rounded-lg p-2 text-xs max-h-40 overflow-y-auto"></div>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">完成后推进至</label>
+          <select id="af-next-status"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"></select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">CLI 工具</label>
+          <select id="af-cli"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-xs text-slate-400">提示词模板</label>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-600">变量: <code>{task_title}</code> <code>{task_description}</code> <code>{rework_section}</code></span>
+            <button onclick="aiGeneratePrompt()" id="btn-ai-gen"
+              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-2 py-1 rounded transition">
+              ✨ AI 生成
+            </button>
+          </div>
+        </div>
+        <textarea id="af-prompt" rows="8" placeholder="在此输入提示词，或点击「✨ AI 生成」..."
+          class="w-full bg-slate-900/70 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:border-indigo-500 font-mono resize-y"></textarea>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button onclick="closeAgentForm()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
+        <button onclick="saveAgentType()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
+      </div>
+    </div>
+    <div class="px-5 py-2 border-t border-slate-700 text-xs text-slate-600 shrink-0">
+      ⚠ 新 Agent 需重启 agents 进程后生效
+    </div>
+  </div>
+</div>
+
 <!-- File Browser Drawer -->
 <div id="file-overlay" onclick="closeFileBrowser()" class="fixed inset-0 bg-black/40 z-10"></div>
 <div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl" style="width:380px;">
