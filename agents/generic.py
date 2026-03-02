@@ -54,6 +54,13 @@ class GenericAgent(BaseAgent):
             )
 
         returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
+        if returncode != 0:
+            prev_status = task.get("_claimed_from_status", task.get("status"))
+            await self.add_log(task_id, f"❌ CLI 执行失败（exit={returncode}），任务退回 {prev_status}")
+            if output.strip():
+                await self.add_log(task_id, f"错误输出:\n{output[:800]}")
+            await self.update_task(task_id, status=prev_status, assignee=None)
+            return
         if output.strip():
             await self.add_log(task_id, f"输出摘要:\n{output[:400]}")
 
@@ -95,6 +102,9 @@ class GenericAgent(BaseAgent):
                 return
             except Exception as e:
                 await self.add_log(task_id, f"提交失败: {e}")
+                prev_status = task.get("_claimed_from_status", task.get("status"))
+                await self.update_task(task_id, status=prev_status, assignee=None)
+                return
 
         await self.add_log(task_id, f"无文件变更，推进至 {self.next_status}")
         update_fields = {"status": self.next_status, "assignee": None}
