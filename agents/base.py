@@ -25,6 +25,7 @@ AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
 AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
 HANDOFF_SYNC_STRATEGY = os.getenv("HANDOFF_SYNC_STRATEGY", "cherry-pick").strip().lower()
+CODEX_ENABLE_OUTPUT_SCHEMA = os.getenv("CODEX_ENABLE_OUTPUT_SCHEMA", "0").strip().lower() in {"1", "true", "yes", "on"}
 INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
     r"\[y/n\]|\[y/N\]|\(y/n\)|yes/no|select\s+an?\s+option|choose\s+an?\s+option|"
@@ -512,7 +513,7 @@ class BaseAgent:
             except Exception:
                 last_message_path = None
 
-            if output_schema is not None:
+            if output_schema is not None and CODEX_ENABLE_OUTPUT_SCHEMA:
                 try:
                     fd_schema, raw_schema = tempfile.mkstemp(
                         prefix="opc-codex-schema-", suffix=".json", dir=str(cwd)
@@ -523,6 +524,8 @@ class BaseAgent:
                     cmd += ["--output-schema", str(schema_path)]
                 except Exception:
                     schema_path = None
+            elif output_schema is not None:
+                self._post_output_bg("ℹ codex output_schema 已禁用（使用文件产物做结构化校验）")
 
             cmd.append(prompt)
         else:

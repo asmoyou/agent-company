@@ -45,6 +45,7 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
   - `GET /tasks/{task_id}/handoffs`
   - `POST /tasks/{task_id}/handoffs`
 - 前端任务详情面板中的「交接记录」展示该任务的完整交接链路，便于多 Agent 共同审阅。
+- Leader 的 triage/decompose 结果同样采用结构化文件（`.opc/decisions/*.leader-*.json`）回传，不再以终端文本解析作为主流程。
 
 ## 结构化告警
 
@@ -68,5 +69,6 @@ OPC-demo/              ← 管理系统（本项目，不会被 agent 修改）
 | `SERVER_URL`    | `http://localhost:8080` | Agent 请求后端的地址 |
 | `POLL_INTERVAL` | `5`      | 轮询间隔（秒） |
 | `CLI_TIMEOUT`   | `300`    | CLI 超时（秒） |
+| `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 codex 传 `--output-schema`（默认关闭，避免 schema 兼容报错） |
 
 Agent CLI 类型（包括内置 `leader/developer/reviewer/manager`）在 Web 页面 `Agent 管理` 中配置。

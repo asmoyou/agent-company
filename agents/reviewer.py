@@ -37,16 +37,6 @@ REVIEW_DECISION_SCHEMA = {
         "feedback": {"type": "string"},
     },
     "required": ["decision"],
-    "allOf": [
-        {
-            "if": {"properties": {"decision": {"const": "approve"}}},
-            "then": {"required": ["comment"]},
-        },
-        {
-            "if": {"properties": {"decision": {"const": "request_changes"}}},
-            "then": {"required": ["feedback"]},
-        },
-    ],
 }
 
 REVIEWER_SYSTEM_RETRY_MAX = int(os.getenv("REVIEWER_SYSTEM_RETRY_MAX", "3"))
