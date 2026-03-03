@@ -24,6 +24,8 @@ class TaskActionsApiTest(unittest.TestCase):
         setup = self.client.post("/auth/setup-admin", json={"password": "admin123"})
         self.assertEqual(setup.status_code, 200)
         self._headers = {"Authorization": f"Bearer {setup.json()['token']}"}
+        self._agent_headers = {"X-Agent-Token": app_module.AGENT_API_TOKEN}
+        self._bad_agent_headers = {"X-Agent-Token": "bad-token"}
         self.project = db.create_project("api-test", self._tmp.name)
 
     def tearDown(self):
@@ -78,6 +80,56 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["id"], task["id"])
         self.assertEqual(claimed["status"], "in_progress")
+
+    def test_claim_rejects_missing_auth(self):
+        self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_claim_accepts_agent_token(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        claimed = res.json()["task"]
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], task["id"])
+
+    def test_claim_rejects_bad_agent_token(self):
+        self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._bad_agent_headers,
+        )
+        self.assertEqual(res.status_code, 401)
 
     def test_claim_returns_lease_and_renew_extends_it(self):
         task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
@@ -180,6 +232,16 @@ class TaskActionsApiTest(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["task"]["status"], "in_review")
         self.assertEqual(data["handoff"]["commit_hash"], "abc1234")
+
+    def test_transition_accepts_agent_token(self):
+        task = self._create_task(status="todo")
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={"fields": {"status": "todo", "assignee": None}},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["task"]["status"], "todo")
 
     def test_claim_rejects_status_outside_agent_poll_range(self):
         self._create_task(status="approved")
@@ -372,6 +434,22 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 201)
         self.assertTrue(app_module.AGENT_STATUS["developer"]["last_output_at"])
 
+    def test_task_log_rejects_bad_agent_token(self):
+        task = self._create_task(status="in_progress")
+        res = self.client.post(
+            f"/tasks/{task['id']}/logs",
+            json={"agent": "developer", "message": "hello"},
+            headers=self._bad_agent_headers,
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_agent_status_rejects_missing_auth(self):
+        res = self.client.post(
+            "/agents/developer/status",
+            json={"status": "idle", "task": ""},
+        )
+        self.assertEqual(res.status_code, 401)
+
     def test_agent_status_busy_downgrades_to_idle_when_task_not_owned(self):
         task = self._create_task(status="pending_acceptance", assigned_agent="developer", dev_agent="developer")
         res = self.client.post(
@@ -383,6 +461,14 @@ class TaskActionsApiTest(unittest.TestCase):
         state = app_module.AGENT_STATUS["developer"]
         self.assertEqual(state["status"], "idle")
         self.assertEqual(state["task_id"], "")
+
+    def test_agent_status_rejects_bad_agent_token(self):
+        res = self.client.post(
+            "/agents/developer/status",
+            json={"status": "idle", "task": ""},
+            headers=self._bad_agent_headers,
+        )
+        self.assertEqual(res.status_code, 401)
 
     def test_agent_status_busy_kept_when_task_is_validly_claimed(self):
         task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
@@ -416,6 +502,70 @@ class TaskActionsApiTest(unittest.TestCase):
         state = app_module.AGENT_STATUS["developer"]
         self.assertEqual(state["status"], "busy")
         self.assertEqual(state["task_id"], task["id"])
+
+    def test_agent_output_accepts_agent_token(self):
+        res = self.client.post(
+            "/agents/developer/output",
+            json={"line": "ok", "event": "line"},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+
+    def test_agent_output_rejects_missing_auth(self):
+        res = self.client.post(
+            "/agents/developer/output",
+            json={"line": "ok", "event": "line"},
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_agent_output_rejects_bad_agent_token(self):
+        res = self.client.post(
+            "/agents/developer/output",
+            json={"line": "ok", "event": "line"},
+            headers=self._bad_agent_headers,
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_alert_accepts_agent_token(self):
+        res = self.client.post(
+            "/alerts",
+            json={
+                "agent": "developer",
+                "task_id": None,
+                "kind": "info",
+                "summary": "test",
+                "message": "via agent token",
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+
+    def test_alert_rejects_missing_auth(self):
+        res = self.client.post(
+            "/alerts",
+            json={
+                "agent": "developer",
+                "task_id": None,
+                "kind": "info",
+                "summary": "test",
+                "message": "missing auth",
+            },
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_alert_rejects_bad_agent_token(self):
+        res = self.client.post(
+            "/alerts",
+            json={
+                "agent": "developer",
+                "task_id": None,
+                "kind": "info",
+                "summary": "test",
+                "message": "bad token",
+            },
+            headers=self._bad_agent_headers,
+        )
+        self.assertEqual(res.status_code, 401)
 
 
 if __name__ == "__main__":
