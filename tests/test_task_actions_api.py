@@ -55,6 +55,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/transition",
             json={"fields": {"status": "completed"}},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 409)
 
@@ -70,6 +71,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "respect_assignment": True,
                 "project_id": self.project["id"],
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         claimed = res.json()["task"]
@@ -90,6 +92,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "project_id": self.project["id"],
                 "lease_ttl_secs": 180,
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         claimed = res.json()["task"]
@@ -104,6 +107,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "lease_token": claimed["lease_token"],
                 "lease_ttl_secs": 300,
             },
+            headers=self._headers,
         )
         self.assertEqual(renew.status_code, 200)
         renewed_at = str(renew.json().get("lease_expires_at") or "").strip()
@@ -122,6 +126,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "respect_assignment": True,
                 "project_id": self.project["id"],
             },
+            headers=self._headers,
         ).json()["task"]
         bad = self.client.post(
             f"/tasks/{task['id']}/transition",
@@ -130,6 +135,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "expected_run_id": "stale-run-id",
                 "expected_lease_token": "stale-lease-token",
             },
+            headers=self._headers,
         )
         self.assertEqual(bad.status_code, 409)
 
@@ -140,6 +146,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "expected_run_id": claimed["claim_run_id"],
                 "expected_lease_token": claimed["lease_token"],
             },
+            headers=self._headers,
         )
         self.assertEqual(good.status_code, 200)
         self.assertEqual(good.json()["task"]["status"], "todo")
@@ -167,6 +174,7 @@ class TaskActionsApiTest(unittest.TestCase):
                     },
                 },
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -185,8 +193,36 @@ class TaskActionsApiTest(unittest.TestCase):
                 "respect_assignment": True,
                 "project_id": self.project["id"],
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 409)
+
+    def test_claim_deletes_task_when_project_path_missing(self):
+        missing_project_path = Path(self._tmp.name) / "missing-project-dir"
+        missing_project = db.create_project("missing-project", str(missing_project_path))
+        task = db.create_task(
+            title="missing-path-task",
+            description="should be removed",
+            project_id=missing_project["id"],
+            assigned_agent="developer",
+            dev_agent="developer",
+            status="todo",
+        )
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": missing_project["id"],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.json().get("task"))
+        self.assertIsNone(db.get_task(task["id"]))
 
     def test_accept_action_completes_task(self):
         task = self._create_task(status="pending_acceptance")
@@ -283,6 +319,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "respect_assignment": True,
                 "project_id": self.project["id"],
             },
+            headers=self._headers,
         )
         self.assertEqual(claim.status_code, 200)
         claimed = claim.json()["task"]
@@ -301,6 +338,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "conclusion": "交接补录完成",
                 "payload": {"note": "recovery"},
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["stage"], "manual_repair_note")
@@ -329,6 +367,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/logs",
             json={"agent": "developer", "message": "⏳ 仍在工作中... 已运行 45s"},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 201)
         self.assertTrue(app_module.AGENT_STATUS["developer"]["last_output_at"])
@@ -338,6 +377,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             "/agents/developer/status",
             json={"status": "busy", "task": task["title"], "task_id": task["id"]},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         state = app_module.AGENT_STATUS["developer"]
@@ -356,6 +396,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "respect_assignment": True,
                 "project_id": self.project["id"],
             },
+            headers=self._headers,
         )
         self.assertEqual(claim.status_code, 200)
         claimed = claim.json()["task"]
@@ -369,6 +410,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "run_id": claimed["claim_run_id"],
                 "lease_token": claimed["lease_token"],
             },
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         state = app_module.AGENT_STATUS["developer"]

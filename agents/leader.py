@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
@@ -118,6 +119,8 @@ GENERIC_SUBTASK_PATTERNS = [
 
 PARENT_REQUIREMENT_SPLIT_RE = re.compile(r"(?:[\n\r]+|[。！？!?；;]+)")
 LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、:]?)\s*")
+LEADER_SYSTEM_RETRY_MAX = int(os.getenv("LEADER_SYSTEM_RETRY_MAX", "2"))
+LEADER_SYSTEM_RETRY_BACKOFF_SECS = int(os.getenv("LEADER_SYSTEM_RETRY_BACKOFF_SECS", "20"))
 
 
 class LeaderAgent(BaseAgent):
@@ -142,6 +145,10 @@ class LeaderAgent(BaseAgent):
         for k, v in kwargs.items():
             out = out.replace("{" + k + "}", str(v))
         return out
+
+    def _current_system_retry(self, feedback: str | None) -> int:
+        m = re.search(r"\[leader_retry=(\d+)/(\d+)\]", str(feedback or ""))
+        return int(m.group(1)) if m else 0
 
     async def _get_agent_list(self) -> str:
         try:
@@ -383,6 +390,49 @@ class LeaderAgent(BaseAgent):
     ):
         task_id = task["id"]
         msg = f"[系统错误] Leader 结构化结果无效：{reason}"
+        current = self._current_system_retry(task.get("review_feedback"))
+        next_retry = current + 1
+        rollback_status = str(prev_status or task.get("status") or "triage").strip() or "triage"
+
+        if next_retry <= LEADER_SYSTEM_RETRY_MAX:
+            feedback = f"[系统错误][leader_retry={next_retry}/{LEADER_SYSTEM_RETRY_MAX}] {msg}"
+            await self.add_log(
+                task_id,
+                f"{feedback}；{LEADER_SYSTEM_RETRY_BACKOFF_SECS}s 后自动重试",
+            )
+            if output.strip():
+                await self.add_log(task_id, f"输出摘要:\n{output[:1000]}")
+            await self.transition_task(
+                task_id,
+                fields={
+                    "status": rollback_status,
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "review_feedback": feedback[:1000],
+                    "feedback_source": self.name,
+                    "feedback_stage": "leader_system_retry",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "leader_system_retry",
+                    "to_agent": self.name,
+                    "status_from": task.get("status"),
+                    "status_to": rollback_status,
+                    "title": "Leader 结构化结果自动重试",
+                    "summary": feedback[:300],
+                    "conclusion": "结构化结果无效，自动重试中",
+                    "payload": {
+                        "retry": next_retry,
+                        "max": LEADER_SYSTEM_RETRY_MAX,
+                        "reason": reason,
+                        "stage_code": stage_code,
+                    },
+                },
+                log_message=feedback[:300],
+            )
+            await asyncio.sleep(LEADER_SYSTEM_RETRY_BACKOFF_SECS)
+            return
+
         await self.add_log(task_id, msg)
         if output.strip():
             await self.add_log(task_id, f"输出摘要:\n{output[:1000]}")

@@ -1552,6 +1552,52 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
         conn.close()
 
 
+def delete_task_permanently(task_id: str, include_subtasks: bool = True) -> list[str] | None:
+    """
+    Hard-delete a task (and optionally descendants) plus related runtime records.
+    Returns deleted task IDs (root first) or None if task missing.
+    """
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        root = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not root:
+            conn.rollback()
+            return None
+
+        if include_subtasks:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE task_tree(id) AS (
+                    SELECT id FROM tasks WHERE id=?
+                    UNION ALL
+                    SELECT t.id
+                      FROM tasks t
+                      JOIN task_tree tt ON t.parent_task_id = tt.id
+                )
+                SELECT id FROM task_tree
+                """,
+                (task_id,),
+            ).fetchall()
+            task_ids = [str(r["id"]) for r in rows if str(r["id"] or "").strip()]
+        else:
+            task_ids = [task_id]
+
+        if not task_ids:
+            conn.rollback()
+            return None
+
+        placeholders = ",".join("?" for _ in task_ids)
+        conn.execute(f"DELETE FROM logs WHERE task_id IN ({placeholders})", task_ids)
+        conn.execute(f"DELETE FROM task_handoffs WHERE task_id IN ({placeholders})", task_ids)
+        conn.execute(f"DELETE FROM agent_outputs WHERE task_id IN ({placeholders})", task_ids)
+        conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
+        conn.commit()
+        return task_ids
+    finally:
+        conn.close()
+
+
 def claim_task(status: str, working_status: str, agent: str, agent_key: str,
                respect_assignment: bool = True,
                lease_ttl_secs: int = 180,
