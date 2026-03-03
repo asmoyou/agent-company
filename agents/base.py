@@ -137,6 +137,11 @@ class BaseAgent:
     async def is_task_cancelled(self, task_id: str) -> bool:
         try:
             task = await self.get_task(task_id)
+        except httpx.HTTPStatusError as e:
+            # 404 means task has been removed/invalidated; treat as cancelled.
+            if e.response is not None and e.response.status_code == 404:
+                return True
+            return False
         except Exception:
             return False
         if not task:

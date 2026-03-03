@@ -405,18 +405,27 @@ async def list_directories(path: str = "~"):
 
 @app.post("/projects/sync")
 async def sync_projects():
-    """Delete projects whose directories no longer exist on disk."""
+    """Delete projects whose directories no longer exist on disk.
+
+    Safety: do not delete projects that still have claimed (running) tasks,
+    otherwise in-flight agents may hit 404 when syncing task status.
+    """
     all_projects = db.list_projects()
     deleted = []
     kept = []
+    skipped_busy = []
     for p in all_projects:
         if Path(p["path"]).exists():
+            kept.append(p)
+            continue
+        if db.project_has_claimed_tasks(p["id"]):
+            skipped_busy.append(p)
             kept.append(p)
         else:
             db.delete_project(p["id"])
             deleted.append(p)
             await manager.broadcast({"event": "project_deleted", "project_id": p["id"]})
-    return {"deleted": deleted, "kept": kept}
+    return {"deleted": deleted, "kept": kept, "skipped_busy": skipped_busy}
 
 
 @app.post("/projects/{project_id}/setup")
@@ -479,17 +488,38 @@ async def tasks_by_status(status: str, project_id: str | None = None):
 
 @app.post("/tasks/claim")
 async def claim_task(body: TaskClaim):
-    task = db.claim_task(
-        status=body.status,
-        working_status=body.working_status,
-        agent=body.agent,
-        agent_key=body.agent_key,
-        respect_assignment=body.respect_assignment,
-        project_id=body.project_id,
-    )
-    if task:
-        await manager.broadcast({"event": "task_updated", "task": task})
-    return {"task": task}
+    # Retry loop: skip tasks whose project directory is missing.
+    for _ in range(50):
+        task = db.claim_task(
+            status=body.status,
+            working_status=body.working_status,
+            agent=body.agent,
+            agent_key=body.agent_key,
+            respect_assignment=body.respect_assignment,
+            project_id=body.project_id,
+        )
+        if not task:
+            return {"task": None}
+
+        project_id = str(task.get("project_id") or "").strip()
+        project_path = str(task.get("project_path") or "").strip()
+        if not project_id or not project_path or Path(project_path).exists():
+            await manager.broadcast({"event": "task_updated", "task": task})
+            return {"task": task}
+
+        # Project path no longer exists: immediately cancel this task so it
+        # won't be picked again, then continue claiming next available task.
+        cancelled = db.cancel_task(task["id"], include_subtasks=False) or []
+        for item in cancelled:
+            await manager.broadcast({"event": "task_updated", "task": item})
+            log = db.add_log(
+                item["id"],
+                "system",
+                "⚠ 项目目录不存在，任务已自动取消并跳过分配。",
+            )
+            await broadcast_log(log)
+
+    return {"task": None}
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):

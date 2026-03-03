@@ -573,6 +573,27 @@ def delete_project(project_id: str) -> bool:
     return cur.rowcount > 0
 
 
+def project_has_claimed_tasks(project_id: str) -> bool:
+    """
+    Return True if project has non-archived tasks currently claimed by an agent.
+    This is used to avoid deleting projects while agents are still processing tasks.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM tasks
+         WHERE project_id=?
+           AND archived=0
+           AND assignee IS NOT NULL
+         LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
 def _join_project(base_sql: str) -> str:
@@ -882,6 +903,60 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
         return dict(claimed) if claimed else None
     finally:
         conn.close()
+
+
+def recover_stale_tasks_for_agent(agent_key: str) -> list[dict]:
+    """
+    Recover tasks left in an agent's working state when the agent appears stale.
+    Returns changed rows as:
+      {"task": <task_row>, "from_status": "...", "to_status": "..."}.
+    """
+    key = str(agent_key or "").strip().lower()
+    if not key:
+        return []
+    conn = get_conn()
+    changed: list[dict] = []
+    try:
+        rows = conn.execute(
+            "SELECT poll_statuses, working_status FROM agent_types WHERE key=? AND working_status != ''",
+            (key,),
+        ).fetchall()
+        if not rows:
+            return []
+        now = _now()
+        for row in rows:
+            working = str(row["working_status"] or "").strip()
+            if not working:
+                continue
+            poll = _parse_poll_statuses(row["poll_statuses"])
+            reset_to = poll[0] if poll else "todo"
+            task_rows = conn.execute(
+                "SELECT id FROM tasks WHERE status=? AND assignee=? AND archived=0",
+                (working, key),
+            ).fetchall()
+            for t in task_rows:
+                conn.execute(
+                    "UPDATE tasks SET status=?, assignee=NULL, updated_at=? WHERE id=?",
+                    (reset_to, now, t["id"]),
+                )
+                updated = conn.execute(
+                    _join_project("SELECT * FROM tasks WHERE id=?"), (t["id"],)
+                ).fetchone()
+                if updated:
+                    changed.append(
+                        {
+                            "task": dict(updated),
+                            "from_status": working,
+                            "to_status": reset_to,
+                        }
+                    )
+        if changed:
+            conn.commit()
+        else:
+            conn.rollback()
+    finally:
+        conn.close()
+    return changed
 
 
 def add_log(task_id: str, agent: str, message: str) -> dict:
