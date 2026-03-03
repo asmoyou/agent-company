@@ -231,6 +231,7 @@ class TaskCreate(BaseModel):
     description: str = ""
     project_id: str | None = None
     parent_task_id: str | None = None
+    subtask_order: int | None = None
     assigned_agent: str | None = None
     dev_agent: str | None = None
     status: str = "triage"   # default: all new tasks enter triage first
@@ -665,7 +666,8 @@ async def list_tasks(project_id: str | None = None):
 @app.post("/tasks", status_code=201)
 async def create_task(body: TaskCreate):
     task = db.create_task(body.title, body.description, body.project_id,
-                          body.parent_task_id, body.assigned_agent, body.dev_agent, body.status)
+                          body.parent_task_id, body.assigned_agent, body.dev_agent, body.status,
+                          body.subtask_order)
     await manager.broadcast({"event": "task_created", "task": task})
     return task
 

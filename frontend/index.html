@@ -1586,7 +1586,19 @@ async function cancelCurrentTask() {
 function renderSubtaskList(parentId) {
   const listEl = document.getElementById("panel-subtasks-list");
   const progEl = document.getElementById("panel-subtasks-progress");
-  const subtasks = Object.values(tasks).filter(t => t.parent_task_id === parentId);
+  const subtasks = Object.values(tasks)
+    .filter(t => t.parent_task_id === parentId)
+    .sort((a, b) => {
+      const ao = Number(a.subtask_order || 0);
+      const bo = Number(b.subtask_order || 0);
+      if (ao > 0 && bo > 0 && ao !== bo) return ao - bo;
+      if (ao > 0 && bo <= 0) return -1;
+      if (ao <= 0 && bo > 0) return 1;
+      const at = String(a.created_at || "");
+      const bt = String(b.created_at || "");
+      if (at !== bt) return at < bt ? -1 : 1;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
   if (!subtasks.length) {
     listEl.innerHTML = '<div class="text-xs text-slate-500">子任务生成中...</div>';
     progEl.textContent = "";
