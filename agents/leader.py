@@ -600,50 +600,40 @@ class LeaderAgent(BaseAgent):
         await self.add_log(task_id, f"复杂度规则判定: {'complex' if complex_by_rule else 'simple'}")
 
         if decision and decision.get("action") == "decompose":
-            if not complex_by_rule:
-                await self.add_log(task_id, "任务复杂度规则判定为简单任务，忽略分解建议，直接转 todo")
-                reason = "任务规模较小，按单任务推进更高效"
-                todo_agent = self._todo_assigned_agent(task) or "developer"
-                await self.add_handoff(
-                    task_id,
-                    stage="leader_to_todo",
-                    to_agent=todo_agent,
-                    status_from=task.get("_claimed_from_status", task.get("status")),
-                    status_to="todo",
-                    title="任务转入开发",
-                    summary=reason,
-                    conclusion=reason,
-                    payload={"action": "simple", "reason": "heuristic_simple_override"},
-                    artifact_path=str(decision_file),
-                )
-                await self.update_task(
-                    task_id,
-                    status="todo",
-                    assignee=None,
-                    assigned_agent=self._todo_assigned_agent(task),
-                )
-                self._post_output_bg("✓ 判定为简单任务，推进至 todo")
-                return
             subtasks = decision.get("subtasks") or []
-            if subtasks:
-                await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
-                n = await self._create_subtasks(task, subtasks)
-                await self.add_handoff(
-                    task_id,
-                    stage="leader_to_decomposed",
-                    to_agent="multi-agent",
-                    status_from=task.get("_claimed_from_status", task.get("status")),
-                    status_to="decomposed",
-                    title="任务分解完成",
-                    summary=f"已分解为 {n} 个子任务并分配",
-                    conclusion=f"复杂任务，已拆分为 {n} 个子任务",
-                    payload={"subtask_count": n, "decision": "decompose"},
-                    artifact_path=str(decision_file),
+            if not subtasks:
+                await self._handle_structured_output_error(
+                    task,
+                    prev_status=task.get("_claimed_from_status", task.get("status", "triage")),
+                    stage_code="leader_triage_invalid_schema",
+                    reason=f"action=decompose 但 subtasks 为空：{decision_file}",
+                    output=output,
                 )
-                await self.update_task(task_id, status="decomposed", assignee=None)
-                await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
-                self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
                 return
+
+            if not complex_by_rule:
+                await self.add_log(
+                    task_id,
+                    "复杂度规则判定: simple，但结构化结果为 decompose；按分解结果执行。"
+                )
+            await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
+            n = await self._create_subtasks(task, subtasks)
+            await self.add_handoff(
+                task_id,
+                stage="leader_to_decomposed",
+                to_agent="multi-agent",
+                status_from=task.get("_claimed_from_status", task.get("status")),
+                status_to="decomposed",
+                title="任务分解完成",
+                summary=f"已分解为 {n} 个子任务并分配",
+                conclusion=f"复杂任务，已拆分为 {n} 个子任务",
+                payload={"subtask_count": n, "decision": "decompose"},
+                artifact_path=str(decision_file),
+            )
+            await self.update_task(task_id, status="decomposed", assignee=None)
+            await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
+            self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
+            return
 
         # Simple task — push to todo
         reason = decision.get("reason", "判定为简单任务")
