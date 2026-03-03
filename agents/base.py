@@ -26,6 +26,9 @@ AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
 HANDOFF_SYNC_STRATEGY = os.getenv("HANDOFF_SYNC_STRATEGY", "cherry-pick").strip().lower()
 CODEX_ENABLE_OUTPUT_SCHEMA = os.getenv("CODEX_ENABLE_OUTPUT_SCHEMA", "0").strip().lower() in {"1", "true", "yes", "on"}
+CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "3600"))
+CONTEXT_MAX_HANDOFFS = int(os.getenv("CONTEXT_MAX_HANDOFFS", "24"))
+CONTEXT_MAX_UNRESOLVED_FEEDBACK = int(os.getenv("CONTEXT_MAX_UNRESOLVED_FEEDBACK", "12"))
 INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
     r"\[y/n\]|\[y/N\]|\(y/n\)|yes/no|select\s+an?\s+option|choose\s+an?\s+option|"
@@ -195,27 +198,140 @@ class BaseAgent:
         except Exception:
             return []
 
+    def _parse_feedback_history(self, raw) -> list[dict]:
+        data = raw
+        if isinstance(raw, str):
+            txt = raw.strip()
+            if not txt:
+                return []
+            try:
+                data = json.loads(txt)
+            except Exception:
+                return []
+        if not isinstance(data, list):
+            return []
+        out = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            feedback = str(item.get("feedback") or "").strip()
+            if not feedback:
+                continue
+            resolved_at = str(item.get("resolved_at") or "").strip()
+            out.append(
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "created_at": str(item.get("created_at") or "").strip(),
+                    "source": str(item.get("source") or "").strip() or "system",
+                    "feedback": feedback[:1200],
+                    "resolved": bool(item.get("resolved")) or bool(resolved_at),
+                    "resolved_at": resolved_at,
+                }
+            )
+        return out
+
+    def _fit_recent_lines(self, newest_lines: list[str], char_budget: int) -> list[str]:
+        if char_budget <= 0:
+            return []
+        kept: list[str] = []
+        used = 0
+        for line in newest_lines:
+            add = len(line) + 1
+            if kept and used + add > char_budget:
+                break
+            if not kept and add > char_budget:
+                kept.append(line[: max(10, char_budget - 1)])
+                break
+            kept.append(line)
+            used += add
+        return kept
+
+    def _build_unresolved_feedback_lines(self, task: dict | None) -> list[str]:
+        if not task:
+            return []
+        history = self._parse_feedback_history(task.get("review_feedback_history"))
+        unresolved = [h for h in history if not bool(h.get("resolved"))]
+        unresolved = unresolved[-max(1, CONTEXT_MAX_UNRESOLVED_FEEDBACK) :]
+
+        # Backward compatibility for historical rows without history payload.
+        if not unresolved:
+            status = str(task.get("status") or "").strip().lower()
+            fallback_feedback = str(task.get("review_feedback") or "").strip()
+            if fallback_feedback and status in {"needs_changes", "blocked"}:
+                unresolved = [
+                    {
+                        "id": "FB0000",
+                        "source": "legacy",
+                        "created_at": str(task.get("updated_at") or "").strip(),
+                        "feedback": fallback_feedback[:1200],
+                    }
+                ]
+        if not unresolved:
+            return []
+
+        lines = ["## 未解决修改意见（必须全部处理）"]
+        for item in unresolved:
+            fid = str(item.get("id") or "").strip() or "FB????"
+            source = str(item.get("source") or "").strip() or "system"
+            created = str(item.get("created_at") or "").strip().replace("T", " ")[:19]
+            feedback = str(item.get("feedback") or "").strip()
+            meta = f"{fid} | {source}"
+            if created:
+                meta += f" | {created}"
+            lines.append(f"- [{meta}] {feedback[:320]}")
+        return lines
+
     async def build_handoff_context(self, task_id: str, limit: int = 6) -> str:
+        budget = max(1200, CONTEXT_MAX_CHARS)
+        max_handoffs = max(limit, CONTEXT_MAX_HANDOFFS)
+        sections: list[str] = []
+
+        try:
+            task = await self.get_task(task_id)
+        except Exception:
+            task = None
+
+        unresolved_lines = self._build_unresolved_feedback_lines(task)
+        if unresolved_lines:
+            unresolved_budget = max(400, int(budget * 0.45))
+            kept = self._fit_recent_lines(list(reversed(unresolved_lines[1:])), unresolved_budget - 40)
+            kept.reverse()
+            if kept:
+                sections.append("\n".join([unresolved_lines[0], *kept]))
+
         handoffs = await self.get_handoffs(task_id)
-        if not handoffs:
-            return ""
-        tail = handoffs[-limit:]
-        lines = ["## 历史交接记录（最近）"]
-        for h in tail:
-            stage = str(h.get("stage") or "").strip() or "-"
-            from_agent = str(h.get("from_agent") or "").strip() or "-"
-            to_agent = str(h.get("to_agent") or "").strip() or "-"
-            summary = str(h.get("summary") or "").strip()
-            commit_hash = str(h.get("commit_hash") or "").strip()
-            conclusion = str(h.get("conclusion") or "").strip()
-            lines.append(f"- {from_agent} -> {to_agent} [{stage}]")
-            if commit_hash:
-                lines.append(f"  commit: {commit_hash}")
-            if conclusion:
-                lines.append(f"  结论: {conclusion[:160]}")
-            if summary:
-                lines.append(f"  摘要: {summary[:200]}")
-        return "\n".join(lines)
+        if handoffs:
+            newest = []
+            for h in reversed(handoffs[-max_handoffs:]):
+                stage = str(h.get("stage") or "").strip() or "-"
+                from_agent = str(h.get("from_agent") or "").strip() or "-"
+                to_agent = str(h.get("to_agent") or "").strip() or "-"
+                summary = str(h.get("summary") or "").strip()
+                commit_hash = str(h.get("commit_hash") or "").strip()
+                conclusion = str(h.get("conclusion") or "").strip()
+                info = conclusion or summary
+                line = f"- {from_agent} -> {to_agent} [{stage}]"
+                if commit_hash:
+                    line += f" commit={commit_hash}"
+                if info:
+                    line += f" | {info[:180]}"
+                newest.append(line)
+
+            used = sum(len(s) + 2 for s in sections)
+            handoff_budget = max(300, budget - used - 40)
+            kept = self._fit_recent_lines(newest, handoff_budget)
+            kept.reverse()
+            if kept:
+                omitted = max(0, len(newest) - len(kept))
+                lines = ["## 历史交接记录（预算内）", *kept]
+                if omitted:
+                    lines.append(f"- ... 已省略更早 {omitted} 条交接")
+                sections.append("\n".join(lines))
+
+        text = "\n\n".join(s for s in sections if s).strip()
+        if len(text) > budget:
+            return text[: budget - 20].rstrip() + "\n... (context truncated)"
+        return text
 
     def _extract_handoff_commit(self, handoff: dict) -> str:
         commit_hash = str(handoff.get("commit_hash") or "").strip()
@@ -314,6 +430,9 @@ class BaseAgent:
                 assignee=None,
                 assigned_agent=self.name,
                 review_feedback=msg[:500],
+                feedback_source=self.name,
+                feedback_stage=f"{self.name}_sync_failed",
+                feedback_actor=self.name,
             )
             return {"status": "failed", "reason": "missing_commit_object"}
 
@@ -372,6 +491,9 @@ class BaseAgent:
                 assignee=None,
                 assigned_agent=self.name,
                 review_feedback=msg[:500],
+                feedback_source=self.name,
+                feedback_stage=f"{self.name}_sync_failed",
+                feedback_actor=self.name,
             )
             return {"status": "failed", "reason": "sync_failed"}
 

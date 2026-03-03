@@ -117,6 +117,10 @@ class TaskUpdate(BaseModel):
     review_feedback: str | None = None
     commit_hash: str | None = None
     archived: int | None = None
+    feedback_source: str | None = None
+    feedback_stage: str | None = None
+    feedback_actor: str | None = None
+    create_handoff: bool | None = None
 
 class LogCreate(BaseModel):
     agent: str
@@ -399,10 +403,60 @@ async def get_task(task_id: str):
 @app.patch("/tasks/{task_id}")
 async def update_task(task_id: str, body: TaskUpdate):
     fields = body.model_dump(exclude_unset=True)
+    create_handoff = bool(fields.get("create_handoff"))
+
+    before = db.get_task(task_id)
+    if not before:
+        raise HTTPException(404, "Task not found")
+
+    if create_handoff and str(fields.get("status") or "").strip() == "needs_changes":
+        # Keep the handoff target deterministic when users manually reject.
+        fallback_dev = normalize_agent_key(
+            fields.get("dev_agent")
+            or before.get("dev_agent")
+            or before.get("assigned_agent")
+            or "developer"
+        )
+        if not str(fields.get("assigned_agent") or "").strip():
+            fields["assigned_agent"] = fallback_dev
+        if not str(fields.get("dev_agent") or "").strip():
+            fields["dev_agent"] = fallback_dev
+        fields.setdefault("assignee", None)
+
     task = db.update_task(task_id, **fields)
     if not task:
         raise HTTPException(404, "Task not found")
     await manager.broadcast({"event": "task_updated", "task": task})
+
+    if create_handoff and str(fields.get("status") or "").strip() == "needs_changes":
+        feedback = str(fields.get("review_feedback") or "").strip()
+        if feedback:
+            to_agent = normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or "developer")
+            from_agent = str(fields.get("feedback_actor") or "user").strip() or "user"
+            stage = str(fields.get("feedback_stage") or "user_to_dev").strip() or "user_to_dev"
+            handoff = db.add_handoff(
+                task_id=task_id,
+                stage=stage,
+                from_agent=from_agent,
+                to_agent=to_agent,
+                status_from=before.get("status"),
+                status_to="needs_changes",
+                title="人工退回开发",
+                summary=feedback[:300],
+                commit_hash=str(task.get("commit_hash") or before.get("commit_hash") or "").strip() or None,
+                conclusion="用户验收未通过，退回开发修复",
+                payload={
+                    "decision": "request_changes",
+                    "feedback_source": str(fields.get("feedback_source") or "user").strip() or "user",
+                    "feedback_actor": from_agent,
+                    "feedback": feedback[:1000],
+                },
+            )
+            await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
+
+            log = db.add_log(task_id, from_agent, f"↩ 人工退回：{feedback[:300]}")
+            await broadcast_log(log)
+
     # Auto-complete parent when all subtasks are done
     if "status" in fields and task.get("parent_task_id"):
         if db.check_parent_completion(task["parent_task_id"]):

@@ -59,6 +59,9 @@ class ManagerAgent(BaseAgent):
                 assigned_agent=dev_agent,
                 dev_agent=dev_agent,
                 review_feedback=feedback,
+                feedback_source=self.name,
+                feedback_stage="merge_to_dev",
+                feedback_actor=self.name,
             )
             return
 
@@ -204,6 +207,9 @@ class ManagerAgent(BaseAgent):
                     assigned_agent=dev_agent,
                     dev_agent=dev_agent,
                     review_feedback=feedback,
+                    feedback_source=self.name,
+                    feedback_stage="merge_to_dev",
+                    feedback_actor=self.name,
                 )
                 return
             await self.add_alert(

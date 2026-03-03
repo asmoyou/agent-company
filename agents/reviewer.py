@@ -105,6 +105,9 @@ class ReviewerAgent(BaseAgent):
                 assigned_agent=self.name,
                 dev_agent=dev_agent,
                 review_feedback=feedback,
+                feedback_source=self.name,
+                feedback_stage="review_system_retry",
+                feedback_actor=self.name,
             )
             await self.add_handoff(
                 task_id,
@@ -136,6 +139,9 @@ class ReviewerAgent(BaseAgent):
             assigned_agent=self.name,
             dev_agent=dev_agent,
             review_feedback=feedback,
+            feedback_source=self.name,
+            feedback_stage="review_system_failed",
+            feedback_actor=self.name,
         )
         await self.add_alert(
             summary="审查器执行失败，任务已阻塞",
@@ -200,6 +206,9 @@ class ReviewerAgent(BaseAgent):
                 assigned_agent=dev_agent,
                 dev_agent=dev_agent,
                 review_feedback=feedback,
+                feedback_source=self.name,
+                feedback_stage="review_to_dev",
+                feedback_actor=self.name,
             )
             await self.add_alert(
                 summary="审查前置条件缺失：commit_hash",
@@ -247,6 +256,9 @@ class ReviewerAgent(BaseAgent):
                 assigned_agent=dev_agent,
                 dev_agent=dev_agent,
                 review_feedback=feedback[:500],
+                feedback_source=self.name,
+                feedback_stage="review_to_dev",
+                feedback_actor=self.name,
             )
             await self.add_alert(
                 summary="审查无法读取目标 commit",
@@ -359,7 +371,15 @@ class ReviewerAgent(BaseAgent):
                 payload={"decision": "approve", "commit_hash": commit_hash, "source_branch": branch},
                 artifact_path=str(decision_file),
             )
-            await self.update_task(task_id, status="approved", assignee=None, review_feedback=comment)
+            await self.update_task(
+                task_id,
+                status="approved",
+                assignee=None,
+                review_feedback=comment,
+                feedback_source=self.name,
+                feedback_stage="review_to_manager",
+                feedback_actor=self.name,
+            )
         else:
             feedback = decision.get("feedback", "请修复问题")
             await self.add_log(task_id, f"↩ 需修改: {feedback[:200]}")
@@ -383,6 +403,9 @@ class ReviewerAgent(BaseAgent):
                 assigned_agent=dev_agent,
                 dev_agent=dev_agent,
                 review_feedback=feedback,
+                feedback_source=self.name,
+                feedback_stage="review_to_dev",
+                feedback_actor=self.name,
             )
 
 
