@@ -163,6 +163,18 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
 
+        CREATE TABLE IF NOT EXISTS agent_outputs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent      TEXT NOT NULL,
+            task_id    TEXT,
+            run_id     TEXT,
+            line       TEXT NOT NULL,
+            kind       TEXT NOT NULL DEFAULT 'line',
+            event      TEXT NOT NULL DEFAULT 'line',
+            exit_code  INTEGER,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS task_handoffs (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id      TEXT NOT NULL,
@@ -194,6 +206,9 @@ def init_db():
             is_builtin     INTEGER NOT NULL DEFAULT 0,
             created_at     TEXT NOT NULL
         );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id);
+        CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at);
     """)
 
     # Migrations for existing DBs: ensure all runtime-required columns exist.
@@ -240,6 +255,16 @@ def init_db():
         ("task_id", "TEXT"),
         ("agent", "TEXT"),
         ("message", "TEXT"),
+        ("created_at", "TEXT"),
+    ])
+    _ensure_columns(conn, "agent_outputs", [
+        ("agent", "TEXT"),
+        ("task_id", "TEXT"),
+        ("run_id", "TEXT"),
+        ("line", "TEXT"),
+        ("kind", "TEXT NOT NULL DEFAULT 'line'"),
+        ("event", "TEXT NOT NULL DEFAULT 'line'"),
+        ("exit_code", "INTEGER"),
         ("created_at", "TEXT"),
     ])
     _ensure_columns(conn, "task_handoffs", [
@@ -1730,7 +1755,10 @@ def renew_task_lease(
         conn.close()
 
 
-def recover_expired_task_leases(grace_secs: int = 0) -> list[dict]:
+def recover_expired_task_leases(
+    grace_secs: int = 0,
+    exclude_task_ids: set[str] | None = None,
+) -> list[dict]:
     """
     Recover tasks whose lease has expired.
     Returns changed rows as:
@@ -1739,6 +1767,7 @@ def recover_expired_task_leases(grace_secs: int = 0) -> list[dict]:
     """
     conn = get_conn()
     changed: list[dict] = []
+    excluded = {str(x or "").strip() for x in (exclude_task_ids or set()) if str(x or "").strip()}
     try:
         conn.execute("BEGIN IMMEDIATE")
         now_dt = datetime.utcnow()
@@ -1759,6 +1788,8 @@ def recover_expired_task_leases(grace_secs: int = 0) -> list[dict]:
         for row in rows:
             task_id = str(row["id"] or "").strip()
             if not task_id:
+                continue
+            if task_id in excluded:
                 continue
             from_status = str(row["status"] or "").strip()
             agent_key = str(row["assignee"] or "").strip().lower()
@@ -1818,6 +1849,116 @@ def recover_expired_task_leases(grace_secs: int = 0) -> list[dict]:
     finally:
         conn.close()
     return changed
+
+
+def add_agent_output(
+    agent: str,
+    line: str,
+    task_id: str | None = None,
+    run_id: str | None = None,
+    kind: str | None = None,
+    event: str | None = None,
+    exit_code: int | None = None,
+    keep_last: int = 1000,
+) -> dict:
+    conn = get_conn()
+    now = _now()
+    output_kind = str(kind or "line").strip().lower() or "line"
+    output_event = str(event or "line").strip().lower() or "line"
+    output_exit_code = None if exit_code is None else int(exit_code)
+    cur = conn.execute(
+        """
+        INSERT INTO agent_outputs (agent, task_id, run_id, line, kind, event, exit_code, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(agent or "").strip().lower(),
+            str(task_id or "").strip() or None,
+            str(run_id or "").strip() or None,
+            str(line or ""),
+            output_kind,
+            output_event,
+            output_exit_code,
+            now,
+        ),
+    )
+    row_id = int(cur.lastrowid or 0)
+    keep = max(1, int(keep_last or 1000))
+    conn.execute(
+        """
+        DELETE FROM agent_outputs
+         WHERE agent=?
+           AND id NOT IN (
+               SELECT id
+                 FROM agent_outputs
+                WHERE agent=?
+                ORDER BY id DESC
+                LIMIT ?
+           )
+        """,
+        (str(agent or "").strip().lower(), str(agent or "").strip().lower(), keep),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM agent_outputs WHERE id=?", (row_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else {
+        "id": row_id,
+        "agent": str(agent or "").strip().lower(),
+        "task_id": str(task_id or "").strip() or None,
+        "run_id": str(run_id or "").strip() or None,
+        "line": str(line or ""),
+        "kind": output_kind,
+        "event": output_event,
+        "exit_code": output_exit_code,
+        "created_at": now,
+    }
+
+
+def list_agent_output_agents() -> list[str]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT agent FROM agent_outputs WHERE TRIM(COALESCE(agent, '')) != ''"
+    ).fetchall()
+    conn.close()
+    return [str(r["agent"] or "").strip().lower() for r in rows if str(r["agent"] or "").strip()]
+
+
+def get_agent_output_lines(agent: str, limit: int = 1000) -> list[str]:
+    return [str(e.get("line") or "") for e in get_agent_output_entries(agent, limit=limit)]
+
+
+def get_agent_output_entries(agent: str, limit: int = 1000) -> list[dict]:
+    key = str(agent or "").strip().lower()
+    if not key:
+        return []
+    size = max(1, int(limit or 1000))
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT line, task_id, run_id, kind, event, exit_code, created_at
+          FROM agent_outputs
+         WHERE agent=?
+         ORDER BY id DESC
+         LIMIT ?
+        """,
+        (key, size),
+    ).fetchall()
+    conn.close()
+    # DB query is DESC for performance; reverse to natural chronology.
+    entries: list[dict] = []
+    for r in reversed(rows):
+        entries.append(
+            {
+                "line": str(r["line"] or ""),
+                "task_id": str(r["task_id"] or "").strip() or None,
+                "run_id": str(r["run_id"] or "").strip() or None,
+                "kind": str(r["kind"] or "line").strip().lower() or "line",
+                "event": str(r["event"] or "line").strip().lower() or "line",
+                "exit_code": int(r["exit_code"]) if r["exit_code"] is not None else None,
+                "created_at": str(r["created_at"] or ""),
+            }
+        )
+    return entries
 
 
 def _add_log_in_conn(conn, task_id: str, agent: str, message: str) -> dict:

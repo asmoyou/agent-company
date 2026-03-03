@@ -138,25 +138,59 @@ class DeveloperAgent(BaseAgent):
             diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
 
         if not diff.strip():
+            related_commits = await self.collect_task_related_commits(
+                task,
+                worktree_dev,
+                max_count=6,
+            )
+            history_commit = str(related_commits[0]["hash"]).strip() if related_commits else ""
+            history_short = str(related_commits[0].get("short") or "").strip() if related_commits else ""
+            if history_commit:
+                await self.add_log(
+                    task_id,
+                    (
+                        "本轮无新增文件变更；已附带历史提交证据："
+                        f"{history_short or history_commit[:12]}（共 {len(related_commits)} 条）"
+                    ),
+                )
+            else:
+                await self.add_log(
+                    task_id,
+                    "本轮无新增文件变更；未检索到高置信历史提交证据，将按无提交模式交接审查",
+                )
             if await self.stop_if_task_cancelled(task_id, "推进审查前"):
                 return
+            fields = {
+                "status": "in_review",
+                "assignee": None,
+                "assigned_agent": self.name,
+                "dev_agent": self.name,
+            }
+            if history_commit:
+                fields["commit_hash"] = history_commit
+            summary = (
+                f"本轮无文件变更，附带历史提交证据 {history_short or history_commit[:12]}，推进到审查"
+                if history_commit
+                else "本轮无文件变更，推进到审查"
+            )
             await self.transition_task(
                 task_id,
-                fields={
-                    "status": "in_review",
-                    "assignee": None,
-                    "assigned_agent": self.name,
-                    "dev_agent": self.name,
-                },
+                fields=fields,
                 handoff={
                     "stage": "dev_to_review",
                     "to_agent": "reviewer",
                     "status_from": prev_status,
                     "status_to": "in_review",
                     "title": "开发交接审查（无提交）",
-                    "summary": "本轮无文件变更，推进到审查",
-                    "conclusion": "无代码变更，直接交接审查",
-                    "payload": {"has_commit": False, "source_branch": branch},
+                    "summary": summary,
+                    "commit_hash": history_commit or None,
+                    "conclusion": "无代码新增变更，附历史提交证据交接审查",
+                    "payload": {
+                        "has_commit": bool(history_commit),
+                        "no_new_changes": True,
+                        "source_branch": branch,
+                        "related_history_commits": related_commits,
+                    },
                     "artifact_path": str(worktree_dev),
                 },
                 log_message="无文件变更，提交审查",

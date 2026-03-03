@@ -21,8 +21,82 @@
       font-family:'SF Mono','Monaco','Menlo',monospace;font-size:10.5px;line-height:1.55;
       overflow-y:auto;height:160px;padding:8px 10px;color:#86efac;
     }
-    .t-line{white-space:pre-wrap;word-break:break-all;}
-    .t-line.dim{color:#475569;} .t-line.warn{color:#fbbf24;} .t-line.err{color:#f87171;} .t-line.info{color:#7dd3fc;}
+    .terminal.paused { border-color:#334155; box-shadow: inset 0 0 0 1px rgba(148,163,184,.12); }
+    .t-line{
+      white-space:pre-wrap;
+      word-break:break-word;
+      tab-size:2;
+      font-variant-ligatures:none;
+      letter-spacing:.01em;
+      display:flex;
+      align-items:flex-start;
+      gap:6px;
+    }
+    .t-line .t-ts{
+      flex:0 0 auto;
+      color:#475569;
+      font-size:9px;
+      line-height:1.6;
+      user-select:none;
+    }
+    .t-line .t-body{
+      flex:1 1 auto;
+      min-width:0;
+      color:inherit;
+    }
+    .t-line.k-stdout{color:#86efac;}
+    .t-line.k-stderr{color:#fca5a5;}
+    .t-line.k-meta{color:#7dd3fc;}
+    .t-line.k-event{color:#c4b5fd;}
+    .t-line.dim{color:#475569;}
+    .t-line.warn{color:#fbbf24;}
+    .t-line.err{color:#f87171;}
+    .t-line.info{color:#7dd3fc;}
+    .t-link{color:#60a5fa;text-decoration:underline;}
+    .t-link:hover{color:#93c5fd;}
+    .ansi-bold{font-weight:700;}
+    .ansi-dim{opacity:.72;}
+    .ansi-italic{font-style:italic;}
+    .ansi-underline{text-decoration:underline;}
+    .ansi-fg-black{color:#0f172a;}
+    .ansi-fg-red{color:#f87171;}
+    .ansi-fg-green{color:#4ade80;}
+    .ansi-fg-yellow{color:#facc15;}
+    .ansi-fg-blue{color:#60a5fa;}
+    .ansi-fg-magenta{color:#e879f9;}
+    .ansi-fg-cyan{color:#22d3ee;}
+    .ansi-fg-white{color:#e2e8f0;}
+    .ansi-fg-bright-black{color:#64748b;}
+    .ansi-fg-bright-red{color:#fb7185;}
+    .ansi-fg-bright-green{color:#86efac;}
+    .ansi-fg-bright-yellow{color:#fde047;}
+    .ansi-fg-bright-blue{color:#93c5fd;}
+    .ansi-fg-bright-magenta{color:#f0abfc;}
+    .ansi-fg-bright-cyan{color:#67e8f9;}
+    .ansi-fg-bright-white{color:#f8fafc;}
+    .ansi-bg-black{background:#0f172a;}
+    .ansi-bg-red{background:#7f1d1d;}
+    .ansi-bg-green{background:#14532d;}
+    .ansi-bg-yellow{background:#78350f;}
+    .ansi-bg-blue{background:#1e3a8a;}
+    .ansi-bg-magenta{background:#701a75;}
+    .ansi-bg-cyan{background:#164e63;}
+    .ansi-bg-white{background:#e2e8f0;color:#0f172a;}
+    .ansi-bg-bright-black{background:#475569;}
+    .ansi-bg-bright-red{background:#be123c;}
+    .ansi-bg-bright-green{background:#166534;}
+    .ansi-bg-bright-yellow{background:#a16207;}
+    .ansi-bg-bright-blue{background:#1d4ed8;}
+    .ansi-bg-bright-magenta{background:#a21caf;}
+    .ansi-bg-bright-cyan{background:#0e7490;}
+    .ansi-bg-bright-white{background:#f8fafc;color:#0f172a;}
+    .term-btn{
+      border:1px solid #334155;background:#0b1220;color:#94a3b8;border-radius:4px;
+      padding:0 4px;line-height:1.4;cursor:pointer;font-size:10px;
+    }
+    .term-btn:hover{color:#e2e8f0;border-color:#475569;}
+    .term-follow{font-size:10px;color:#64748b;}
+    .term-follow.paused{color:#fbbf24;}
     .agent-busy .badge-dot{animation:blink 1s infinite;}
     @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
     #terminal-panel{transition:height 0.2s ease;overflow:hidden;}
@@ -921,6 +995,11 @@ let currentTaskId = null;
 let ws = null;
 let wsPingTimer = null;
 let terminalsVisible = true;
+let agentStates = {};          // key -> runtime status payload
+let agentTermLines = {};       // key -> ring buffer of terminal entries
+let terminalAutoFollow = {};   // key -> whether terminal should follow newest output
+let terminalStreamState = {};  // key -> { running:boolean, exit_code:number|null, updated_at:string }
+const TERMINAL_MAX_LINES = 2000;
 let _editingAgentKey = null;  // null = create mode
 let newProjectMode = "new";    // "new" | "existing"
 let dpCurrentPath = "";
@@ -1026,33 +1105,46 @@ function renderAgentStatusBadges() {
 function renderTerminals() {
   const grid = document.getElementById("terminal-grid");
   if (!grid) return;
-  // Preserve existing terminal content before re-rendering
-  const savedContent = {};
-  Object.keys(agentTypes).forEach(key => {
-    const t = document.getElementById(`term-${key}`);
-    if (t) savedContent[key] = t.innerHTML;
-  });
   grid.innerHTML = Object.values(agentTypes).map(at => `
     <div style="min-width:220px;flex:1">
       <div class="text-xs text-slate-500 mb-1 font-mono flex items-center gap-1.5">
         <span id="dot2-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
         ${escHtml(at.name||at.key)} · ${escHtml(at.cli||"-")} · <span id="status-${at.key}" class="text-slate-600">idle</span>
+        <span id="phase-${at.key}" class="text-slate-600"></span>
+        <span id="stream-${at.key}" class="text-slate-600"></span>
+        <span id="follow-${at.key}" class="term-follow ml-auto">跟随</span>
+        <button class="term-btn" title="回到底部" onclick="scrollTermToBottom('${escAttr(at.key)}')">↓</button>
+        <button class="term-btn" title="复制终端内容" onclick="copyTerminal('${escAttr(at.key)}')">复制</button>
+        <button class="term-btn" title="清空本地终端显示" onclick="clearTerminal('${escAttr(at.key)}')">清空</button>
       </div>
       <div class="terminal" id="term-${at.key}"></div>
     </div>`).join("");
-  // Restore saved content
-  Object.entries(savedContent).forEach(([key, html]) => {
-    const t = document.getElementById(`term-${key}`);
-    if (t && html) t.innerHTML = html;
+  Object.keys(agentTypes).forEach(key => {
+    if (!Array.isArray(agentTermLines[key])) agentTermLines[key] = [];
+    if (!terminalStreamState[key]) terminalStreamState[key] = {running:false, exit_code:null, updated_at:""};
+    if (typeof terminalAutoFollow[key] !== "boolean") terminalAutoFollow[key] = true;
+    attachTerminalScrollListener(key);
+    renderTerminalLines(key);
+    renderTerminalFollowState(key);
+    renderTerminalStreamState(key);
+  });
+  Object.entries(agentStates).forEach(([key, state]) => {
+    if (!state) return;
+    setAgentStatus(key, state.status || "idle", state.task || "", state);
   });
 }
 
 function ensureAgentTerminal(key) {
+  if (!Array.isArray(agentTermLines[key])) agentTermLines[key] = [];
+  if (!terminalStreamState[key]) terminalStreamState[key] = {running:false, exit_code:null, updated_at:""};
+  if (typeof terminalAutoFollow[key] !== "boolean") terminalAutoFollow[key] = true;
   if (!agentTypes[key]) {
     agentTypes[key] = {key, name: key, is_builtin: 0};
     renderAgentStatusBadges();
     renderTerminals();
+    return;
   }
+  if (!document.getElementById(`term-${key}`)) renderTerminals();
 }
 
 // ── Agent modal ───────────────────────────────────────────────────────────────
@@ -1503,27 +1595,349 @@ function toggleTerminals() {
   document.getElementById("terminal-chevron").textContent = terminalsVisible?"▲":"▼";
 }
 
-function appendTermLine(agent, line) {
-  const term = document.getElementById(`term-${agent}`);
-  if (!term) return;
-  const d = document.createElement("div");
-  d.className = "t-line" + (
-    /✗|error|fail/i.test(line) ? " err" :
-    /⚠|warn|timeout/i.test(line) ? " warn" :
-    /✓|✅|⏳/.test(line) ? " info" :
-    /^[▶─]/.test(line) ? " dim" : "");
-  d.textContent = line;
-  term.appendChild(d);
-  if (term.scrollHeight - term.scrollTop < term.clientHeight + 80)
-    term.scrollTop = term.scrollHeight;
-  while (term.children.length > 1000) term.removeChild(term.firstChild);
+const ANSI_RE = /\x1b\[([0-9;]*)m/g;
+const URL_RE = /(https?:\/\/[^\s<>"')\]]+)/g;
+const ANSI_FG_CLASS = {
+  30:"ansi-fg-black", 31:"ansi-fg-red", 32:"ansi-fg-green", 33:"ansi-fg-yellow",
+  34:"ansi-fg-blue", 35:"ansi-fg-magenta", 36:"ansi-fg-cyan", 37:"ansi-fg-white",
+  90:"ansi-fg-bright-black", 91:"ansi-fg-bright-red", 92:"ansi-fg-bright-green", 93:"ansi-fg-bright-yellow",
+  94:"ansi-fg-bright-blue", 95:"ansi-fg-bright-magenta", 96:"ansi-fg-bright-cyan", 97:"ansi-fg-bright-white",
+};
+const ANSI_BG_CLASS = {
+  40:"ansi-bg-black", 41:"ansi-bg-red", 42:"ansi-bg-green", 43:"ansi-bg-yellow",
+  44:"ansi-bg-blue", 45:"ansi-bg-magenta", 46:"ansi-bg-cyan", 47:"ansi-bg-white",
+  100:"ansi-bg-bright-black", 101:"ansi-bg-bright-red", 102:"ansi-bg-bright-green", 103:"ansi-bg-bright-yellow",
+  104:"ansi-bg-bright-blue", 105:"ansi-bg-bright-magenta", 106:"ansi-bg-bright-cyan", 107:"ansi-bg-bright-white",
+};
+
+function _defaultAnsiState() {
+  return { bold:false, dim:false, italic:false, underline:false, fg:"", bg:"" };
 }
 
-function setAgentStatus(agent, status, taskTitle) {
+function _cloneAnsiState(st) {
+  return {
+    bold: !!st.bold,
+    dim: !!st.dim,
+    italic: !!st.italic,
+    underline: !!st.underline,
+    fg: st.fg || "",
+    bg: st.bg || "",
+  };
+}
+
+function _applyAnsiCodes(state, rawCodes) {
+  const parts = String(rawCodes || "").split(";").map(x => x.trim()).filter(Boolean);
+  const codes = parts.length ? parts.map(x => Number.parseInt(x, 10)).filter(Number.isFinite) : [0];
+  for (const code of codes) {
+    if (code === 0) { state.bold = false; state.dim = false; state.italic = false; state.underline = false; state.fg = ""; state.bg = ""; continue; }
+    if (code === 1) { state.bold = true; continue; }
+    if (code === 2) { state.dim = true; continue; }
+    if (code === 3) { state.italic = true; continue; }
+    if (code === 4) { state.underline = true; continue; }
+    if (code === 22) { state.bold = false; state.dim = false; continue; }
+    if (code === 23) { state.italic = false; continue; }
+    if (code === 24) { state.underline = false; continue; }
+    if (code === 39) { state.fg = ""; continue; }
+    if (code === 49) { state.bg = ""; continue; }
+    if (ANSI_FG_CLASS[code]) { state.fg = ANSI_FG_CLASS[code]; continue; }
+    if (ANSI_BG_CLASS[code]) { state.bg = ANSI_BG_CLASS[code]; continue; }
+  }
+}
+
+function _parseAnsiSegments(line) {
+  const text = String(line || "");
+  const out = [];
+  const state = _defaultAnsiState();
+  let last = 0;
+  ANSI_RE.lastIndex = 0;
+  let m;
+  while ((m = ANSI_RE.exec(text)) !== null) {
+    const chunk = text.slice(last, m.index);
+    if (chunk) out.push({ text: chunk, state: _cloneAnsiState(state) });
+    _applyAnsiCodes(state, m[1] || "");
+    last = ANSI_RE.lastIndex;
+  }
+  const tail = text.slice(last);
+  if (tail) out.push({ text: tail, state: _cloneAnsiState(state) });
+  return out.length ? out : [{ text, state: _defaultAnsiState() }];
+}
+
+function _ansiClassName(state) {
+  if (!state) return "";
+  const cls = [];
+  if (state.bold) cls.push("ansi-bold");
+  if (state.dim) cls.push("ansi-dim");
+  if (state.italic) cls.push("ansi-italic");
+  if (state.underline) cls.push("ansi-underline");
+  if (state.fg) cls.push(state.fg);
+  if (state.bg) cls.push(state.bg);
+  return cls.join(" ");
+}
+
+function _appendStyledTextWithLinks(container, text, ansiClass) {
+  const value = String(text || "");
+  if (!value) return;
+  URL_RE.lastIndex = 0;
+  let last = 0;
+  let m;
+  while ((m = URL_RE.exec(value)) !== null) {
+    const before = value.slice(last, m.index);
+    if (before) {
+      const span = document.createElement("span");
+      if (ansiClass) span.className = ansiClass;
+      span.textContent = before;
+      container.appendChild(span);
+    }
+    const url = m[0];
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.className = `t-link${ansiClass ? ` ${ansiClass}` : ""}`;
+    a.textContent = url;
+    container.appendChild(a);
+    last = URL_RE.lastIndex;
+  }
+  const tail = value.slice(last);
+  if (tail) {
+    const span = document.createElement("span");
+    if (ansiClass) span.className = ansiClass;
+    span.textContent = tail;
+    container.appendChild(span);
+  }
+}
+
+function normalizeTermEntry(raw) {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return {
+      line: String(raw.line || ""),
+      kind: String(raw.kind || "line").trim().toLowerCase() || "line",
+      event: String(raw.event || "line").trim().toLowerCase() || "line",
+      task_id: raw.task_id ? String(raw.task_id) : null,
+      run_id: raw.run_id ? String(raw.run_id) : null,
+      exit_code: Number.isFinite(Number(raw.exit_code)) ? Number(raw.exit_code) : null,
+      created_at: String(raw.created_at || ""),
+    };
+  }
+  return {
+    line: String(raw || ""),
+    kind: "line",
+    event: "line",
+    task_id: null,
+    run_id: null,
+    exit_code: null,
+    created_at: "",
+  };
+}
+
+function termTimestampLabel(entry) {
+  const raw = String(entry?.created_at || "").trim();
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function rebuildTerminalStreamState(agent) {
+  const entries = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  let running = false;
+  let exit_code = null;
+  let updated_at = "";
+  for (const e0 of entries) {
+    const e = normalizeTermEntry(e0);
+    if (e.event === "started") {
+      running = true;
+      exit_code = null;
+      updated_at = e.created_at || updated_at;
+    } else if (e.event === "finished") {
+      running = false;
+      exit_code = e.exit_code;
+      updated_at = e.created_at || updated_at;
+    }
+  }
+  terminalStreamState[agent] = { running, exit_code, updated_at };
+}
+
+function renderTerminalStreamState(agent) {
+  const el = document.getElementById(`stream-${agent}`);
+  if (!el) return;
+  const st = terminalStreamState[agent] || { running: false, exit_code: null };
+  if (st.running) {
+    el.textContent = "· 进程运行";
+    el.className = "text-blue-400";
+    return;
+  }
+  if (st.exit_code === 0) {
+    el.textContent = "· 已结束(0)";
+    el.className = "text-emerald-400";
+    return;
+  }
+  if (st.exit_code !== null && st.exit_code !== undefined) {
+    el.textContent = `· 已结束(${st.exit_code})`;
+    el.className = "text-amber-400";
+    return;
+  }
+  el.textContent = "";
+  el.className = "text-slate-600";
+}
+
+function _renderTermLineElement(entryRaw) {
+  const entry = normalizeTermEntry(entryRaw);
+  const raw = String(entry.line || "");
+  const ts = termTimestampLabel(entry);
+  const kindClass = (
+    entry.kind === "stdout" ? "k-stdout" :
+    entry.kind === "stderr" ? "k-stderr" :
+    entry.kind === "meta" ? "k-meta" :
+    entry.kind === "event" ? "k-event" : ""
+  );
+  const d = document.createElement("div");
+  d.className = "t-line"
+    + (kindClass ? ` ${kindClass}` : "")
+    + (
+      /✗|error|fail/i.test(raw) ? " err" :
+      /⚠|warn|timeout/i.test(raw) ? " warn" :
+      /✓|✅|⏳/.test(raw) ? " info" :
+      /^[▶─]/.test(raw) ? " dim" : ""
+    );
+  if (ts) {
+    const t = document.createElement("span");
+    t.className = "t-ts";
+    t.textContent = ts;
+    d.appendChild(t);
+  }
+  const body = document.createElement("span");
+  body.className = "t-body";
+  const segments = _parseAnsiSegments(raw);
+  segments.forEach(seg => _appendStyledTextWithLinks(body, seg.text, _ansiClassName(seg.state)));
+  d.appendChild(body);
+  return d;
+}
+
+function renderTerminalFollowState(agent) {
+  const follow = terminalAutoFollow[agent] !== false;
+  const el = document.getElementById(`follow-${agent}`);
+  const term = document.getElementById(`term-${agent}`);
+  if (el) {
+    el.textContent = follow ? "跟随" : "已暂停";
+    el.classList.toggle("paused", !follow);
+  }
+  if (term) term.classList.toggle("paused", !follow);
+}
+
+function attachTerminalScrollListener(agent) {
+  const term = document.getElementById(`term-${agent}`);
+  if (!term || term.dataset.boundScroll === "1") return;
+  term.addEventListener("scroll", () => {
+    const nearBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 24;
+    const next = !!nearBottom;
+    if ((terminalAutoFollow[agent] !== false) !== next) {
+      terminalAutoFollow[agent] = next;
+      renderTerminalFollowState(agent);
+    }
+  });
+  term.dataset.boundScroll = "1";
+}
+
+function renderTerminalLines(agent) {
+  const term = document.getElementById(`term-${agent}`);
+  if (!term) return;
+  const lines = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  term.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  lines.forEach(line => frag.appendChild(_renderTermLineElement(line)));
+  term.appendChild(frag);
+  rebuildTerminalStreamState(agent);
+  renderTerminalStreamState(agent);
+  if (terminalAutoFollow[agent] !== false) term.scrollTop = term.scrollHeight;
+}
+
+function scrollTermToBottom(agent) {
+  const term = document.getElementById(`term-${agent}`);
+  if (!term) return;
+  terminalAutoFollow[agent] = true;
+  term.scrollTop = term.scrollHeight;
+  renderTerminalFollowState(agent);
+}
+
+function clearTerminal(agent) {
+  agentTermLines[agent] = [];
+  terminalStreamState[agent] = {running:false, exit_code:null, updated_at:""};
+  const term = document.getElementById(`term-${agent}`);
+  if (term) term.innerHTML = "";
+  terminalAutoFollow[agent] = true;
+  renderTerminalFollowState(agent);
+  renderTerminalStreamState(agent);
+}
+
+async function copyTerminal(agent) {
+  const lines = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  const text = lines
+    .map((entryRaw) => {
+      const entry = normalizeTermEntry(entryRaw);
+      const ts = termTimestampLabel(entry);
+      return `${ts ? `[${ts}] ` : ""}${entry.line}`;
+    })
+    .join("\n");
+  if (!text) {
+    showToast("终端为空", `${agent} 没有可复制内容`, "info");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("已复制终端", `${agent} (${lines.length} 行)`, "info");
+  } catch {
+    window.prompt("复制失败，请手动复制以下内容：", text.slice(0, 12000));
+  }
+}
+
+function appendTermLine(agent, line) {
+  const rawEntry = normalizeTermEntry(line);
+  if (!Array.isArray(agentTermLines[agent])) agentTermLines[agent] = [];
+  if (!terminalStreamState[agent]) terminalStreamState[agent] = {running:false, exit_code:null, updated_at:""};
+  if (typeof terminalAutoFollow[agent] !== "boolean") terminalAutoFollow[agent] = true;
+  const lines = agentTermLines[agent];
+  lines.push(rawEntry);
+  if (lines.length > TERMINAL_MAX_LINES) lines.splice(0, lines.length - TERMINAL_MAX_LINES);
+
+  const term = document.getElementById(`term-${agent}`);
+  if (!term) {
+    rebuildTerminalStreamState(agent);
+    return;
+  }
+  attachTerminalScrollListener(agent);
+  term.appendChild(_renderTermLineElement(rawEntry));
+  while (term.children.length > TERMINAL_MAX_LINES) term.removeChild(term.firstChild);
+  rebuildTerminalStreamState(agent);
+  renderTerminalStreamState(agent);
+  if (terminalAutoFollow[agent] !== false) term.scrollTop = term.scrollHeight;
+  renderTerminalFollowState(agent);
+}
+
+function formatAgentPhase(phase) {
+  const p = String(phase || "").trim();
+  if (!p) return "";
+  const m = {
+    claimed: "已认领",
+    running: "执行中",
+    cli_spawning: "启动 CLI",
+    cli_running: "CLI 执行",
+    cli_timeout: "CLI 超时",
+    lease_retry: "续租重试",
+    lease_lost: "租约失效",
+    failed: "异常",
+  };
+  return m[p] || p;
+}
+
+function setAgentStatus(agent, status, taskTitle, rawState = null) {
+  const state = rawState || {};
+  agentStates[agent] = { status, task: taskTitle, ...state };
   const busy = status === "busy";
   const dot  = document.getElementById(`dot-${agent}`);
   const dot2 = document.getElementById(`dot2-${agent}`);
   const statusEl = document.getElementById(`status-${agent}`);
+  const phaseEl = document.getElementById(`phase-${agent}`);
   const badge = document.getElementById(`ab-${agent}`);
   [dot, dot2].forEach(d => {
     if (!d) return;
@@ -1532,17 +1946,35 @@ function setAgentStatus(agent, status, taskTitle) {
     d.classList.toggle("bg-slate-600", false);
   });
   if (badge) badge.classList.toggle("agent-busy", busy);
+  const phaseText = formatAgentPhase(state.phase);
   if (statusEl) {
-    statusEl.textContent = busy ? (taskTitle?.slice(0,25)||"工作中") : "idle";
+    statusEl.textContent = busy ? (taskTitle?.slice(0,20)||"工作中") : "idle";
     statusEl.className = busy ? "text-blue-400" : "text-slate-600";
+    statusEl.title = busy ? (taskTitle || "") : "idle";
+  }
+  if (phaseEl) {
+    phaseEl.textContent = busy && phaseText ? `· ${phaseText}` : "";
+    phaseEl.className = busy
+      ? (phaseText.includes("失效") || phaseText.includes("超时") || phaseText.includes("异常")
+        ? "text-red-400"
+        : phaseText.includes("重试")
+          ? "text-amber-400"
+          : "text-slate-500")
+      : "text-slate-600";
   }
 }
 
 function initAgentOutputs(data) {
   for (const [agent, d] of Object.entries(data||{})) {
-    const term = document.getElementById(`term-${agent}`);
-    if (term) { term.innerHTML=""; (d.lines||[]).forEach(l=>appendTermLine(agent,l)); }
-    setAgentStatus(agent, d.status?.status||"idle", d.status?.task||"");
+    ensureAgentTerminal(agent);
+    const lines = Array.isArray(d.lines) ? d.lines.map(normalizeTermEntry) : [];
+    agentTermLines[agent] = lines.slice(-TERMINAL_MAX_LINES);
+    rebuildTerminalStreamState(agent);
+    terminalAutoFollow[agent] = true;
+    renderTerminalLines(agent);
+    renderTerminalFollowState(agent);
+    renderTerminalStreamState(agent);
+    setAgentStatus(agent, d.status?.status||"idle", d.status?.task||"", d.status||{});
   }
 }
 
@@ -1780,11 +2212,23 @@ function renderHandoffs(handoffs) {
     const commitHash = escHtml(h.commit_hash || h.payload?.commit_hash || "");
     const sourceBranch = escHtml(h.payload?.source_branch || "");
     const conclusion = escHtml(h.conclusion || h.payload?.conclusion || "");
+    const relatedHistory = Array.isArray(h.payload?.related_history_commits)
+      ? h.payload.related_history_commits
+      : [];
     const at = escHtml(formatLocalDateTime(h.created_at));
     const payload = escHtml(fmtPayload(h.payload));
     const artifact = h.artifact_path ? `<div class="text-cyan-400 mt-1 break-all">📎 ${escHtml(h.artifact_path)}</div>` : "";
     const commitLine = commitHash ? `<div class="text-emerald-400 mt-1 font-mono">commit: ${commitHash}</div>` : "";
     const branchLine = sourceBranch ? `<div class="text-sky-400 mt-1 font-mono">branch: ${sourceBranch}</div>` : "";
+    const relatedLine = relatedHistory.length
+      ? `<div class="text-emerald-300 mt-1 text-xs">历史提交证据: ${
+          relatedHistory.slice(0, 5).map((c) => {
+            const h0 = escHtml(c.short || String(c.hash || "").slice(0, 12));
+            const s0 = escHtml(c.subject || "");
+            return `<span class="font-mono">${h0}</span>${s0 ? ` ${s0}` : ""}`;
+          }).join(" · ")
+        }${relatedHistory.length > 5 ? ` · +${relatedHistory.length - 5}` : ""}</div>`
+      : "";
     const conclusionLine = conclusion ? `<div class="text-amber-200 mt-1 whitespace-pre-wrap">结论: ${conclusion}</div>` : "";
     return `<div class="log-entry border-l-indigo-600/40">
       <div class="text-indigo-300 font-medium">${title}</div>
@@ -1792,6 +2236,7 @@ function renderHandoffs(handoffs) {
       <div class="text-slate-500 mt-0.5">${sFrom} → ${sTo}</div>
       ${commitLine}
       ${branchLine}
+      ${relatedLine}
       ${conclusionLine}
       ${summary ? `<div class="text-slate-300 mt-1 whitespace-pre-wrap">${summary}</div>` : ""}
       ${artifact}
@@ -2223,7 +2668,7 @@ function connectWS() {
       }
     } else if (msg.event==="agent_output") {
       ensureAgentTerminal(msg.agent);
-      appendTermLine(msg.agent,msg.line);
+      appendTermLine(msg.agent, msg.output || msg.line);
     } else if (msg.event==="handoff_added") {
       if (currentTaskId === msg.handoff.task_id) loadTaskHandoffs(currentTaskId);
     } else if (msg.event==="agent_alert") {
@@ -2232,7 +2677,7 @@ function connectWS() {
       const who = msg.agent ? `${msg.agent} · ` : "";
       showToast(`⚠ ${who}${title}`, msg.message || msg.summary || "请查看日志", msg.kind || "error");
     } else if (msg.event==="agent_status") {
-      setAgentStatus(msg.agent,msg.status,msg.task);
+      setAgentStatus(msg.agent, msg.status, msg.task, msg);
     } else if (msg.event==="files_changed") {
       // Auto-refresh file browser if open and viewing the same project/path
       if (msg.project_id === currentProjectId && document.getElementById("file-panel").classList.contains("open")) {

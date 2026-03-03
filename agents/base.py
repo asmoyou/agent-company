@@ -107,6 +107,8 @@ class BaseAgent:
         self._active_run_id: str | None = None
         self._active_lease_token: str | None = None
         self._active_lease_lost: bool = False
+        self._active_phase: str = ""
+        self._active_cli_pid: int | None = None
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
@@ -450,6 +452,148 @@ class BaseAgent:
             return str(payload.get("source_branch") or "").strip()
         return ""
 
+    def _extract_handoff_related_commits(self, handoff: dict) -> list[dict]:
+        payload = handoff.get("payload")
+        if not isinstance(payload, dict):
+            return []
+        raw_items = payload.get("related_history_commits")
+        if not isinstance(raw_items, list):
+            return []
+        out: list[dict] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            commit_hash = str(item.get("hash") or item.get("commit_hash") or "").strip()
+            if not commit_hash:
+                continue
+            out.append(
+                {
+                    "hash": commit_hash,
+                    "short": str(item.get("short") or "").strip(),
+                    "subject": str(item.get("subject") or "").strip(),
+                    "created_at": str(item.get("created_at") or "").strip(),
+                    "score": int(item.get("score") or 0),
+                }
+            )
+        return out
+
+    def _extract_handoff_commit_candidates(self, handoff: dict) -> list[str]:
+        candidates: list[str] = []
+        primary = self._extract_handoff_commit(handoff)
+        if primary:
+            candidates.append(primary)
+        for item in self._extract_handoff_related_commits(handoff):
+            h = str(item.get("hash") or "").strip()
+            if h:
+                candidates.append(h)
+        # preserve order, dedupe
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for c in candidates:
+            if c in seen:
+                continue
+            seen.add(c)
+            uniq.append(c)
+        return uniq
+
+    async def resolve_handoff_commit_candidate(
+        self,
+        task_id: str,
+        repo_root: Path,
+    ) -> tuple[str, list[dict]]:
+        handoff = await self.get_latest_handoff_for_agent(task_id)
+        if not handoff:
+            return "", []
+        related = self._extract_handoff_related_commits(handoff)
+        for commit_hash in self._extract_handoff_commit_candidates(handoff):
+            try:
+                await self.git("cat-file", "-e", f"{commit_hash}^{{commit}}", cwd=repo_root)
+                return commit_hash, related
+            except Exception:
+                continue
+        return "", related
+
+    def _task_commit_keywords(self, task: dict) -> list[str]:
+        text = " ".join(
+            [
+                str(task.get("id") or ""),
+                str(task.get("title") or ""),
+                str(task.get("description") or ""),
+            ]
+        ).lower()
+        latin = [tok for tok in re.split(r"[^a-z0-9]+", text) if len(tok) >= 3]
+        zh = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+        words = latin + zh
+        # preserve order + dedupe
+        out: list[str] = []
+        seen: set[str] = set()
+        for w in words:
+            if w in seen:
+                continue
+            seen.add(w)
+            out.append(w)
+        return out[:24]
+
+    async def collect_task_related_commits(
+        self,
+        task: dict,
+        repo_root: Path,
+        *,
+        max_count: int = 6,
+        scan_count: int = 120,
+    ) -> list[dict]:
+        try:
+            raw = await self.git(
+                "log",
+                f"-n{max(20, int(scan_count))}",
+                "--pretty=format:%H%x1f%h%x1f%s%x1f%ci",
+                cwd=repo_root,
+            )
+        except Exception:
+            return []
+        keywords = self._task_commit_keywords(task)
+        task_id = str(task.get("id") or "").strip().lower()
+        rows: list[dict] = []
+        for ln in str(raw or "").splitlines():
+            parts = ln.split("\x1f")
+            if len(parts) < 4:
+                continue
+            full_hash, short_hash, subject, created_at = parts[0], parts[1], parts[2], parts[3]
+            hay = subject.lower()
+            score = 0
+            if task_id and task_id in hay:
+                score += 3
+            for kw in keywords:
+                if kw and kw in hay:
+                    score += 1
+            rows.append(
+                {
+                    "hash": full_hash.strip(),
+                    "short": short_hash.strip(),
+                    "subject": subject.strip(),
+                    "created_at": created_at.strip(),
+                    "score": score,
+                }
+            )
+        if not rows:
+            return []
+        ranked = sorted(rows, key=lambda x: (int(x.get("score") or 0), str(x.get("created_at") or "")), reverse=True)
+        selected = [r for r in ranked if int(r.get("score") or 0) > 0]
+        if not selected:
+            selected = rows[:3]
+        # dedupe by commit hash and trim
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in selected:
+            h = str(item.get("hash") or "").strip()
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            out.append(item)
+            if len(out) >= max(1, int(max_count)):
+                break
+        return out
+
     async def get_latest_handoff_for_agent(self, task_id: str) -> dict | None:
         handoffs = await self.get_handoffs(task_id)
         if not handoffs:
@@ -664,22 +808,71 @@ class BaseAgent:
 
     # ── Agent terminal output ─────────────────────────────────────────────────
 
-    def _post_output_bg(self, line: str):
+    def _post_output_bg(
+        self,
+        line: str,
+        *,
+        kind: str = "meta",
+        event: str = "line",
+        exit_code: int | None = None,
+    ):
+        task_id = self._active_task_id
+        run_id = self._active_run_id
         async def _send():
             try:
                 await self.http.post(
                     f"/agents/{self.name}/output",
-                    json={"line": line}, timeout=AGENT_POST_TIMEOUT_SECS,
+                    json={
+                        "line": line,
+                        "kind": kind,
+                        "event": event,
+                        "exit_code": exit_code,
+                        "task_id": task_id,
+                        "run_id": run_id,
+                    },
+                    timeout=AGENT_POST_TIMEOUT_SECS,
                 )
             except Exception:
                 pass
         asyncio.create_task(_send())
 
-    async def set_agent_status(self, status: str, task_title: str = ""):
+    async def set_agent_status(
+        self,
+        status: str,
+        task_title: str = "",
+        *,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        lease_token: str | None = None,
+        phase: str | None = None,
+        pid: int | None = None,
+    ):
+        busy = str(status or "").strip().lower() == "busy"
+        if busy:
+            task_id = task_id if task_id is not None else self._active_task_id
+            run_id = run_id if run_id is not None else self._active_run_id
+            lease_token = lease_token if lease_token is not None else self._active_lease_token
+            phase = phase if phase is not None else self._active_phase
+            pid = pid if pid is not None else self._active_cli_pid
+        else:
+            task_id = ""
+            run_id = ""
+            lease_token = ""
+            phase = ""
+            pid = None
         try:
             await self.http.post(
                 f"/agents/{self.name}/status",
-                json={"status": status, "task": task_title}, timeout=AGENT_POST_TIMEOUT_SECS,
+                json={
+                    "status": status,
+                    "task": task_title,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "lease_token": lease_token,
+                    "phase": phase,
+                    "pid": pid,
+                },
+                timeout=AGENT_POST_TIMEOUT_SECS,
             )
         except Exception:
             pass
@@ -770,18 +963,19 @@ class BaseAgent:
                 except Exception:
                     schema_path = None
             elif output_schema is not None:
-                self._post_output_bg("ℹ codex output_schema 已禁用（使用文件产物做结构化校验）")
+                self._post_output_bg("ℹ codex output_schema 已禁用（使用文件产物做结构化校验）", kind="meta")
 
             cmd.append(prompt)
         else:
             cmd = build_cli_cmd(self.cli_name, prompt)
         print(f"[{self.name}] Spawning {cmd[0]} (cwd={cwd.name})")
-        self._post_output_bg(f"$ {cmd[0]}  cwd={cwd}")
+        self._post_output_bg(f"$ {cmd[0]}  cwd={cwd}", kind="meta")
         env = os.environ.copy()
         # Hint CLIs to avoid interactive flows.
         env.setdefault("CI", "1")
         env.setdefault("NONINTERACTIVE", "1")
 
+        self._active_phase = "cli_spawning"
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(cwd),
             stdin=asyncio.subprocess.PIPE,
@@ -789,6 +983,13 @@ class BaseAgent:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             start_new_session=True,
+        )
+        self._active_cli_pid = int(proc.pid) if proc.pid is not None else None
+        self._active_phase = "cli_running"
+        self._post_output_bg(
+            f"▶ CLI 已启动: {cmd[0]} (pid={self._active_cli_pid or '-'})",
+            kind="event",
+            event="started",
         )
 
         lines: list[str] = []
@@ -819,20 +1020,20 @@ class BaseAgent:
                     idle_reply_output_marker = last_output_at
                     msg = f"↩ 自动应答({auto_reply_count}/{AUTO_REPLY_MAX}) ENTER [{reason[:80]}]"
                     lines.append(msg)
-                    self._post_output_bg(msg)
+                    self._post_output_bg(msg, kind="meta")
                     if task_id:
                         await self.add_log(task_id, msg)
                 except Exception:
                     pass
 
-        async def drain(stream):
+        async def drain(stream, stream_kind: str):
             nonlocal last_output_at
             async for raw in stream:
                 line = raw.decode(errors="replace").rstrip("\n")
                 if line:
                     last_output_at = time.monotonic()
                     lines.append(line)
-                    self._post_output_bg(line)
+                    self._post_output_bg(line, kind=stream_kind)
                     if INTERACTIVE_PROMPT_RE.search(line):
                         await auto_reply(f"检测到交互提示: {line}")
 
@@ -843,7 +1044,7 @@ class BaseAgent:
                     return
                 elapsed = int(time.monotonic() - start_time)
                 msg = f"⏳ 仍在工作中... 已运行 {elapsed}s"
-                self._post_output_bg(msg)
+                self._post_output_bg(msg, kind="meta")
                 if task_id:
                     await self.add_log(task_id, msg)
 
@@ -874,7 +1075,7 @@ class BaseAgent:
                 if self._active_task_id == task_id and self._active_lease_lost:
                     msg = "🛑 检测到任务租约失效，终止当前 CLI 执行"
                     lines.append(msg)
-                    self._post_output_bg(msg)
+                    self._post_output_bg(msg, kind="meta")
                     await self._terminate_proc_tree(proc)
                     return
                 try:
@@ -885,7 +1086,7 @@ class BaseAgent:
                 if not task:
                     msg = "🛑 检测到任务不存在，终止当前 CLI 执行"
                     lines.append(msg)
-                    self._post_output_bg(msg)
+                    self._post_output_bg(msg, kind="meta")
                     await self._terminate_proc_tree(proc)
                     return
                 status = str(task.get("status") or "").strip().lower()
@@ -893,13 +1094,13 @@ class BaseAgent:
                 if status == "cancelled" or archived == 1:
                     msg = "🛑 检测到任务已取消/归档，终止当前 CLI 执行"
                     lines.append(msg)
-                    self._post_output_bg(msg)
+                    self._post_output_bg(msg, kind="meta")
                     await self._terminate_proc_tree(proc)
                     return
                 if expected_status_lc and status != expected_status_lc:
                     msg = f"🛑 检测到任务状态变更为 {status}，终止当前 CLI 执行"
                     lines.append(msg)
-                    self._post_output_bg(msg)
+                    self._post_output_bg(msg, kind="meta")
                     await self._terminate_proc_tree(proc)
                     return
                 if expected_assignee_lc:
@@ -910,7 +1111,7 @@ class BaseAgent:
                             "终止当前 CLI 执行"
                         )
                         lines.append(msg)
-                        self._post_output_bg(msg)
+                        self._post_output_bg(msg, kind="meta")
                         await self._terminate_proc_tree(proc)
                         return
 
@@ -919,13 +1120,17 @@ class BaseAgent:
         cwatch = asyncio.create_task(cancel_watcher())
         try:
             await asyncio.wait_for(
-                asyncio.gather(drain(proc.stdout), drain(proc.stderr)),
+                asyncio.gather(
+                    drain(proc.stdout, "stdout"),
+                    drain(proc.stderr, "stderr"),
+                ),
                 timeout=CLI_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            self._active_phase = "cli_timeout"
             await self._terminate_proc_tree(proc)
             lines.append(f"[TIMEOUT after {CLI_TIMEOUT}s]")
-            self._post_output_bg(f"⚠ TIMEOUT after {CLI_TIMEOUT}s")
+            self._post_output_bg(f"⚠ TIMEOUT after {CLI_TIMEOUT}s", kind="meta")
         finally:
             for t in (hb, iar, cwatch):
                 t.cancel()
@@ -934,6 +1139,15 @@ class BaseAgent:
                     await t
 
         await proc.wait()
+        self._post_output_bg(
+            f"■ CLI 结束: exit={proc.returncode}",
+            kind="event",
+            event="finished",
+            exit_code=proc.returncode,
+        )
+        self._active_cli_pid = None
+        if self._active_phase in {"cli_spawning", "cli_running", "cli_timeout"}:
+            self._active_phase = "running"
 
         if last_message_path and last_message_path.exists():
             try:
@@ -1128,6 +1342,12 @@ class BaseAgent:
                         if self.shutdown.is_set():
                             break
                         print(f"[{self.name}] → '{task['title'][:40]}' ({status})")
+                        self._active_task_id = task["id"]
+                        self._active_run_id = str(task.get("claim_run_id") or "").strip() or None
+                        self._active_lease_token = str(task.get("lease_token") or "").strip() or None
+                        self._active_lease_lost = False
+                        self._active_phase = "claimed"
+                        self._active_cli_pid = None
                         await self.set_agent_status("busy", task["title"])
                         self._post_output_bg(f"▶ 任务: {task['title']}")
                         async def busy_status_heartbeat():
@@ -1155,15 +1375,19 @@ class BaseAgent:
                                 )
                                 if renewed is True:
                                     consecutive_errors = 0
+                                    if self._active_phase in {"lease_retry", "claimed"}:
+                                        self._active_phase = "running"
                                     continue
                                 if renewed is False:
                                     self._active_lease_lost = True
+                                    self._active_phase = "lease_lost"
                                     self._post_output_bg(
                                         "🛑 租约续期失败，任务可能已被回收/接管，停止当前执行"
                                     )
                                     return
                                 consecutive_errors += 1
                                 if consecutive_errors >= TASK_LEASE_RENEW_WARN_AFTER_ERRORS:
+                                    self._active_phase = "lease_retry"
                                     self._post_output_bg(
                                         f"⚠ 租约续期连续失败 {consecutive_errors} 次（将继续重试）"
                                     )
@@ -1171,12 +1395,10 @@ class BaseAgent:
                         busy_hb = asyncio.create_task(busy_status_heartbeat())
                         lease_hb = asyncio.create_task(lease_heartbeat())
                         try:
-                            self._active_task_id = task["id"]
-                            self._active_run_id = str(task.get("claim_run_id") or "").strip() or None
-                            self._active_lease_token = str(task.get("lease_token") or "").strip() or None
-                            self._active_lease_lost = False
+                            self._active_phase = "running"
                             await self.process_task(task)
                         except Exception as e:
+                            self._active_phase = "failed"
                             await self.add_log(task["id"], f"错误: {e}")
                             await self.add_alert(
                                 summary=f"{self.name} 运行异常",
@@ -1198,6 +1420,8 @@ class BaseAgent:
                             self._active_run_id = None
                             self._active_lease_token = None
                             self._active_lease_lost = False
+                            self._active_phase = ""
+                            self._active_cli_pid = None
                         await self.set_agent_status("idle")
                         self._post_output_bg("─── 等待下一个任务 ───")
                 except Exception as e:

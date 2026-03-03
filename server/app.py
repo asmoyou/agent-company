@@ -108,7 +108,17 @@ def require_task_access(task_id: str, user: dict) -> dict:
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
 AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=1000))
 AGENT_STATUS: dict = defaultdict(
-    lambda: {"status": "idle", "task": "", "updated_at": "", "last_output_at": ""}
+    lambda: {
+        "status": "idle",
+        "task": "",
+        "task_id": "",
+        "run_id": "",
+        "lease_token": "",
+        "phase": "",
+        "pid": None,
+        "updated_at": "",
+        "last_output_at": "",
+    }
 )
 
 
@@ -140,6 +150,11 @@ def _ensure_agent_state(agent_name: str) -> dict:
     state = AGENT_STATUS[agent_name]
     state.setdefault("status", "idle")
     state.setdefault("task", "")
+    state.setdefault("task_id", "")
+    state.setdefault("run_id", "")
+    state.setdefault("lease_token", "")
+    state.setdefault("phase", "")
+    state.setdefault("pid", None)
     state.setdefault("updated_at", "")
     state.setdefault("last_output_at", "")
     return state
@@ -147,8 +162,31 @@ def _ensure_agent_state(agent_name: str) -> dict:
 
 def _agent_outputs_snapshot() -> dict:
     return {
-        name: {"lines": list(AGENT_OUTPUT[name]), "status": dict(_ensure_agent_state(name))}
+        name: {"lines": [_normalize_agent_output_entry(x) for x in list(AGENT_OUTPUT[name])], "status": dict(_ensure_agent_state(name))}
         for name in AGENT_OUTPUT
+    }
+
+
+def _normalize_agent_output_entry(raw) -> dict:
+    if isinstance(raw, dict):
+        line = str(raw.get("line") or "")
+        return {
+            "line": line,
+            "kind": str(raw.get("kind") or "line").strip().lower() or "line",
+            "event": str(raw.get("event") or "line").strip().lower() or "line",
+            "task_id": str(raw.get("task_id") or "").strip() or None,
+            "run_id": str(raw.get("run_id") or "").strip() or None,
+            "exit_code": int(raw["exit_code"]) if raw.get("exit_code") is not None else None,
+            "created_at": str(raw.get("created_at") or _utcnow_iso()),
+        }
+    return {
+        "line": str(raw or ""),
+        "kind": "line",
+        "event": "line",
+        "task_id": None,
+        "run_id": None,
+        "exit_code": None,
+        "created_at": _utcnow_iso(),
     }
 
 
@@ -158,11 +196,26 @@ async def _recover_stale_agent(agent_name: str, stale_secs: int):
     AGENT_STATUS[agent_name] = {
         "status": "idle",
         "task": "",
+        "task_id": "",
+        "run_id": "",
+        "lease_token": "",
+        "phase": "",
+        "pid": None,
         "updated_at": _utcnow_iso(),
         "last_output_at": last_output_at,
     }
     await manager.broadcast(
-        {"event": "agent_status", "agent": agent_name, "status": "idle", "task": ""}
+        {
+            "event": "agent_status",
+            "agent": agent_name,
+            "status": "idle",
+            "task": "",
+            "task_id": "",
+            "run_id": "",
+            "lease_token": "",
+            "phase": "",
+            "pid": None,
+        }
     )
 
     recovered = db.recover_stale_tasks_for_agent(agent_name)
@@ -183,7 +236,37 @@ async def _recover_stale_agent(agent_name: str, stale_secs: int):
 async def _agent_health_watchdog():
     while True:
         await asyncio.sleep(AGENT_WATCHDOG_SECS)
-        recovered = db.recover_expired_task_leases(grace_secs=TASK_LEASE_RECOVERY_GRACE_SECS)
+        now = datetime.utcnow()
+        protected_task_ids: set[str] = set()
+        # If an agent is still heartbeating with a valid lease fence, avoid
+        # reclaiming its expired lease immediately (prevents long-task false positives).
+        for _, state in list(AGENT_STATUS.items()):
+            if str(state.get("status") or "").strip().lower() != "busy":
+                continue
+            last_seen = _agent_last_seen(state)
+            if last_seen is None:
+                continue
+            idle_secs = int((now - last_seen).total_seconds())
+            if idle_secs > AGENT_STALE_SECS:
+                continue
+            task_id = str(state.get("task_id") or "").strip()
+            run_id = str(state.get("run_id") or "").strip()
+            lease_token = str(state.get("lease_token") or "").strip()
+            if not task_id or not run_id or not lease_token:
+                continue
+            ok, _ = db.validate_task_lease(
+                task_id=task_id,
+                expected_run_id=run_id,
+                expected_lease_token=lease_token,
+                strict_if_active=True,
+            )
+            if ok:
+                protected_task_ids.add(task_id)
+
+        recovered = db.recover_expired_task_leases(
+            grace_secs=TASK_LEASE_RECOVERY_GRACE_SECS,
+            exclude_task_ids=protected_task_ids,
+        )
         if not recovered:
             continue
         touched_agents: set[str] = set()
@@ -208,11 +291,26 @@ async def _agent_health_watchdog():
             AGENT_STATUS[agent_name] = {
                 "status": "idle",
                 "task": "",
+                "task_id": "",
+                "run_id": "",
+                "lease_token": "",
+                "phase": "",
+                "pid": None,
                 "updated_at": _utcnow_iso(),
                 "last_output_at": state.get("last_output_at", ""),
             }
             await manager.broadcast(
-                {"event": "agent_status", "agent": agent_name, "status": "idle", "task": ""}
+                {
+                    "event": "agent_status",
+                    "agent": agent_name,
+                    "status": "idle",
+                    "task": "",
+                    "task_id": "",
+                    "run_id": "",
+                    "lease_token": "",
+                    "phase": "",
+                    "pid": None,
+                }
             )
 
 
@@ -344,6 +442,13 @@ async def lifespan(app: FastAPI):
     # Pre-populate AGENT_OUTPUT/STATUS for all known agent types
     for at in db.list_agent_types():
         _ensure_agent_state(at["key"])
+    known_output_agents = set(db.list_agent_output_agents())
+    known_output_agents.update({str(at.get("key") or "").strip().lower() for at in db.list_agent_types()})
+    for agent_name in sorted(x for x in known_output_agents if x):
+        _ensure_agent_state(agent_name)
+        AGENT_OUTPUT[agent_name].clear()
+        for entry in db.get_agent_output_entries(agent_name, limit=1000):
+            AGENT_OUTPUT[agent_name].append(_normalize_agent_output_entry(entry))
     watchdog = asyncio.create_task(_agent_health_watchdog())
     try:
         yield
@@ -437,11 +542,21 @@ class AgentAlertCreate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 class AgentOutput(BaseModel):
-    line: str
+    line: str = ""
+    kind: str | None = None
+    event: str | None = None
+    exit_code: int | None = None
+    task_id: str | None = None
+    run_id: str | None = None
 
 class AgentStatusUpdate(BaseModel):
     status: str
     task: str = ""
+    task_id: str | None = None
+    run_id: str | None = None
+    lease_token: str | None = None
+    phase: str | None = None
+    pid: int | None = None
 
 class AgentTypeCreate(BaseModel):
     key: str
@@ -678,10 +793,31 @@ def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None,
 
     payload = dict(body.payload or {})
 
+    related_candidates: list[str] = []
+    rel = payload.get("related_history_commits")
+    if isinstance(rel, list):
+        for item in rel:
+            if not isinstance(item, dict):
+                continue
+            h = str(item.get("hash") or item.get("commit_hash") or "").strip()
+            if h:
+                related_candidates.append(h)
+    if not related_candidates:
+        rel2 = payload.get("related_commit_candidates")
+        if isinstance(rel2, list):
+            for item in rel2:
+                if isinstance(item, dict):
+                    h = str(item.get("hash") or item.get("commit_hash") or "").strip()
+                else:
+                    h = str(item or "").strip()
+                if h:
+                    related_candidates.append(h)
+
     raw_commit = (
         str(body.commit_hash or "").strip()
         or str(payload.get("commit_hash") or "").strip()
         or str(task.get("commit_hash") or "").strip()
+        or (related_candidates[0] if related_candidates else "")
     )
     commit_hash = raw_commit[:120] if raw_commit else None
     if commit_hash:
@@ -1685,22 +1821,92 @@ async def get_agent_outputs(_user: dict = Depends(require_user)):
 @app.post("/agents/{agent_name}/output")
 async def agent_output(agent_name: str, body: AgentOutput):
     state = _ensure_agent_state(agent_name)
-    AGENT_OUTPUT[agent_name].append(body.line)
+    entry = _normalize_agent_output_entry(
+        {
+            "line": body.line,
+            "kind": body.kind,
+            "event": body.event,
+            "task_id": body.task_id,
+            "run_id": body.run_id,
+            "exit_code": body.exit_code,
+            "created_at": _utcnow_iso(),
+        }
+    )
+    AGENT_OUTPUT[agent_name].append(entry)
     state["last_output_at"] = _utcnow_iso()
-    broadcast_bg({"event": "agent_output", "agent": agent_name, "line": body.line})
+    if body.task_id is not None:
+        state["task_id"] = str(body.task_id or "").strip()
+    if body.run_id is not None:
+        state["run_id"] = str(body.run_id or "").strip()
+    db.add_agent_output(
+        agent=agent_name,
+        line=entry["line"],
+        kind=entry["kind"],
+        event=entry["event"],
+        exit_code=entry["exit_code"],
+        task_id=body.task_id,
+        run_id=body.run_id,
+        keep_last=1000,
+    )
+    broadcast_bg(
+        {
+            "event": "agent_output",
+            "agent": agent_name,
+            "line": entry["line"],
+            "output": entry,
+        }
+    )
     return {"ok": True}
 
 @app.post("/agents/{agent_name}/status")
 async def agent_status(agent_name: str, body: AgentStatusUpdate):
     prev = _ensure_agent_state(agent_name)
+    busy = str(body.status or "").strip().lower() == "busy"
+    task_id = (
+        str(body.task_id or "").strip()
+        if body.task_id is not None
+        else (str(prev.get("task_id") or "").strip() if busy else "")
+    )
+    run_id = (
+        str(body.run_id or "").strip()
+        if body.run_id is not None
+        else (str(prev.get("run_id") or "").strip() if busy else "")
+    )
+    lease_token = (
+        str(body.lease_token or "").strip()
+        if body.lease_token is not None
+        else (str(prev.get("lease_token") or "").strip() if busy else "")
+    )
+    phase = (
+        str(body.phase or "").strip()
+        if body.phase is not None
+        else (str(prev.get("phase") or "").strip() if busy else "")
+    )
+    pid = body.pid if body.pid is not None else (prev.get("pid") if busy else None)
     AGENT_STATUS[agent_name] = {
         "status": body.status,
         "task": body.task,
+        "task_id": task_id,
+        "run_id": run_id,
+        "lease_token": lease_token,
+        "phase": phase,
+        "pid": pid,
         "updated_at": _utcnow_iso(),
         "last_output_at": prev.get("last_output_at", ""),
     }
-    broadcast_bg({"event": "agent_status", "agent": agent_name,
-                  "status": body.status, "task": body.task})
+    broadcast_bg(
+        {
+            "event": "agent_status",
+            "agent": agent_name,
+            "status": body.status,
+            "task": body.task,
+            "task_id": task_id,
+            "run_id": run_id,
+            "lease_token": lease_token,
+            "phase": phase,
+            "pid": pid,
+        }
+    )
     return {"ok": True}
 
 
