@@ -553,6 +553,8 @@ class LeaderAgent(BaseAgent):
             cwd=run_dir,
             task_id=task_id,
             output_schema=LEADER_TRIAGE_SCHEMA,
+            expected_status=str(task.get("status") or "").strip().lower(),
+            expected_assignee=self.name,
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
@@ -731,6 +733,8 @@ class LeaderAgent(BaseAgent):
             cwd=run_dir,
             task_id=task_id,
             output_schema=LEADER_FORCE_DECOMPOSE_SCHEMA,
+            expected_status=str(task.get("status") or "").strip().lower(),
+            expected_assignee=self.name,
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):

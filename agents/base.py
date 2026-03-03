@@ -16,7 +16,11 @@ SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
 CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
 HEARTBEAT_SECS  = int(os.getenv("HEARTBEAT_SECS", "45"))
+STATUS_HEARTBEAT_SECS = int(os.getenv("STATUS_HEARTBEAT_SECS", "20"))
 AGENT_POST_TIMEOUT_SECS = float(os.getenv("AGENT_POST_TIMEOUT_SECS", "8"))
+TASK_LEASE_TTL_SECS = int(os.getenv("TASK_LEASE_TTL_SECS", "180"))
+TASK_LEASE_RENEW_INTERVAL_SECS = int(os.getenv("TASK_LEASE_RENEW_INTERVAL_SECS", "20"))
+TASK_LEASE_RENEW_WARN_AFTER_ERRORS = int(os.getenv("TASK_LEASE_RENEW_WARN_AFTER_ERRORS", "3"))
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -100,6 +104,9 @@ class BaseAgent:
         # trust_env=False: ignore system proxy (SOCKS etc.) for localhost calls
         self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30, trust_env=False)
         self._active_task_id: str | None = None
+        self._active_run_id: str | None = None
+        self._active_lease_token: str | None = None
+        self._active_lease_lost: bool = False
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
@@ -119,11 +126,59 @@ class BaseAgent:
                 "agent": self.name,
                 "agent_key": self.name,
                 "respect_assignment": respect_assignment,
+                "lease_ttl_secs": TASK_LEASE_TTL_SECS,
                 "project_id": project_id,
             },
         )
         r.raise_for_status()
         return r.json().get("task")
+
+    def _lease_guard_fields(self, task_id: str | None = None) -> dict:
+        if not self._active_run_id or not self._active_lease_token:
+            return {}
+        if task_id and self._active_task_id and task_id != self._active_task_id:
+            return {}
+        return {
+            "run_id": self._active_run_id,
+            "lease_token": self._active_lease_token,
+        }
+
+    def _transition_guard_fields(self, task_id: str | None = None) -> dict:
+        if not self._active_run_id or not self._active_lease_token:
+            return {}
+        if task_id and self._active_task_id and task_id != self._active_task_id:
+            return {}
+        return {
+            "expected_run_id": self._active_run_id,
+            "expected_lease_token": self._active_lease_token,
+        }
+
+    async def renew_task_lease(
+        self,
+        task_id: str,
+        run_id: str,
+        lease_token: str,
+        lease_ttl_secs: int = TASK_LEASE_TTL_SECS,
+    ) -> bool | None:
+        try:
+            r = await self.http.post(
+                f"/tasks/{task_id}/lease/renew",
+                json={
+                    "run_id": run_id,
+                    "lease_token": lease_token,
+                    "lease_ttl_secs": lease_ttl_secs,
+                },
+            )
+            if r.status_code in (404, 409):
+                return False
+            r.raise_for_status()
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code in (404, 409):
+                return False
+            return None
+        except Exception:
+            return None
 
     async def update_task(self, task_id: str, **fields) -> dict:
         r = await self.http.patch(f"/tasks/{task_id}", json=fields)
@@ -151,6 +206,7 @@ class BaseAgent:
                 "agent": log_agent or self.name,
                 "message": log_message,
             }
+        payload.update(self._transition_guard_fields(task_id))
         r = await self.http.post(f"/tasks/{task_id}/transition", json=payload)
         if r.status_code == 404:
             # Task may be deleted/cancelled while agent is still finishing up.
@@ -180,6 +236,15 @@ class BaseAgent:
         archived = int(task.get("archived") or 0)
         return status == "cancelled" or archived == 1
 
+    async def get_task_if_exists(self, task_id: str) -> dict | None:
+        try:
+            task = await self.get_task(task_id)
+            return task if task else None
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+
     async def stop_if_task_cancelled(self, task_id: str, stage: str = "") -> bool:
         if not await self.is_task_cancelled(task_id):
             return False
@@ -194,7 +259,7 @@ class BaseAgent:
         try:
             await self.http.post(
                 f"/tasks/{task_id}/logs",
-                json={"agent": self.name, "message": message},
+                json={"agent": self.name, "message": message, **self._lease_guard_fields(task_id)},
             )
         except Exception:
             pass
@@ -591,6 +656,7 @@ class BaseAgent:
                     "conclusion": conclusion,
                     "payload": payload_obj,
                     "artifact_path": artifact_path,
+                    **self._transition_guard_fields(task_id),
                 },
             )
         except Exception:
@@ -675,6 +741,8 @@ class BaseAgent:
         cwd: Path,
         task_id: str | None = None,
         output_schema: dict | None = None,
+        expected_status: str | None = None,
+        expected_assignee: str | None = None,
     ) -> tuple[int, str]:
         schema_path: Path | None = None
         last_message_path: Path | None = None
@@ -797,16 +865,54 @@ class BaseAgent:
         async def cancel_watcher():
             if not task_id:
                 return
+            expected_status_lc = str(expected_status or "").strip().lower()
+            expected_assignee_lc = str(expected_assignee or "").strip().lower()
             while proc.returncode is None:
                 await asyncio.sleep(1)
                 if proc.returncode is not None:
                     return
-                if await self.is_task_cancelled(task_id):
+                if self._active_task_id == task_id and self._active_lease_lost:
+                    msg = "🛑 检测到任务租约失效，终止当前 CLI 执行"
+                    lines.append(msg)
+                    self._post_output_bg(msg)
+                    await self._terminate_proc_tree(proc)
+                    return
+                try:
+                    task = await self.get_task_if_exists(task_id)
+                except Exception:
+                    # Ignore transient API errors; only stop on explicit task state changes.
+                    continue
+                if not task:
+                    msg = "🛑 检测到任务不存在，终止当前 CLI 执行"
+                    lines.append(msg)
+                    self._post_output_bg(msg)
+                    await self._terminate_proc_tree(proc)
+                    return
+                status = str(task.get("status") or "").strip().lower()
+                archived = int(task.get("archived") or 0)
+                if status == "cancelled" or archived == 1:
                     msg = "🛑 检测到任务已取消/归档，终止当前 CLI 执行"
                     lines.append(msg)
                     self._post_output_bg(msg)
                     await self._terminate_proc_tree(proc)
                     return
+                if expected_status_lc and status != expected_status_lc:
+                    msg = f"🛑 检测到任务状态变更为 {status}，终止当前 CLI 执行"
+                    lines.append(msg)
+                    self._post_output_bg(msg)
+                    await self._terminate_proc_tree(proc)
+                    return
+                if expected_assignee_lc:
+                    assignee = str(task.get("assignee") or "").strip().lower()
+                    if assignee != expected_assignee_lc:
+                        msg = (
+                            f"🛑 检测到任务 assignee 变更为 {assignee or '(空)'}，"
+                            "终止当前 CLI 执行"
+                        )
+                        lines.append(msg)
+                        self._post_output_bg(msg)
+                        await self._terminate_proc_tree(proc)
+                        return
 
         hb = asyncio.create_task(heartbeat())
         iar = asyncio.create_task(idle_auto_reply())
@@ -1026,12 +1132,49 @@ class BaseAgent:
                         self._post_output_bg(f"▶ 任务: {task['title']}")
                         async def busy_status_heartbeat():
                             while True:
-                                await asyncio.sleep(HEARTBEAT_SECS)
+                                await asyncio.sleep(STATUS_HEARTBEAT_SECS)
                                 await self.set_agent_status("busy", task["title"])
 
+                        async def lease_heartbeat():
+                            consecutive_errors = 0
+                            while True:
+                                await asyncio.sleep(TASK_LEASE_RENEW_INTERVAL_SECS)
+                                if self._active_task_id != task["id"]:
+                                    return
+                                if self._active_lease_lost:
+                                    return
+                                run_id = str(self._active_run_id or "").strip()
+                                lease_token = str(self._active_lease_token or "").strip()
+                                if not run_id or not lease_token:
+                                    return
+                                renewed = await self.renew_task_lease(
+                                    task_id=task["id"],
+                                    run_id=run_id,
+                                    lease_token=lease_token,
+                                    lease_ttl_secs=TASK_LEASE_TTL_SECS,
+                                )
+                                if renewed is True:
+                                    consecutive_errors = 0
+                                    continue
+                                if renewed is False:
+                                    self._active_lease_lost = True
+                                    self._post_output_bg(
+                                        "🛑 租约续期失败，任务可能已被回收/接管，停止当前执行"
+                                    )
+                                    return
+                                consecutive_errors += 1
+                                if consecutive_errors >= TASK_LEASE_RENEW_WARN_AFTER_ERRORS:
+                                    self._post_output_bg(
+                                        f"⚠ 租约续期连续失败 {consecutive_errors} 次（将继续重试）"
+                                    )
+
                         busy_hb = asyncio.create_task(busy_status_heartbeat())
+                        lease_hb = asyncio.create_task(lease_heartbeat())
                         try:
                             self._active_task_id = task["id"]
+                            self._active_run_id = str(task.get("claim_run_id") or "").strip() or None
+                            self._active_lease_token = str(task.get("lease_token") or "").strip() or None
+                            self._active_lease_lost = False
                             await self.process_task(task)
                         except Exception as e:
                             await self.add_log(task["id"], f"错误: {e}")
@@ -1046,10 +1189,15 @@ class BaseAgent:
                             self._post_output_bg(f"✗ 错误: {e}")
                             print(f"[{self.name}] Error: {e}")
                         finally:
-                            busy_hb.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await busy_hb
+                            for t in (busy_hb, lease_hb):
+                                t.cancel()
+                            for t in (busy_hb, lease_hb):
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await t
                             self._active_task_id = None
+                            self._active_run_id = None
+                            self._active_lease_token = None
+                            self._active_lease_lost = False
                         await self.set_agent_status("idle")
                         self._post_output_bg("─── 等待下一个任务 ───")
                 except Exception as e:
