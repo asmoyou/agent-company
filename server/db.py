@@ -181,6 +181,7 @@ def init_db():
         ("commit_hash", "TEXT"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("parent_task_id", "TEXT"),
+        ("subtask_order", "INTEGER NOT NULL DEFAULT 0"),
         ("assigned_agent", "TEXT"),
         ("dev_agent", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
@@ -223,6 +224,7 @@ def init_db():
     _seed_builtin_agents(conn)
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
+    _backfill_subtask_order(conn)
     conn.commit()
     conn.close()
 
@@ -427,6 +429,43 @@ def _recover_invalid_todo_assignments(conn):
             "UPDATE tasks SET assigned_agent=?, updated_at=? WHERE id=?",
             (fallback, now, row["id"]),
         )
+
+
+def _backfill_subtask_order(conn):
+    """
+    Ensure all subtasks under the same parent have deterministic 1..N order.
+    Existing explicit order is preferred; missing/legacy order falls back to created_at.
+    """
+    parents = conn.execute(
+        """
+        SELECT DISTINCT parent_task_id
+          FROM tasks
+         WHERE parent_task_id IS NOT NULL
+           AND TRIM(parent_task_id) != ''
+        """
+    ).fetchall()
+    for p in parents:
+        parent_id = str(p["parent_task_id"] or "").strip()
+        if not parent_id:
+            continue
+        rows = conn.execute(
+            """
+            SELECT id, subtask_order, created_at
+              FROM tasks
+             WHERE parent_task_id=?
+             ORDER BY
+               CASE WHEN COALESCE(subtask_order, 0) > 0 THEN 0 ELSE 1 END ASC,
+               COALESCE(subtask_order, 0) ASC,
+               created_at ASC,
+               id ASC
+            """,
+            (parent_id,),
+        ).fetchall()
+        for idx, row in enumerate(rows, 1):
+            current = int(row["subtask_order"] or 0)
+            if current == idx:
+                continue
+            conn.execute("UPDATE tasks SET subtask_order=? WHERE id=?", (idx, row["id"]))
 
 
 def _now():
@@ -646,17 +685,21 @@ def create_task(title: str, description: str, project_id: str | None = None,
                 parent_task_id: str | None = None,
                 assigned_agent: str | None = None,
                 dev_agent: str | None = None,
-                status: str = "triage") -> dict:
+                status: str = "triage",
+                subtask_order: int | None = None) -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
     now = _now()
+    normalized_subtask_order = int(subtask_order or 0)
+    if normalized_subtask_order < 0:
+        normalized_subtask_order = 0
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, description, status,
-            parent_task_id, assigned_agent, dev_agent, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            parent_task_id, subtask_order, assigned_agent, dev_agent, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (tid, project_id, title, description, status,
-         parent_task_id, assigned_agent, dev_agent, now, now),
+         parent_task_id, normalized_subtask_order, assigned_agent, dev_agent, now, now),
     )
     conn.commit()
     row = conn.execute(
@@ -669,7 +712,17 @@ def create_task(title: str, description: str, project_id: str | None = None,
 def list_subtasks(parent_task_id: str) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        _join_project("SELECT * FROM tasks WHERE parent_task_id=? ORDER BY created_at ASC"),
+        """
+        SELECT t.*, p.path as project_path, p.name as project_name
+          FROM tasks t
+          LEFT JOIN projects p ON t.project_id = p.id
+         WHERE t.parent_task_id=?
+         ORDER BY
+           CASE WHEN COALESCE(t.subtask_order, 0) > 0 THEN 0 ELSE 1 END ASC,
+           COALESCE(t.subtask_order, 0) ASC,
+           t.created_at ASC,
+           t.id ASC
+        """,
         (parent_task_id,),
     ).fetchall()
     conn.close()
@@ -910,19 +963,53 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        where = ["status=?", "archived=0"]
+        where = ["t.status=?", "t.archived=0"]
         params: list[str] = [status]
 
         if project_id:
-            where.append("project_id=?")
+            where.append("t.project_id=?")
             params.append(project_id)
 
         if respect_assignment:
-            where.append("(assigned_agent IS NULL OR assigned_agent=?)")
+            where.append("(t.assigned_agent IS NULL OR t.assigned_agent=?)")
             params.append(agent_key)
 
+        if status == "todo":
+            where.append(
+                f"""
+                (
+                    t.parent_task_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                          FROM tasks prev
+                         WHERE prev.parent_task_id = t.parent_task_id
+                           AND prev.id != t.id
+                           AND COALESCE(prev.archived, 0) = 0
+                           AND prev.status NOT IN ('completed', '{CANCELLED_STATUS}')
+                           AND (
+                                 (
+                                   COALESCE(t.subtask_order, 0) > 0
+                                   AND (
+                                       (COALESCE(prev.subtask_order, 0) > 0 AND prev.subtask_order < t.subtask_order)
+                                       OR COALESCE(prev.subtask_order, 0) <= 0
+                                   )
+                                 )
+                                 OR
+                                 (
+                                   COALESCE(t.subtask_order, 0) <= 0
+                                   AND (
+                                       prev.created_at < t.created_at
+                                       OR (prev.created_at = t.created_at AND prev.id < t.id)
+                                   )
+                                 )
+                           )
+                    )
+                )
+                """
+            )
+
         row = conn.execute(
-            f"SELECT id FROM tasks WHERE {' AND '.join(where)} ORDER BY updated_at ASC LIMIT 1",
+            f"SELECT t.id FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.updated_at ASC LIMIT 1",
             tuple(params),
         ).fetchone()
         if not row:

@@ -429,6 +429,7 @@ class LeaderAgent(BaseAgent):
                     "description": desc,
                     "project_id": task.get("project_id"),
                     "parent_task_id": task["id"],
+                    "subtask_order": i,
                     "assigned_agent": agent,
                     "status": "todo",   # subtasks skip triage
                 })

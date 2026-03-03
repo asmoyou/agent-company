@@ -102,6 +102,8 @@ triage -> todo -> in_progress -> in_review -> approved -> pending_acceptance -> 
 decompose -> decomposed -> (subtasks in todo...)
 ```
 
+分解子任务默认按 `subtask_order` 串行推进：前序子任务未 `completed/cancelled` 前，后续子任务不会被认领执行，避免并发导致依赖文件缺失。
+
 状态流转由后端判定并执行，前端仅发送动作意图并展示结果：
 
 - 用户动作接口：`POST /tasks/{task_id}/actions`
