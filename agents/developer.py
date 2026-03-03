@@ -77,6 +77,11 @@ class DeveloperAgent(BaseAgent):
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
+        head_before = ""
+        try:
+            head_before = (await self.git("rev-parse", "HEAD", cwd=worktree_dev)).strip()
+        except Exception:
+            head_before = ""
 
         # ── Run CLI ───────────────────────────────────────────────────────────
         returncode, output = await self.run_cli(
@@ -124,27 +129,83 @@ class DeveloperAgent(BaseAgent):
         # ── Stage & check diff ────────────────────────────────────────────────
         await self.git("add", "-A", cwd=worktree_dev)
         diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
+        head_after = ""
+        try:
+            head_after = (await self.git("rev-parse", "HEAD", cwd=worktree_dev)).strip()
+        except Exception:
+            head_after = ""
+        cli_created_commit = bool(
+            head_before and head_after and head_before != head_after
+        )
 
-        # Fallback: save stdout as .md if nothing was written to disk
         if not diff.strip() and output.strip() and len(output) > 50:
-            safe = "".join(
-                c if c.isalnum() or c in "-_ " else "_"
-                for c in task["title"][:40]
-            ).strip().replace(" ", "_")
-            fallback = worktree_dev / f"{safe or 'deliverable'}.md"
-            fallback.write_text(f"# {task['title']}\n\n{output}\n", encoding="utf-8")
-            await self.add_log(task_id, f"CLI 未创建文件，输出已保存为 {fallback.name}")
-            await self.git("add", "-A", cwd=worktree_dev)
-            diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
+            await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
         if not diff.strip():
-            related_commits = await self.collect_task_related_commits(
-                task,
-                worktree_dev,
-                max_count=6,
-            )
-            history_commit = str(related_commits[0]["hash"]).strip() if related_commits else ""
-            history_short = str(related_commits[0].get("short") or "").strip() if related_commits else ""
+            related_commits: list[dict] = []
+            history_commit = ""
+            history_short = ""
+            if cli_created_commit and head_after:
+                history_commit = head_after
+                history_short = head_after[:7]
+                related_commits = [
+                    {
+                        "hash": history_commit,
+                        "short": history_short,
+                        "subject": "cli_generated_commit",
+                        "created_at": "",
+                        "score": 999,
+                    }
+                ]
+                await self.add_log(
+                    task_id,
+                    f"检测到 CLI 已直接创建提交：{history_short}，将以该提交交接审查",
+                )
+            else:
+                if str(prev_status or "").strip().lower() == "needs_changes":
+                    await self.add_log(
+                        task_id,
+                        "返工轮次未检测到新提交或文件改动，保持 needs_changes，不推进审查。",
+                    )
+                    await self.transition_task(
+                        task_id,
+                        fields={
+                            "status": "needs_changes",
+                            "assignee": None,
+                            "assigned_agent": self.name,
+                            "dev_agent": self.name,
+                        },
+                        handoff={
+                            "stage": "dev_no_progress",
+                            "to_agent": self.name,
+                            "status_from": "needs_changes",
+                            "status_to": "needs_changes",
+                            "title": "开发未产生新变更",
+                            "summary": "未检测到新提交或文件改动，保留在 needs_changes",
+                            "conclusion": "返工未完成，等待下一轮开发",
+                            "payload": {"no_progress": True, "source_branch": branch},
+                            "artifact_path": str(worktree_dev),
+                        },
+                        log_message="返工未产生新变更，保持 needs_changes",
+                    )
+                    return
+                related_commits = await self.collect_task_related_commits(
+                    task,
+                    worktree_dev,
+                    max_count=6,
+                )
+                rejected_commit = str(task.get("commit_hash") or "").strip()
+                if str(prev_status or "").strip().lower() == "needs_changes" and rejected_commit:
+                    filtered_commits = [
+                        item
+                        for item in related_commits
+                        if str(item.get("hash") or "").strip() != rejected_commit
+                    ]
+                    if len(filtered_commits) != len(related_commits):
+                        await self.add_log(task_id, f"已排除上轮被退回提交：{rejected_commit[:7]}")
+                    related_commits = filtered_commits
+                history_commit = str(related_commits[0]["hash"]).strip() if related_commits else ""
+                history_short = str(related_commits[0].get("short") or "").strip() if related_commits else ""
             if history_commit:
                 await self.add_log(
                     task_id,
