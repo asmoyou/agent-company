@@ -86,6 +86,96 @@ class SubtaskOrderingTest(unittest.TestCase):
         self.assertIsNotNone(claimed_3)
         self.assertEqual(claimed_3["id"], st2["id"])
 
+    def test_claim_allows_next_subtask_after_review_passed(self):
+        parent = self._create_parent()
+        st1 = db.create_task(
+            title="step-1",
+            description="first step",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            status="todo",
+            subtask_order=1,
+        )
+        st2 = db.create_task(
+            title="step-2",
+            description="second step",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            status="todo",
+            subtask_order=2,
+        )
+
+        first = db.claim_task(
+            status="todo",
+            working_status="in_progress",
+            agent="developer",
+            agent_key="developer",
+            respect_assignment=True,
+            project_id=self.project["id"],
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(first["id"], st1["id"])
+
+        db.update_task(st1["id"], status="pending_acceptance", assignee=None)
+
+        second = db.claim_task(
+            status="todo",
+            working_status="in_progress",
+            agent="developer",
+            agent_key="developer",
+            respect_assignment=True,
+            project_id=self.project["id"],
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second["id"], st2["id"])
+
+    def test_claim_allows_next_subtask_after_approved(self):
+        parent = self._create_parent()
+        st1 = db.create_task(
+            title="step-1",
+            description="first step",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            status="todo",
+            subtask_order=1,
+        )
+        st2 = db.create_task(
+            title="step-2",
+            description="second step",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            status="todo",
+            subtask_order=2,
+        )
+
+        first = db.claim_task(
+            status="todo",
+            working_status="in_progress",
+            agent="developer",
+            agent_key="developer",
+            respect_assignment=True,
+            project_id=self.project["id"],
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(first["id"], st1["id"])
+
+        db.update_task(st1["id"], status="approved", assignee=None)
+
+        second = db.claim_task(
+            status="todo",
+            working_status="in_progress",
+            agent="developer",
+            agent_key="developer",
+            respect_assignment=True,
+            project_id=self.project["id"],
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second["id"], st2["id"])
+
     def test_list_subtasks_returns_declared_order(self):
         parent = self._create_parent()
         db.create_task(
