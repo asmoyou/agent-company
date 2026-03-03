@@ -79,7 +79,13 @@ class DeveloperAgent(BaseAgent):
             prompt += f"\n\n{handoff_context}\n"
 
         # ── Run CLI ───────────────────────────────────────────────────────────
-        returncode, output = await self.run_cli(prompt, cwd=worktree_dev, task_id=task_id)
+        returncode, output = await self.run_cli(
+            prompt,
+            cwd=worktree_dev,
+            task_id=task_id,
+            expected_status=str(task.get("status") or "").strip().lower(),
+            expected_assignee=self.name,
+        )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "CLI 失败后"):
                 return

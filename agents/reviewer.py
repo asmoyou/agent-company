@@ -325,6 +325,8 @@ class ReviewerAgent(BaseAgent):
             cwd=worktree_dev,
             task_id=task_id,
             output_schema=REVIEW_DECISION_SCHEMA,
+            expected_status=str(task.get("status") or "").strip().lower(),
+            expected_assignee=self.name,
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "审查 CLI 失败后"):

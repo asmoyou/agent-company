@@ -16,6 +16,10 @@ ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 SESSION_TTL_DAYS = 30
 
+
+class LeaseConflictError(RuntimeError):
+    """Raised when task lease fence validation fails."""
+
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
     "## 任务信息\n\n"
@@ -139,6 +143,9 @@ def init_db():
             description     TEXT NOT NULL DEFAULT '',
             status          TEXT NOT NULL DEFAULT 'todo',
             assignee        TEXT,
+            claim_run_id    TEXT,
+            lease_token     TEXT,
+            lease_expires_at TEXT,
             review_feedback TEXT,
             review_feedback_history TEXT NOT NULL DEFAULT '[]',
             commit_hash     TEXT,
@@ -215,6 +222,9 @@ def init_db():
         ("description", "TEXT NOT NULL DEFAULT ''"),
         ("status", "TEXT NOT NULL DEFAULT 'todo'"),
         ("assignee", "TEXT"),
+        ("claim_run_id", "TEXT"),
+        ("lease_token", "TEXT"),
+        ("lease_expires_at", "TEXT"),
         ("review_feedback", "TEXT"),
         ("review_feedback_history", "TEXT NOT NULL DEFAULT '[]'"),
         ("commit_hash", "TEXT"),
@@ -452,6 +462,80 @@ def _parse_poll_statuses(raw) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(x) for x in data]
+
+
+def _working_statuses(conn) -> set[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT working_status FROM agent_types WHERE TRIM(COALESCE(working_status, '')) != ''"
+    ).fetchall()
+    out: set[str] = set()
+    for row in rows:
+        ws = str(row["working_status"] or "").strip()
+        if ws:
+            out.add(ws)
+    return out
+
+
+def _lease_deadline_iso(ttl_seconds: int) -> str:
+    ttl = max(30, int(ttl_seconds))
+    return (datetime.utcnow() + timedelta(seconds=ttl)).isoformat()
+
+
+def _assert_task_fence_in_conn(
+    conn,
+    task_id: str,
+    expected_run_id: str | None = None,
+    expected_lease_token: str | None = None,
+    strict_if_active: bool = False,
+) -> dict | None:
+    row = conn.execute(
+        "SELECT id, assignee, claim_run_id, lease_token FROM tasks WHERE id=?",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    task = dict(row)
+    assignee = str(task.get("assignee") or "").strip()
+    active_token = str(task.get("lease_token") or "").strip()
+    if not assignee or not active_token:
+        return task
+
+    run_id = str(expected_run_id or "").strip()
+    token = str(expected_lease_token or "").strip()
+    if not run_id or not token:
+        if strict_if_active:
+            raise LeaseConflictError("任务存在活动租约，缺少 run_id/lease_token")
+        return task
+
+    current_run_id = str(task.get("claim_run_id") or "").strip()
+    if run_id != current_run_id or token != active_token:
+        raise LeaseConflictError("租约已失效或被其他运行接管")
+    return task
+
+
+def validate_task_lease(
+    task_id: str,
+    expected_run_id: str | None = None,
+    expected_lease_token: str | None = None,
+    strict_if_active: bool = False,
+) -> tuple[bool, str]:
+    conn = get_conn()
+    try:
+        row = _assert_task_fence_in_conn(
+            conn,
+            task_id=task_id,
+            expected_run_id=expected_run_id,
+            expected_lease_token=expected_lease_token,
+            strict_if_active=strict_if_active,
+        )
+        if not row:
+            return False, "task_not_found"
+        return True, "ok"
+    except LeaseConflictError as e:
+        return False, str(e)
+    finally:
+        conn.close()
 
 
 def _todo_pollers(conn) -> set[str]:
@@ -858,7 +942,15 @@ def reset_stuck_tasks():
         poll = json.loads(row["poll_statuses"] or "[]")
         reset_to = poll[0] if poll else "todo"
         conn.execute(
-            "UPDATE tasks SET status=?, assignee=NULL WHERE status=? AND archived=0",
+            """
+            UPDATE tasks
+               SET status=?,
+                   assignee=NULL,
+                   claim_run_id=NULL,
+                   lease_token=NULL,
+                   lease_expires_at=NULL
+             WHERE status=? AND archived=0
+            """,
             (reset_to, working),
         )
     conn.commit()
@@ -1192,7 +1284,20 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     fields.pop("create_handoff", None)
 
     current = conn.execute(
-        "SELECT status, assigned_agent, dev_agent, review_feedback, review_feedback_history FROM tasks WHERE id=?",
+        """
+        SELECT
+            status,
+            assignee,
+            assigned_agent,
+            dev_agent,
+            claim_run_id,
+            lease_token,
+            lease_expires_at,
+            review_feedback,
+            review_feedback_history
+        FROM tasks
+        WHERE id=?
+        """,
         (task_id,),
     ).fetchone()
     if not current:
@@ -1255,6 +1360,19 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
         if effective_assigned and effective_assigned not in todo_pollers:
             fallback_dev = str(fields.get("dev_agent") or current["dev_agent"] or "").strip()
             fields["assigned_agent"] = fallback_dev if fallback_dev in todo_pollers else None
+
+    working_statuses = _working_statuses(conn)
+    if "status" in fields and target_status not in working_statuses:
+        fields["claim_run_id"] = None
+        fields["lease_token"] = None
+        fields["lease_expires_at"] = None
+    if "assignee" in fields:
+        next_assignee = str(fields.get("assignee") or "").strip()
+        current_assignee = str(current["assignee"] or "").strip()
+        if not next_assignee or next_assignee != current_assignee:
+            fields["claim_run_id"] = None
+            fields["lease_token"] = None
+            fields["lease_expires_at"] = None
 
     fields["updated_at"] = now
     set_clause = ", ".join(f"{k}=?" for k in fields)
@@ -1367,6 +1485,9 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
                SET status=?,
                    archived=1,
                    assignee=NULL,
+                   claim_run_id=NULL,
+                   lease_token=NULL,
+                   lease_expires_at=NULL,
                    updated_at=?
              WHERE id IN ({placeholders})
             """,
@@ -1397,6 +1518,7 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
 
 def claim_task(status: str, working_status: str, agent: str, agent_key: str,
                respect_assignment: bool = True,
+               lease_ttl_secs: int = 180,
                project_id: str | None = None) -> dict | None:
     """
     Atomically claim the next task in `status` and move it to `working_status`.
@@ -1460,9 +1582,30 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
             return None
 
         now = _now()
+        run_id = str(uuid.uuid4())
+        lease_token = str(uuid.uuid4())
+        lease_expires_at = _lease_deadline_iso(lease_ttl_secs)
         cur = conn.execute(
-            "UPDATE tasks SET status=?, assignee=?, updated_at=? WHERE id=? AND status=? AND archived=0",
-            (working_status, agent, now, row["id"], status),
+            """
+            UPDATE tasks
+               SET status=?,
+                   assignee=?,
+                   claim_run_id=?,
+                   lease_token=?,
+                   lease_expires_at=?,
+                   updated_at=?
+             WHERE id=? AND status=? AND archived=0
+            """,
+            (
+                working_status,
+                agent,
+                run_id,
+                lease_token,
+                lease_expires_at,
+                now,
+                row["id"],
+                status,
+            ),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -1508,7 +1651,16 @@ def recover_stale_tasks_for_agent(agent_key: str) -> list[dict]:
             ).fetchall()
             for t in task_rows:
                 conn.execute(
-                    "UPDATE tasks SET status=?, assignee=NULL, updated_at=? WHERE id=?",
+                    """
+                    UPDATE tasks
+                       SET status=?,
+                           assignee=NULL,
+                           claim_run_id=NULL,
+                           lease_token=NULL,
+                           lease_expires_at=NULL,
+                           updated_at=?
+                     WHERE id=?
+                    """,
                     (reset_to, now, t["id"]),
                 )
                 updated = conn.execute(
@@ -1522,6 +1674,143 @@ def recover_stale_tasks_for_agent(agent_key: str) -> list[dict]:
                             "to_status": reset_to,
                         }
                     )
+        if changed:
+            conn.commit()
+        else:
+            conn.rollback()
+    finally:
+        conn.close()
+    return changed
+
+
+def renew_task_lease(
+    task_id: str,
+    run_id: str,
+    lease_token: str,
+    lease_ttl_secs: int = 180,
+) -> dict | None:
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _assert_task_fence_in_conn(
+            conn,
+            task_id=task_id,
+            expected_run_id=run_id,
+            expected_lease_token=lease_token,
+            strict_if_active=True,
+        )
+        now = _now()
+        lease_expires_at = _lease_deadline_iso(lease_ttl_secs)
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET lease_expires_at=?,
+                   updated_at=?
+             WHERE id=?
+               AND claim_run_id=?
+               AND lease_token=?
+               AND assignee IS NOT NULL
+               AND archived=0
+            """,
+            (lease_expires_at, now, task_id, run_id, lease_token),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"),
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def recover_expired_task_leases(grace_secs: int = 0) -> list[dict]:
+    """
+    Recover tasks whose lease has expired.
+    Returns changed rows as:
+      {"task": <task_row>, "from_status": "...", "to_status": "...",
+       "agent_key": "...", "expired_secs": <int>}
+    """
+    conn = get_conn()
+    changed: list[dict] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        now_dt = datetime.utcnow()
+        now = now_dt.isoformat()
+        cutoff = (now_dt - timedelta(seconds=max(0, int(grace_secs)))).isoformat()
+        rows = conn.execute(
+            """
+            SELECT id, status, assignee, lease_expires_at
+              FROM tasks
+             WHERE archived=0
+               AND assignee IS NOT NULL
+               AND TRIM(COALESCE(lease_token, '')) != ''
+               AND TRIM(COALESCE(lease_expires_at, '')) != ''
+               AND lease_expires_at <= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            task_id = str(row["id"] or "").strip()
+            if not task_id:
+                continue
+            from_status = str(row["status"] or "").strip()
+            agent_key = str(row["assignee"] or "").strip().lower()
+            cfg = conn.execute(
+                "SELECT poll_statuses, working_status FROM agent_types WHERE key=?",
+                (agent_key,),
+            ).fetchone()
+            if cfg:
+                working = str(cfg["working_status"] or "").strip()
+                poll = _parse_poll_statuses(cfg["poll_statuses"])
+                reset_to = poll[0] if poll else "todo"
+            else:
+                working = ""
+                reset_to = "todo"
+            to_status = reset_to if (working and from_status == working) else from_status
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET status=?,
+                       assignee=NULL,
+                       claim_run_id=NULL,
+                       lease_token=NULL,
+                       lease_expires_at=NULL,
+                       updated_at=?
+                 WHERE id=?
+                   AND archived=0
+                """,
+                (to_status, now, task_id),
+            )
+            updated = conn.execute(
+                _join_project("SELECT * FROM tasks WHERE id=?"),
+                (task_id,),
+            ).fetchone()
+            if not updated:
+                continue
+            expired_secs = 0
+            lease_expires_at = str(row["lease_expires_at"] or "").strip()
+            if lease_expires_at:
+                try:
+                    exp_dt = datetime.fromisoformat(lease_expires_at.rstrip("Z"))
+                    expired_secs = max(0, int((now_dt - exp_dt).total_seconds()))
+                except Exception:
+                    expired_secs = 0
+            changed.append(
+                {
+                    "task": dict(updated),
+                    "from_status": from_status,
+                    "to_status": to_status,
+                    "agent_key": agent_key,
+                    "expired_secs": expired_secs,
+                }
+            )
         if changed:
             conn.commit()
         else:
@@ -1655,6 +1944,8 @@ def transition_task(
     fields: dict | None = None,
     handoff: dict | None = None,
     log: dict | None = None,
+    expected_run_id: str | None = None,
+    expected_lease_token: str | None = None,
 ) -> dict | None:
     """
     Atomically apply task update + optional handoff + optional log in one tx.
@@ -1663,6 +1954,16 @@ def transition_task(
     conn = get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        guard_row = _assert_task_fence_in_conn(
+            conn,
+            task_id=task_id,
+            expected_run_id=expected_run_id,
+            expected_lease_token=expected_lease_token,
+            strict_if_active=True,
+        )
+        if not guard_row:
+            conn.rollback()
+            return None
         update_fields = dict(fields or {})
         task = _update_task_in_conn(conn, task_id, **update_fields)
         if not task:

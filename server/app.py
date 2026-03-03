@@ -36,6 +36,10 @@ import db
 PROJECT_ROOT = Path(__file__).parent.parent
 AGENT_STALE_SECS = int(os.getenv("AGENT_STALE_SECS", "150"))
 AGENT_WATCHDOG_SECS = int(os.getenv("AGENT_WATCHDOG_SECS", "15"))
+TASK_LEASE_TTL_SECS = int(os.getenv("TASK_LEASE_TTL_SECS", "180"))
+TASK_LEASE_RENEW_MIN_SECS = int(os.getenv("TASK_LEASE_RENEW_MIN_SECS", "30"))
+TASK_LEASE_RENEW_MAX_SECS = int(os.getenv("TASK_LEASE_RENEW_MAX_SECS", "1800"))
+TASK_LEASE_RECOVERY_GRACE_SECS = int(os.getenv("TASK_LEASE_RECOVERY_GRACE_SECS", "0"))
 
 
 def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
@@ -179,17 +183,37 @@ async def _recover_stale_agent(agent_name: str, stale_secs: int):
 async def _agent_health_watchdog():
     while True:
         await asyncio.sleep(AGENT_WATCHDOG_SECS)
-        now = datetime.utcnow()
-        for agent_name, status in list(AGENT_STATUS.items()):
-            if str(status.get("status") or "").strip().lower() != "busy":
-                continue
-            last_seen = _agent_last_seen(status)
-            if not last_seen:
-                continue
-            stale_secs = int((now - last_seen).total_seconds())
-            if stale_secs < AGENT_STALE_SECS:
-                continue
-            await _recover_stale_agent(agent_name, stale_secs)
+        recovered = db.recover_expired_task_leases(grace_secs=TASK_LEASE_RECOVERY_GRACE_SECS)
+        if not recovered:
+            continue
+        touched_agents: set[str] = set()
+        for item in recovered:
+            task = item["task"]
+            await manager.broadcast({"event": "task_updated", "task": task})
+            agent_name = str(item.get("agent_key") or "").strip().lower()
+            if agent_name:
+                touched_agents.add(agent_name)
+            expired_secs = int(item.get("expired_secs") or 0)
+            log = db.add_log(
+                task["id"],
+                "system",
+                (
+                    f"⚠ 检测到任务租约已过期（{expired_secs}s），"
+                    f"任务自动从 {item['from_status']} 回退到 {item['to_status']}。"
+                ),
+            )
+            await broadcast_log(log)
+        for agent_name in touched_agents:
+            state = _ensure_agent_state(agent_name)
+            AGENT_STATUS[agent_name] = {
+                "status": "idle",
+                "task": "",
+                "updated_at": _utcnow_iso(),
+                "last_output_at": state.get("last_output_at", ""),
+            }
+            await manager.broadcast(
+                {"event": "agent_status", "agent": agent_name, "status": "idle", "task": ""}
+            )
 
 
 # Pre-populate built-ins so they appear on init
@@ -384,6 +408,8 @@ class TaskUpdate(BaseModel):
 class LogCreate(BaseModel):
     agent: str
     message: str
+    run_id: str | None = None
+    lease_token: str | None = None
 
 class HandoffCreate(BaseModel):
     stage: str
@@ -397,6 +423,8 @@ class HandoffCreate(BaseModel):
     conclusion: str | None = None
     payload: dict = Field(default_factory=dict)
     artifact_path: str | None = None
+    expected_run_id: str | None = None
+    expected_lease_token: str | None = None
 
 class AgentAlertCreate(BaseModel):
     agent: str
@@ -447,7 +475,14 @@ class TaskClaim(BaseModel):
     agent: str
     agent_key: str
     respect_assignment: bool = True
+    lease_ttl_secs: int | None = None
     project_id: str | None = None
+
+
+class TaskLeaseRenewRequest(BaseModel):
+    run_id: str
+    lease_token: str
+    lease_ttl_secs: int | None = None
 
 class CancelTaskRequest(BaseModel):
     reason: str | None = None
@@ -458,6 +493,8 @@ class TaskTransitionRequest(BaseModel):
     fields: TaskUpdate | None = None
     handoff: HandoffCreate | None = None
     log: LogCreate | None = None
+    expected_run_id: str | None = None
+    expected_lease_token: str | None = None
 
 
 class TaskActionRequest(BaseModel):
@@ -569,16 +606,23 @@ async def _apply_transition_and_broadcast(
     fields: dict,
     handoff_row: dict | None = None,
     log_row: dict | None = None,
+    expected_run_id: str | None = None,
+    expected_lease_token: str | None = None,
 ) -> dict:
     normalized_fields = _normalize_transition_fields(before, fields)
     _validate_status_transition(before, normalized_fields)
 
-    result = db.transition_task(
-        task_id,
-        fields=normalized_fields,
-        handoff=handoff_row,
-        log=log_row,
-    )
+    try:
+        result = db.transition_task(
+            task_id,
+            fields=normalized_fields,
+            handoff=handoff_row,
+            log=log_row,
+            expected_run_id=expected_run_id,
+            expected_lease_token=expected_lease_token,
+        )
+    except db.LeaseConflictError as e:
+        raise HTTPException(409, str(e))
     if not result:
         raise HTTPException(404, "Task not found")
 
@@ -888,6 +932,8 @@ async def tasks_by_status(status: str, project_id: str | None = None):
 async def claim_task(body: TaskClaim):
     effective_status = str(body.status or "").strip()
     effective_working_status = str(body.working_status or "").strip()
+    lease_ttl_secs = int(body.lease_ttl_secs or TASK_LEASE_TTL_SECS)
+    lease_ttl_secs = max(TASK_LEASE_RENEW_MIN_SECS, min(TASK_LEASE_RENEW_MAX_SECS, lease_ttl_secs))
     at = db.get_agent_type(body.agent_key)
     if at:
         poll_statuses = _parse_poll_statuses(at.get("poll_statuses"))
@@ -908,6 +954,7 @@ async def claim_task(body: TaskClaim):
             agent=body.agent,
             agent_key=body.agent_key,
             respect_assignment=body.respect_assignment,
+            lease_ttl_secs=lease_ttl_secs,
             project_id=body.project_id,
         )
         if not task:
@@ -932,6 +979,28 @@ async def claim_task(body: TaskClaim):
             await broadcast_log(log)
 
     return {"task": None}
+
+
+@app.post("/tasks/{task_id}/lease/renew")
+async def renew_task_lease(task_id: str, body: TaskLeaseRenewRequest):
+    lease_ttl_secs = int(body.lease_ttl_secs or TASK_LEASE_TTL_SECS)
+    lease_ttl_secs = max(TASK_LEASE_RENEW_MIN_SECS, min(TASK_LEASE_RENEW_MAX_SECS, lease_ttl_secs))
+    try:
+        task = db.renew_task_lease(
+            task_id=task_id,
+            run_id=body.run_id,
+            lease_token=body.lease_token,
+            lease_ttl_secs=lease_ttl_secs,
+        )
+    except db.LeaseConflictError as e:
+        raise HTTPException(409, str(e))
+    if not task:
+        raise HTTPException(409, "租约续期失败，任务可能已被回收或重新认领")
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "lease_expires_at": task.get("lease_expires_at"),
+    }
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):
@@ -983,6 +1052,8 @@ async def transition_task(task_id: str, body: TaskTransitionRequest):
         fields=normalized_fields,
         handoff_row=handoff_row,
         log_row=log_row,
+        expected_run_id=body.expected_run_id,
+        expected_lease_token=body.expected_lease_token,
     )
 
 
@@ -1174,7 +1245,22 @@ async def get_logs(task_id: str, user: dict = Depends(require_user)):
 
 @app.post("/tasks/{task_id}/logs", status_code=201)
 async def add_log(task_id: str, body: LogCreate):
+    agent_name = str(body.agent or "").strip().lower()
+    strict_fence = agent_name not in {"system", "user"}
+    ok, reason = db.validate_task_lease(
+        task_id=task_id,
+        expected_run_id=body.run_id,
+        expected_lease_token=body.lease_token,
+        strict_if_active=strict_fence,
+    )
+    if not ok:
+        if reason == "task_not_found":
+            raise HTTPException(404, "Task not found")
+        raise HTTPException(409, reason)
     log = db.add_log(task_id, body.agent, body.message)
+    if agent_name and agent_name != "system":
+        state = _ensure_agent_state(agent_name)
+        state["last_output_at"] = _utcnow_iso()
     await broadcast_log(log)
     return log
 
@@ -1234,6 +1320,16 @@ async def add_handoff(task_id: str, body: HandoffCreate):
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    ok, reason = db.validate_task_lease(
+        task_id=task_id,
+        expected_run_id=body.expected_run_id,
+        expected_lease_token=body.expected_lease_token,
+        strict_if_active=True,
+    )
+    if not ok:
+        if reason == "task_not_found":
+            raise HTTPException(404, "Task not found")
+        raise HTTPException(409, reason)
     payload, commit_hash, conclusion = _prepare_handoff(task, body)
     stage = str(body.stage or "").strip()
     from_agent = str(body.from_agent or "").strip()

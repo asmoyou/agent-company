@@ -192,22 +192,27 @@ async def main():
 
     handles: dict[str, AgentHandle] = {}
     bootstrapped = False
+    last_desired: dict[str, dict | None] = {k: None for k in BUILTIN_KEYS}
 
     while not shutdown.is_set():
         ok, agent_types = await load_agent_types()
         if ok:
-            await reconcile_agents(handles, desired_agent_map(agent_types), shutdown)
+            last_desired = desired_agent_map(agent_types)
+            await reconcile_agents(handles, last_desired, shutdown)
             if not bootstrapped:
                 print(f"[run_all] Started {len(handles)} agent(s).")
                 bootstrapped = True
         elif not bootstrapped:
             # If API is temporarily unavailable at boot, still run built-ins with defaults.
             fallback = {k: None for k in BUILTIN_KEYS}
+            last_desired = fallback
             await reconcile_agents(handles, fallback, shutdown)
             print(f"[run_all] API unavailable on boot; started built-ins with defaults.")
             bootstrapped = True
         else:
-            print("[run_all] Skip reload this round due to API error.")
+            # Keep last-known topology so dead agents can still be restarted.
+            await reconcile_agents(handles, last_desired, shutdown)
+            print("[run_all] API error; kept last-known agent config and reconciled liveness.")
 
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=RELOAD_INTERVAL_SECS)

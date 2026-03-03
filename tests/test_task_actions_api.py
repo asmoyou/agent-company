@@ -77,6 +77,73 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(claimed["id"], task["id"])
         self.assertEqual(claimed["status"], "in_progress")
 
+    def test_claim_returns_lease_and_renew_extends_it(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+                "lease_ttl_secs": 180,
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        claimed = res.json()["task"]
+        self.assertTrue(str(claimed.get("claim_run_id") or "").strip())
+        self.assertTrue(str(claimed.get("lease_token") or "").strip())
+        self.assertTrue(str(claimed.get("lease_expires_at") or "").strip())
+
+        renew = self.client.post(
+            f"/tasks/{task['id']}/lease/renew",
+            json={
+                "run_id": claimed["claim_run_id"],
+                "lease_token": claimed["lease_token"],
+                "lease_ttl_secs": 300,
+            },
+        )
+        self.assertEqual(renew.status_code, 200)
+        renewed_at = str(renew.json().get("lease_expires_at") or "").strip()
+        self.assertTrue(renewed_at)
+        self.assertGreaterEqual(renewed_at, str(claimed["lease_expires_at"]))
+
+    def test_transition_rejects_stale_lease_fence(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claimed = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+        ).json()["task"]
+        bad = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {"status": "todo", "assignee": None},
+                "expected_run_id": "stale-run-id",
+                "expected_lease_token": "stale-lease-token",
+            },
+        )
+        self.assertEqual(bad.status_code, 409)
+
+        good = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {"status": "todo", "assignee": None},
+                "expected_run_id": claimed["claim_run_id"],
+                "expected_lease_token": claimed["lease_token"],
+            },
+        )
+        self.assertEqual(good.status_code, 200)
+        self.assertEqual(good.json()["task"]["status"], "todo")
+
     def test_claim_rejects_status_outside_agent_poll_range(self):
         self._create_task(status="approved")
         res = self.client.post(
@@ -175,6 +242,21 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["branch"], "agent/asmo-dev")
+
+    def test_task_log_refreshes_agent_last_output_timestamp(self):
+        task = self._create_task(status="in_progress")
+        app_module.AGENT_STATUS["developer"] = {
+            "status": "busy",
+            "task": task["title"],
+            "updated_at": "",
+            "last_output_at": "",
+        }
+        res = self.client.post(
+            f"/tasks/{task['id']}/logs",
+            json={"agent": "developer", "message": "⏳ 仍在工作中... 已运行 45s"},
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertTrue(app_module.AGENT_STATUS["developer"]["last_output_at"])
 
 
 if __name__ == "__main__":
