@@ -301,11 +301,11 @@
       </div>
     </div>
 
-    <!-- 审查阻塞恢复按钮 (blocked only) -->
-    <div id="panel-retry-review-btn" class="hidden">
-      <button onclick="retryReviewCurrentTask()"
+    <!-- 阻塞恢复按钮 (blocked only) -->
+    <div id="panel-retry-blocked-btn" class="hidden">
+      <button onclick="retryBlockedCurrentTask()"
         class="w-full bg-amber-900/40 hover:bg-amber-900/60 text-amber-300 text-sm py-2 rounded-lg border border-amber-900/50 transition">
-        ♻ 重试审查（恢复到 in_review）
+        <span id="panel-retry-blocked-label">♻ 重试任务</span>
       </button>
     </div>
 
@@ -611,6 +611,7 @@ let projects = {};
 let agentTypes = {};          // key → agent_type record
 let currentProjectId = null;
 let currentTaskId = null;
+let currentBlockedRetryAction = null;
 let ws = null;
 let terminalsVisible = true;
 let _editingAgentKey = null;  // null = create mode
@@ -1066,9 +1067,14 @@ async function openPanel(id) {
   const archBtn = document.getElementById("panel-archive-btn");
   archBtn.classList.toggle("hidden", task.status!=="completed" || !!task.archived);
 
-  // Retry review button for blocked
-  const retryBtn = document.getElementById("panel-retry-review-btn");
-  retryBtn.classList.toggle("hidden", task.status !== "blocked");
+  // Retry button for blocked
+  const retryWrap = document.getElementById("panel-retry-blocked-btn");
+  const retryLabel = document.getElementById("panel-retry-blocked-label");
+  currentBlockedRetryAction = getBlockedRetryAction(task);
+  retryWrap.classList.toggle("hidden", !currentBlockedRetryAction);
+  if (retryLabel && currentBlockedRetryAction) {
+    retryLabel.textContent = currentBlockedRetryAction.label;
+  }
 
   // Cancel button: hide for completed/cancelled tasks
   const cancelBtn = document.getElementById("panel-cancel-btn");
@@ -1248,9 +1254,47 @@ async function rejectTask() {
   await patchTask(currentTaskId,{status:"needs_changes",review_feedback:fb});
   closePanel();
 }
-async function retryReviewCurrentTask() {
+function getBlockedRetryAction(task) {
+  if (!task || task.status !== "blocked") return null;
+  const owner = String(task.assigned_agent || "").trim().toLowerCase();
+  const fb = String(task.review_feedback || "");
+
+  if (owner === "reviewer" || fb.includes("[review_retry=") || fb.includes("审查器")) {
+    return {
+      status: "in_review",
+      assigned_agent: "reviewer",
+      label: "♻ 重试审查（恢复到 in_review）",
+    };
+  }
+  if (owner === "leader") {
+    const devAgent = String(task.dev_agent || "").trim();
+    const resumeAssignee = (devAgent && devAgent.toLowerCase() !== "leader") ? devAgent : null;
+    const forceDecompose = fb.includes(".leader-force-decompose.json") || fb.includes("leader_force_decompose");
+    if (forceDecompose) {
+      return {
+        status: "decompose",
+        assigned_agent: resumeAssignee,
+        label: "♻ 重试分解（恢复到 decompose）",
+      };
+    }
+    return {
+      status: "triage",
+      assigned_agent: resumeAssignee,
+      label: "♻ 重试评估（恢复到 triage）",
+    };
+  }
+  return null;
+}
+async function retryBlockedCurrentTask() {
   if (!currentTaskId) return;
-  await patchTask(currentTaskId, {status:"in_review", assigned_agent:"reviewer", assignee:null});
+  const task = tasks[currentTaskId];
+  const action = currentBlockedRetryAction || getBlockedRetryAction(task);
+  if (!action) return;
+  await patchTask(currentTaskId, {
+    status: action.status,
+    assigned_agent: action.assigned_agent,
+    assignee: null,
+  });
 }
 async function archiveCurrentTask() {
   if (!currentTaskId) return;
