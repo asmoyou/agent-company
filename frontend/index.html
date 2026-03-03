@@ -9,7 +9,7 @@
     body { background: #0f172a; color: #e2e8f0; }
     .card { transition: transform 0.15s, box-shadow 0.15s; }
     .card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.4); }
-    .badge { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.04em; }
+    .badge { font-size: 0.58rem; font-weight: 700; letter-spacing: 0.03em; }
     #panel { transition: transform 0.25s; }
     #panel.hidden-panel { transform: translateX(100%); }
     .ws-dot { width:8px;height:8px;border-radius:50%;display:inline-block; }
@@ -56,6 +56,53 @@
     .toast .t-title{font-size:12px;font-weight:600;color:#e2e8f0;margin-bottom:2px;}
     .toast .t-msg{font-size:12px;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;}
     @keyframes toast-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
+    .lane {
+      width: var(--lane-normal-width, 12rem);
+      min-width: var(--lane-normal-width, 12rem);
+      transition: width .18s ease, min-width .18s ease;
+    }
+    .lane.compact {
+      width: var(--lane-compact-width, 3.75rem);
+      min-width: var(--lane-compact-width, 3.75rem);
+    }
+    .lane.compact .lane-label { display: none; }
+    .lane.compact .lane-body { display: none; }
+    .lane.compact .lane-head { justify-content: center; }
+    .lane.compact .lane-count { margin-left: 0; color: #64748b; }
+    .lane-head {
+      border-radius: 0.6rem;
+      transition: background-color .12s ease, color .12s ease;
+    }
+    .lane-head[data-col-tip] { cursor: help; }
+    .lane-head:hover { background: rgba(51,65,85,.34); }
+    .lane-head:hover .lane-label,
+    .lane-head:hover .lane-count { color: #cbd5e1; }
+    .lane-dot { transition: transform .12s ease, filter .12s ease; }
+    .lane-head:hover .lane-dot { transform: scale(1.15); filter: brightness(1.15); }
+    .col-tooltip {
+      position: fixed;
+      z-index: 80;
+      pointer-events: none;
+      max-width: min(360px, calc(100vw - 16px));
+      background: #0b1220;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.35);
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-line;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(4px);
+      transition: opacity .08s ease, transform .08s ease;
+    }
+    .col-tooltip.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
   </style>
 </head>
 <body class="min-h-screen font-sans flex flex-col">
@@ -100,6 +147,10 @@
       <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
       显示已归档
     </label>
+    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+      <input type="checkbox" id="auto-collapse-empty-cols" onchange="refreshBoard()" class="rounded" checked>
+      自动压缩空列
+    </label>
     <!-- Prompts editor -->
     <button onclick="openPromptsModal()"
       class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
@@ -132,7 +183,7 @@
       + 新建第一个项目
     </button>
   </div>
-  <div id="board" class="flex gap-2 hidden" style="min-width:1920px;"></div>
+  <div id="board" class="flex gap-1.5 hidden items-start w-full"></div>
 </main>
 
 <!-- Agent Terminals -->
@@ -576,20 +627,21 @@ const WS_URL = `ws://${location.host}/ws`;
 const API    = `${location.protocol}//${location.host}`;
 
 const COLUMNS = [
-  { status:"triage",             label:"待评估",   dot:"bg-violet-500"  },
-  { status:"decompose",          label:"强制分解",  dot:"bg-fuchsia-500" },
-  { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400" },
-  { status:"todo",               label:"待开发",   dot:"bg-slate-500"   },
-  { status:"in_progress",        label:"开发中",   dot:"bg-blue-500"    },
-  { status:"in_review",          label:"待审查",   dot:"bg-yellow-500"  },
-  { status:"reviewing",          label:"审查中",   dot:"bg-orange-500"  },
-  { status:"blocked",            label:"已阻塞",   dot:"bg-amber-500"   },
-  { status:"needs_changes",      label:"需修改",   dot:"bg-red-500"     },
-  { status:"approved",           label:"审查通过", dot:"bg-green-500"   },
-  { status:"merging",            label:"合并中",   dot:"bg-purple-500"  },
-  { status:"pending_acceptance", label:"待验收",   dot:"bg-teal-500"    },
-  { status:"completed",          label:"已完成",   dot:"bg-emerald-400" },
-  { status:"cancelled",          label:"已取消",   dot:"bg-slate-600"   },
+  { status:"triage",             label:"待评估",   dot:"bg-violet-500",  hint:"新任务进入队列，等待 Leader 评估复杂度" },
+  { status:"triaging",           label:"评估中",   dot:"bg-violet-400",  hint:"Leader 正在评估任务或决定是否分解" },
+  { status:"decompose",          label:"强制分解",  dot:"bg-fuchsia-500", hint:"任务被标记为必须分解，等待 Leader 拆分子任务" },
+  { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400", hint:"父任务已拆分，子任务推进完成后父任务会完成" },
+  { status:"todo",               label:"待开发",   dot:"bg-slate-500",   hint:"等待开发 Agent 认领并开始实现" },
+  { status:"in_progress",        label:"开发中",   dot:"bg-blue-500",    hint:"开发 Agent 正在实现并提交变更" },
+  { status:"in_review",          label:"待审查",   dot:"bg-yellow-500",  hint:"开发完成，等待审查 Agent 执行评审" },
+  { status:"reviewing",          label:"审查中",   dot:"bg-orange-500",  hint:"审查 Agent 正在检查代码/文档质量" },
+  { status:"blocked",            label:"已阻塞",   dot:"bg-amber-500",   hint:"自动流程受阻，需要人工处理后重试" },
+  { status:"needs_changes",      label:"需修改",   dot:"bg-red-500",     hint:"审查未通过，等待开发侧按反馈修复" },
+  { status:"approved",           label:"审查通过", dot:"bg-green-500",   hint:"审查通过，等待 Manager 合并到主分支" },
+  { status:"merging",            label:"合并中",   dot:"bg-purple-500",  hint:"Manager 正在执行合并与交接收尾" },
+  { status:"pending_acceptance", label:"待验收",   dot:"bg-teal-500",    hint:"已进入验收阶段，等待人工确认结果" },
+  { status:"completed",          label:"已完成",   dot:"bg-emerald-400", hint:"任务已验收通过并完成" },
+  { status:"cancelled",          label:"已取消",   dot:"bg-slate-600",   hint:"任务被取消并归档，不再流转" },
 ];
 const STATUS_BADGE = {
   triage:"bg-violet-900 text-violet-300",   triaging:"bg-violet-900 text-violet-300",
@@ -606,6 +658,43 @@ const STATUS_BADGE = {
 const STATUS_LABEL = Object.fromEntries(COLUMNS.map(c=>[c.status,c.label]));
 const ALL_STATUSES = COLUMNS.map(c => c.status);
 
+function escHtmlAttr(s) {
+  return String(s||"")
+    .replace(/&/g,"&amp;")
+    .replace(/"/g,"&quot;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/\n/g,"&#10;");
+}
+
+function columnTooltip(col) {
+  return `${col.label} (${col.status})\n${col.hint || ""}`;
+}
+
+function updateBoardLaneWidths() {
+  const board = document.getElementById("board");
+  const container = board?.parentElement;
+  if (!board || !container) return;
+  const lanes = COLUMNS.map(col => document.getElementById(`lane-${col.status}`)).filter(Boolean);
+  if (!lanes.length) return;
+
+  const total = lanes.length;
+  const compactCount = lanes.filter(l => l.classList.contains("compact")).length;
+  const normalCount = Math.max(1, total - compactCount);
+  const gapPx = 6; // Tailwind gap-1.5
+  const available = Math.max(320, container.clientWidth - 2);
+
+  // Empty lanes use narrower width; active lanes consume remaining width.
+  const compactWidth = 50;
+  const remaining = available - (total - 1) * gapPx - compactCount * compactWidth;
+  let normalWidth = Math.floor(remaining / normalCount);
+  normalWidth = Math.max(48, Math.min(180, normalWidth));
+
+  const adaptiveCompactWidth = Math.max(36, Math.min(56, Math.round(normalWidth * 0.58)));
+  board.style.setProperty("--lane-normal-width", `${normalWidth}px`);
+  board.style.setProperty("--lane-compact-width", `${adaptiveCompactWidth}px`);
+}
+
 let tasks = {};
 let projects = {};
 let agentTypes = {};          // key → agent_type record
@@ -618,6 +707,7 @@ let _editingAgentKey = null;  // null = create mode
 let newProjectMode = "new";    // "new" | "existing"
 let dpCurrentPath = "";
 let dpParentPath = null;
+let _activeColTipTarget = null;
 
 // ── Agent Types ────────────────────────────────────────────────────────────────
 function loadAgentTypes(list) {
@@ -885,14 +975,84 @@ function updateProjectUI() {
 // ── Board ─────────────────────────────────────────────────────────────────────
 function buildBoard() {
   document.getElementById("board").innerHTML = COLUMNS.map(col=>`
-    <div class="flex-1 min-w-36">
-      <div class="flex items-center gap-1.5 mb-2 px-1">
-        <span class="w-2 h-2 rounded-full ${col.dot}"></span>
-        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${col.label}</span>
-        <span id="count-${col.status}" class="ml-auto text-xs text-slate-600 font-mono">0</span>
+    <div id="lane-${col.status}" class="lane shrink-0">
+      <div class="lane-head flex items-center gap-1.5 mb-2 px-1" data-col-tip="${escHtmlAttr(columnTooltip(col))}">
+        <span class="lane-dot w-2 h-2 rounded-full ${col.dot}"></span>
+        <span class="lane-label text-xs font-semibold text-slate-400 uppercase tracking-wide">${col.label}</span>
+        <span id="count-${col.status}" class="lane-count ml-auto text-xs text-slate-600 font-mono">0</span>
       </div>
-      <div id="col-${col.status}" class="space-y-2 rounded-xl bg-slate-800/40 p-2 min-h-16"></div>
+      <div id="col-${col.status}" class="lane-body space-y-2 rounded-xl bg-slate-800/40 p-2 min-h-16"></div>
     </div>`).join("");
+  bindColumnTooltips();
+}
+
+function ensureColTooltip() {
+  let el = document.getElementById("col-tooltip");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "col-tooltip";
+    el.className = "col-tooltip";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function positionColTooltip(x, y) {
+  const el = ensureColTooltip();
+  const pad = 8;
+  const dx = 14;
+  const dy = 16;
+  let left = x + dx;
+  let top = y + dy;
+  const maxLeft = window.innerWidth - el.offsetWidth - pad;
+  const maxTop = window.innerHeight - el.offsetHeight - pad;
+  if (left > maxLeft) left = Math.max(pad, x - el.offsetWidth - 10);
+  if (top > maxTop) top = Math.max(pad, y - el.offsetHeight - 10);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function showColTooltip(text, x, y) {
+  if (!text) return;
+  const el = ensureColTooltip();
+  el.textContent = text;
+  el.classList.add("show");
+  positionColTooltip(x, y);
+}
+
+function hideColTooltip() {
+  const el = document.getElementById("col-tooltip");
+  if (!el) return;
+  el.classList.remove("show");
+}
+
+function bindColumnTooltips() {
+  const board = document.getElementById("board");
+  if (!board || board.dataset.colTipBound === "1") return;
+  board.dataset.colTipBound = "1";
+  board.addEventListener("mousemove", (e) => {
+    const target = e.target.closest("[data-col-tip]");
+    if (!target || !board.contains(target)) {
+      if (_activeColTipTarget) {
+        _activeColTipTarget = null;
+        hideColTooltip();
+      }
+      return;
+    }
+    const tip = target.getAttribute("data-col-tip") || "";
+    if (_activeColTipTarget !== target) {
+      _activeColTipTarget = target;
+      showColTooltip(tip, e.clientX, e.clientY);
+      return;
+    }
+    positionColTooltip(e.clientX, e.clientY);
+  });
+  board.addEventListener("mouseleave", () => {
+    _activeColTipTarget = null;
+    hideColTooltip();
+  });
+  window.addEventListener("scroll", hideColTooltip, true);
+  window.addEventListener("blur", hideColTooltip);
 }
 
 function renderCard(task) {
@@ -903,40 +1063,41 @@ function renderCard(task) {
 
   const feedbackSnippet = ((task.status === "needs_changes" || task.status === "blocked") && task.review_feedback &&
       !task.review_feedback.startsWith("(auto-approved"))
-    ? `<div class="mt-2 text-xs text-amber-400/80 bg-amber-900/15 rounded px-2 py-1"
-            style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
+    ? `<div class="mt-1 text-[10px] text-amber-400/80 bg-amber-900/15 rounded px-1.5 py-0.5"
+            style="display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">
          ↩ ${escHtml(task.review_feedback)}</div>` : "";
 
   const archiveBadge = task.archived
-    ? `<span class="text-xs text-slate-600">📦</span>` : "";
+    ? `<span class="text-[10px] text-slate-600">📦</span>` : "";
 
   const pendingBadge = task.status === "pending_acceptance"
-    ? `<span class="text-xs text-teal-400 animate-pulse">● 待验收</span>` : "";
+    ? `<span class="text-[10px] text-teal-400 animate-pulse">● 待验收</span>` : "";
 
   // Subtask progress (for decomposed parent tasks)
   let subtaskBadge = "";
   if (task.status === "decomposed") {
     const subtasks = Object.values(tasks).filter(t => t.parent_task_id === task.id);
     const done = subtasks.filter(t => t.status === "completed").length;
-    subtaskBadge = `<span class="text-xs text-fuchsia-400">${done}/${subtasks.length} 子任务</span>`;
+    subtaskBadge = `<span class="text-[10px] text-fuchsia-400">${done}/${subtasks.length} 子任务</span>`;
   }
 
   // Parent link badge (for subtasks)
   const parentBadge = task.parent_task_id
-    ? `<span class="text-xs text-fuchsia-600/70">↳ 子任务</span>` : "";
+    ? `<span class="text-[10px] text-fuchsia-600/70">↳ 子任务</span>` : "";
 
   // Assigned agent hint
   const agentBadge = task.assigned_agent && !task.assignee
-    ? `<span class="text-xs text-slate-600">→${task.assigned_agent}</span>` : "";
+    ? `<span class="text-[10px] text-slate-600">→${escHtml(String(task.assigned_agent).slice(0,10))}</span>` : "";
 
   return `
-    <div class="card bg-slate-800 border border-slate-700 rounded-lg p-3 cursor-pointer ${task.archived?'archived-card':''}"
+    <div class="card bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
          onclick="openPanel('${task.id}')">
-      <div class="text-sm font-medium text-white mb-2 leading-snug">${escHtml(task.title)}</div>
-      <div class="flex items-center gap-2 flex-wrap">
+      <div class="text-[11px] font-medium text-white mb-1 leading-snug"
+           style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${escHtml(task.title)}</div>
+      <div class="flex items-center gap-1 flex-wrap">
         <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
-        ${task.assignee?`<span class="text-slate-500 text-xs">${task.assignee}</span>`:""}
-        ${task.commit_hash?`<span class="text-xs font-mono text-green-600">${task.commit_hash}</span>`:""}
+        ${task.assignee?`<span class="text-slate-500 text-[10px]">${escHtml(String(task.assignee).slice(0,10))}</span>`:""}
+        ${task.commit_hash?`<span class="text-[10px] font-mono text-green-600">${escHtml(String(task.commit_hash).slice(0,7))}</span>`:""}
         ${pendingBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}
       </div>
       ${feedbackSnippet}
@@ -945,9 +1106,11 @@ function renderCard(task) {
 
 function refreshBoard() {
   if (!currentProjectId) return;
+  const autoCollapse = document.getElementById("auto-collapse-empty-cols")?.checked !== false;
   COLUMNS.forEach(col => {
     document.getElementById(`col-${col.status}`).innerHTML = "";
     document.getElementById(`count-${col.status}`).textContent = "0";
+    document.getElementById(`lane-${col.status}`)?.classList.remove("compact");
   });
   const counts = {};
   Object.values(tasks)
@@ -961,10 +1124,14 @@ function refreshBoard() {
         counts[task.status] = (counts[task.status]||0) + 1;
       }
     });
-  Object.entries(counts).forEach(([s,n]) => {
-    const el = document.getElementById(`count-${s}`);
-    if (el) el.textContent = n;
+  COLUMNS.forEach(col => {
+    const n = counts[col.status] || 0;
+    const countEl = document.getElementById(`count-${col.status}`);
+    if (countEl) countEl.textContent = String(n);
+    const laneEl = document.getElementById(`lane-${col.status}`);
+    if (laneEl) laneEl.classList.toggle("compact", autoCollapse && n === 0);
   });
+  updateBoardLaneWidths();
 }
 
 function escHtml(s) {
@@ -1853,6 +2020,8 @@ function copyProjectPath() {
 }
 
 buildBoard();
+updateBoardLaneWidths();
+window.addEventListener("resize", updateBoardLaneWidths);
 connectWS();
 </script>
 </body>
