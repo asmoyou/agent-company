@@ -708,6 +708,7 @@ let currentProjectId = null;
 let currentTaskId = null;
 let currentBlockedRetryAction = null;
 let ws = null;
+let wsPingTimer = null;
 let terminalsVisible = true;
 let _editingAgentKey = null;  // null = create mode
 let newProjectMode = "new";    // "new" | "existing"
@@ -1894,9 +1895,16 @@ function connectWS() {
   ws.onopen = () => {
     document.getElementById("ws-dot").className="ws-dot connected";
     document.getElementById("ws-label").textContent="已连接";
-    setInterval(()=>{if(ws.readyState===1)ws.send("ping");},20000);
+    if (wsPingTimer) clearInterval(wsPingTimer);
+    wsPingTimer = setInterval(() => {
+      if (ws && ws.readyState === 1) ws.send("ping");
+    }, 20000);
   };
   ws.onclose = () => {
+    if (wsPingTimer) {
+      clearInterval(wsPingTimer);
+      wsPingTimer = null;
+    }
     document.getElementById("ws-dot").className="ws-dot disconnected";
     document.getElementById("ws-label").textContent="已断开 — 重连中...";
     setTimeout(connectWS,3000);

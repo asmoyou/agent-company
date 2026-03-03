@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -13,7 +14,8 @@ PROJECT_ROOT    = Path(__file__).parent.parent
 SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
 CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
-HEARTBEAT_SECS  = 45
+HEARTBEAT_SECS  = int(os.getenv("HEARTBEAT_SECS", "45"))
+AGENT_POST_TIMEOUT_SECS = float(os.getenv("AGENT_POST_TIMEOUT_SECS", "8"))
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -564,7 +566,7 @@ class BaseAgent:
             try:
                 await self.http.post(
                     f"/agents/{self.name}/output",
-                    json={"line": line}, timeout=2.0,
+                    json={"line": line}, timeout=AGENT_POST_TIMEOUT_SECS,
                 )
             except Exception:
                 pass
@@ -574,7 +576,7 @@ class BaseAgent:
         try:
             await self.http.post(
                 f"/agents/{self.name}/status",
-                json={"status": status, "task": task_title}, timeout=2.0,
+                json={"status": status, "task": task_title}, timeout=AGENT_POST_TIMEOUT_SECS,
             )
         except Exception:
             pass
@@ -975,6 +977,12 @@ class BaseAgent:
                         print(f"[{self.name}] → '{task['title'][:40]}' ({status})")
                         await self.set_agent_status("busy", task["title"])
                         self._post_output_bg(f"▶ 任务: {task['title']}")
+                        async def busy_status_heartbeat():
+                            while True:
+                                await asyncio.sleep(HEARTBEAT_SECS)
+                                await self.set_agent_status("busy", task["title"])
+
+                        busy_hb = asyncio.create_task(busy_status_heartbeat())
                         try:
                             self._active_task_id = task["id"]
                             await self.process_task(task)
@@ -991,11 +999,16 @@ class BaseAgent:
                             self._post_output_bg(f"✗ 错误: {e}")
                             print(f"[{self.name}] Error: {e}")
                         finally:
+                            busy_hb.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await busy_hb
                             self._active_task_id = None
                         await self.set_agent_status("idle")
                         self._post_output_bg("─── 等待下一个任务 ───")
                 except Exception as e:
-                    print(f"[{self.name}] Poll error ({status}): {e}")
+                    msg = f"Poll error ({status}): {e}"
+                    print(f"[{self.name}] {msg}")
+                    self._post_output_bg(f"⚠ {msg[:300]}")
 
             # Sleep for POLL_INTERVAL, but wake up early if shutdown is set
             try:

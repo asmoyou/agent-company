@@ -158,34 +158,6 @@ class DeveloperAgent(BaseAgent):
                 cwd=worktree_dev,
             )
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
-            await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
-            await self.add_handoff(
-                task_id,
-                stage="dev_to_review",
-                to_agent="reviewer",
-                status_from=prev_status,
-                status_to="in_review",
-                title="开发交接审查",
-                summary=f"已提交 commit {commit_hash}，等待审查",
-                commit_hash=commit_hash,
-                conclusion="开发完成，等待审查结论",
-                payload={
-                    "commit_hash": commit_hash,
-                    "diff_stat": diff.strip(),
-                    "source_branch": branch,
-                },
-                artifact_path=str(worktree_dev),
-            )
-            if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
-                return
-            await self.update_task(
-                task_id,
-                status="in_review",
-                assignee=None,
-                assigned_agent=self.name,
-                dev_agent=self.name,
-                commit_hash=commit_hash,
-            )
         except Exception as e:
             await self.add_log(task_id, f"提交失败: {e}")
             await self.add_alert(
@@ -208,6 +180,70 @@ class DeveloperAgent(BaseAgent):
                 payload={"error": str(e)},
             )
             await self.update_task(task_id, status="todo", assignee=None)
+            return
+
+        await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
+        if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
+            return
+
+        # Commit is already done locally. If task update fails transiently,
+        # retry status sync instead of incorrectly rolling the task back to todo.
+        update_error = None
+        for i in range(1, 7):
+            try:
+                await self.update_task(
+                    task_id,
+                    status="in_review",
+                    assignee=None,
+                    assigned_agent=self.name,
+                    dev_agent=self.name,
+                    commit_hash=commit_hash,
+                )
+                update_error = None
+                break
+            except Exception as e:
+                update_error = e
+                self._post_output_bg(
+                    f"⚠ 已提交 {commit_hash}，同步状态失败（{i}/6）：{str(e)[:120]}"
+                )
+                await asyncio.sleep(min(2 * i, 10))
+
+        if update_error is not None:
+            await self.add_log(
+                task_id,
+                (
+                    f"⚠ 已本地提交 {commit_hash}，但无法把任务推进到 in_review：{update_error}。"
+                    "保持当前状态，等待后续重试/人工处理。"
+                ),
+            )
+            await self.add_alert(
+                summary="提交已完成但状态同步失败",
+                task_id=task_id,
+                message=f"commit={commit_hash}; error={update_error}",
+                kind="warning",
+                code="developer_commit_sync_failed",
+                stage="developer_post_commit_sync",
+                metadata={"commit_hash": commit_hash},
+            )
+            return
+
+        await self.add_handoff(
+            task_id,
+            stage="dev_to_review",
+            to_agent="reviewer",
+            status_from=prev_status,
+            status_to="in_review",
+            title="开发交接审查",
+            summary=f"已提交 commit {commit_hash}，等待审查",
+            commit_hash=commit_hash,
+            conclusion="开发完成，等待审查结论",
+            payload={
+                "commit_hash": commit_hash,
+                "diff_stat": diff.strip(),
+                "source_branch": branch,
+            },
+            artifact_path=str(worktree_dev),
+        )
 
 
 if __name__ == "__main__":
