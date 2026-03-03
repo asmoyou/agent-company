@@ -25,7 +25,11 @@ DEVELOPER_PROMPT_DEFAULT = (
     "2. **质量标准**\n"
     "   - 代码需有适当注释，边界情况需处理\n"
     "   - 文档需完整、结构清晰\n\n"
-    "3. 直接开始实现，不需要解释计划"
+    "3. **分支与交接约束**\n"
+    "   - 在当前工作分支完成实现并提交，不要自行合并 main\n"
+    "   - 提交后由 reviewer/manager 继续流程，不要跳过审查与合并环节\n"
+    "   - 不要伪造“已合并/已发布”结论\n\n"
+    "4. 直接开始实现，不需要解释计划"
 )
 
 REVIEWER_PROMPT_DEFAULT = (
@@ -51,9 +55,9 @@ REVIEWER_PROMPT_DEFAULT = (
 )
 
 MANAGER_PROMPT_DEFAULT = (
-    "你是发布合并管理者，负责把经审查通过的 commit 合并到主分支。\n\n"
+    "你是发布合并管理者，负责把经审查通过的目标 commit 从开发分支精确合并到 main。\n\n"
     "任务标题：{task_title}\n"
-    "请确保只合并经过审查的目标 commit，并在冲突时停止自动流程。"
+    "请确保只合并已审查的 commit_hash（不要直接合并分支 HEAD），并在冲突时停止自动流程。"
 )
 
 LEADER_PROMPT_DEFAULT = (
@@ -236,7 +240,7 @@ def _seed_builtin_agents(conn):
         {
             "key": "developer",
             "name": "开发者",
-            "description": "实现任务需求，编写代码并提交到 dev 分支",
+            "description": "实现任务需求，在 agent/<agent> 工作分支提交并交接审查",
             "prompt": BUILTIN_PROMPTS["developer"],
             "poll_statuses": '["todo","needs_changes"]',
             "next_status": "in_review",
@@ -254,7 +258,7 @@ def _seed_builtin_agents(conn):
         {
             "key": "manager",
             "name": "合并管理者",
-            "description": "将审查通过的代码合并到主分支",
+            "description": "将审查通过的目标 commit 精确合并到 main",
             "prompt": BUILTIN_PROMPTS["manager"],
             "poll_statuses": '["approved"]',
             "next_status": "pending_acceptance",
@@ -314,6 +318,39 @@ def _seed_builtin_agents(conn):
              AND INSTR(prompt, '子任务质量门槛') = 0
              AND (INSTR(prompt, 'acceptance_criteria') = 0 OR INSTR(prompt, 'todo_steps') = 0)""",
         (BUILTIN_PROMPTS["leader"],),
+    )
+    # Migrate outdated built-in developer prompt that lacked branch/handoff constraints.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='developer' AND is_builtin=1
+             AND INSTR(prompt, '所有成果必须写入文件') > 0
+             AND INSTR(prompt, '分支与交接约束') = 0""",
+        (BUILTIN_PROMPTS["developer"],),
+    )
+    # Migrate outdated built-in manager prompt that did not require exact commit_hash merge.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='manager' AND is_builtin=1
+             AND INSTR(prompt, '合并到主分支') > 0
+             AND INSTR(prompt, 'commit_hash') = 0""",
+        (BUILTIN_PROMPTS["manager"],),
+    )
+    # Migrate outdated built-in descriptions.
+    conn.execute(
+        """UPDATE agent_types
+           SET description=?
+           WHERE key='developer' AND is_builtin=1
+             AND (INSTR(description, 'dev 分支') > 0 OR INSTR(description, '提交到 dev') > 0)""",
+        ("实现任务需求，在 agent/<agent> 工作分支提交并交接审查",),
+    )
+    conn.execute(
+        """UPDATE agent_types
+           SET description=?
+           WHERE key='manager' AND is_builtin=1
+             AND INSTR(description, '合并到主分支') > 0""",
+        ("将审查通过的目标 commit 精确合并到 main",),
     )
 
 
