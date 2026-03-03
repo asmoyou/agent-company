@@ -67,6 +67,61 @@ class ManagerAgent(BaseAgent):
             except Exception:
                 continue
 
+    async def _is_patch_equivalent_on_ref(self, repo_root: Path, commit_hash: str, ref: str) -> bool:
+        commit = str(commit_hash or "").strip()
+        if not commit:
+            return False
+        try:
+            out = (await self.git("cherry", ref, commit, cwd=repo_root)).strip()
+        except Exception:
+            return False
+        if not out:
+            return False
+        for raw in out.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            marker, candidate = parts[0], parts[1]
+            if marker not in {"+", "-"}:
+                continue
+            if candidate.startswith(commit) or commit.startswith(candidate):
+                return marker == "-"
+        return False
+
+    def _output_has_conflict_signal(self, text: str) -> bool:
+        raw = str(text or "")
+        if not raw:
+            return False
+        low = raw.lower()
+
+        if re.search(r"(?m)^conflict\b", low):
+            return True
+        for marker in (
+            "conflict (",
+            "automatic merge failed",
+            "merge conflict",
+            "resolve all conflicts manually",
+            "error: could not apply",
+            "cherry-pick failed",
+        ):
+            if marker in low:
+                return True
+
+        if re.search(
+            r"(合并冲突|发生冲突|存在冲突|出现冲突|冲突文件|请解决冲突)",
+            raw,
+        ):
+            if re.search(
+                r"(无冲突|没有冲突|未发生冲突|未出现冲突|冲突情况[:：]\s*无冲突)",
+                raw,
+            ):
+                return False
+            return True
+        return False
+
     def _load_decision_file(self, path: Path) -> dict | None:
         if not path.exists():
             return None
@@ -219,6 +274,11 @@ class ManagerAgent(BaseAgent):
         await self._ensure_on_main(proj_root)
         head_before = (await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)).strip()
         before_contains_target = await self._is_ancestor(proj_root, target_commit, "main")
+        before_contains_equivalent = (
+            False
+            if before_contains_target
+            else await self._is_patch_equivalent_on_ref(proj_root, target_commit, "main")
+        )
 
         decision_dir = proj_root / ".opc" / "decisions"
         decision_dir.mkdir(parents=True, exist_ok=True)
@@ -278,17 +338,21 @@ class ManagerAgent(BaseAgent):
 
         head_after = (await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)).strip()
         after_contains_target = await self._is_ancestor(proj_root, target_commit, "main")
-        low_output = output.lower()
+        after_contains_equivalent = (
+            True
+            if after_contains_target
+            else await self._is_patch_equivalent_on_ref(proj_root, target_commit, "main")
+        )
+        merge_effective = after_contains_target or after_contains_equivalent
         is_conflict = (
             (decision or {}).get("decision") == "conflict"
-            or "conflict" in low_output
-            or "automatic merge failed" in low_output
-            or "冲突" in output
+            or self._output_has_conflict_signal(output)
         )
 
-        if after_contains_target:
+        if merge_effective:
             already_up_to_date = (
                 before_contains_target
+                or before_contains_equivalent
                 or (decision or {}).get("decision") == "already_up_to_date"
                 or head_before == head_after
             )
