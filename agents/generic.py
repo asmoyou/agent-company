@@ -125,6 +125,50 @@ class GenericAgent(BaseAgent):
         if not diff.strip() and output.strip() and len(output) > 50:
             await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
+        if cli_created_commit and head_after:
+            diff_stat = diff.strip()
+            commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
+            await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_hash}")
+            if diff_stat:
+                await self.add_log(
+                    task_id,
+                    "检测到额外未提交改动；按最新 commit 推进流转，剩余改动保留在工作区。",
+                )
+            if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
+                return
+            update_fields = {
+                "status": self.next_status,
+                "assignee": None,
+                "commit_hash": commit_hash,
+            }
+            if self.next_status == "in_review":
+                update_fields["assigned_agent"] = self.name
+                update_fields["dev_agent"] = self.name
+            await self.transition_task(
+                task_id,
+                fields=update_fields,
+                handoff={
+                    "stage": f"{self.name}_handoff",
+                    "to_agent": (update_fields.get("assigned_agent") or self.next_status),
+                    "status_from": prev_status,
+                    "status_to": self.next_status,
+                    "title": f"{self._display_name} 交接",
+                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {self.next_status}",
+                    "commit_hash": commit_hash,
+                    "conclusion": f"{self._display_name} 完成，推进到 {self.next_status}",
+                    "payload": {
+                        "commit_hash": commit_hash,
+                        "source_branch": branch,
+                        "committed_by_cli": True,
+                        "has_uncommitted_changes": bool(diff_stat),
+                        "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
+                    },
+                    "artifact_path": str(worktree_dev),
+                },
+                log_message=f"检测到 CLI 已生成提交，推进至 {self.next_status}",
+            )
+            return
+
         if diff.strip():
             await self.add_log(
                 task_id,
@@ -157,38 +201,6 @@ class GenericAgent(BaseAgent):
                     "artifact_path": str(worktree_dev),
                 },
                 log_message=f"检测到未提交改动，保持 {prev_status}",
-            )
-            return
-
-        if cli_created_commit and head_after:
-            commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
-            await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_hash}")
-            if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
-                return
-            update_fields = {
-                "status": self.next_status,
-                "assignee": None,
-                "commit_hash": commit_hash,
-            }
-            if self.next_status == "in_review":
-                update_fields["assigned_agent"] = self.name
-                update_fields["dev_agent"] = self.name
-            await self.transition_task(
-                task_id,
-                fields=update_fields,
-                handoff={
-                    "stage": f"{self.name}_handoff",
-                    "to_agent": (update_fields.get("assigned_agent") or self.next_status),
-                    "status_from": prev_status,
-                    "status_to": self.next_status,
-                    "title": f"{self._display_name} 交接",
-                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {self.next_status}",
-                    "commit_hash": commit_hash,
-                    "conclusion": f"{self._display_name} 完成，推进到 {self.next_status}",
-                    "payload": {"commit_hash": commit_hash, "source_branch": branch, "committed_by_cli": True},
-                    "artifact_path": str(worktree_dev),
-                },
-                log_message=f"检测到 CLI 已生成提交，推进至 {self.next_status}",
             )
             return
 
