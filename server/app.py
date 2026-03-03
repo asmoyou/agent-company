@@ -98,6 +98,7 @@ if frontend_dir.exists():
 class ProjectCreate(BaseModel):
     name: str
     path: str  # absolute filesystem path
+    import_existing: bool = False
 
 class TaskCreate(BaseModel):
     title: str
@@ -251,8 +252,14 @@ async def list_projects():
 @app.post("/projects", status_code=201)
 async def create_project(body: ProjectCreate):
     path = Path(body.path).expanduser().resolve()
-    if db.list_projects() and any(p["path"] == str(path) for p in db.list_projects()):
+    all_projects = db.list_projects()
+    if any(p["path"] == str(path) for p in all_projects):
         raise HTTPException(400, "Path already used by another project")
+    if body.import_existing:
+        if not path.exists():
+            raise HTTPException(400, "Existing project path does not exist")
+        if not path.is_dir():
+            raise HTTPException(400, "Existing project path must be a directory")
     project = db.create_project(body.name, str(path))
     await manager.broadcast({"event": "project_created", "project": project})
     return project
@@ -263,6 +270,36 @@ async def get_project(project_id: str):
     if not p:
         raise HTTPException(404, "Project not found")
     return p
+
+
+@app.get("/fs/directories")
+async def list_directories(path: str = "~"):
+    raw = (path or "").strip() or "~"
+    target = Path(raw).expanduser()
+    try:
+        resolved = target.resolve()
+    except Exception:
+        raise HTTPException(400, "Invalid path")
+
+    if not resolved.exists():
+        raise HTTPException(404, "Directory not found")
+    if not resolved.is_dir():
+        raise HTTPException(400, "Path is not a directory")
+
+    dirs = []
+    try:
+        for entry in sorted(resolved.iterdir(), key=lambda e: e.name.lower()):
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith("."):
+                continue
+            dirs.append({"name": entry.name, "path": str(entry.resolve())})
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+    parent = str(resolved.parent) if resolved.parent != resolved else None
+    return {"path": str(resolved), "parent": parent, "directories": dirs}
+
 
 @app.post("/projects/sync")
 async def sync_projects():
@@ -288,6 +325,8 @@ async def setup_project(project_id: str):
         raise HTTPException(404, "Project not found")
 
     proj_path = Path(p["path"])
+    if proj_path.exists() and not proj_path.is_dir():
+        raise HTTPException(400, "Project path exists but is not a directory")
     proj_path.mkdir(parents=True, exist_ok=True)
 
     def run(*args, cwd=None):

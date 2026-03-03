@@ -380,10 +380,16 @@
 <div id="modal-project" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
   <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-      <h3 class="font-semibold text-white">新建项目</h3>
+      <h3 id="modal-project-title" class="font-semibold text-white">新建项目</h3>
       <button onclick="closeNewProjectModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
     </div>
     <form onsubmit="submitNewProject(event)" class="p-6 space-y-4">
+      <div class="bg-slate-900/50 border border-slate-700 rounded-lg p-1 flex gap-1">
+        <button type="button" id="proj-mode-new" onclick="setProjectMode('new')"
+          class="flex-1 text-xs px-3 py-1.5 rounded-md transition">新建项目</button>
+        <button type="button" id="proj-mode-existing" onclick="setProjectMode('existing')"
+          class="flex-1 text-xs px-3 py-1.5 rounded-md transition">添加现有项目</button>
+      </div>
       <div>
         <label class="block text-xs text-slate-400 mb-1">项目名称 *</label>
         <input id="proj-name" type="text" required placeholder="my-awesome-project"
@@ -391,16 +397,48 @@
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
       </div>
       <div>
-        <label class="block text-xs text-slate-400 mb-1">项目目录（绝对路径）*</label>
+        <label id="proj-path-label" class="block text-xs text-slate-400 mb-1">项目目录（绝对路径）*</label>
         <input id="proj-path" type="text" required placeholder="~/projects/my-awesome-project"
+          oninput="onProjPathInput()"
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono text-xs" />
-        <div class="text-xs text-slate-500 mt-1">目录不存在会自动创建，并初始化 git 仓库</div>
+        <div id="proj-path-hint" class="text-xs text-slate-500 mt-1">目录不存在会自动创建，并初始化 git 仓库</div>
+        <div id="proj-pick-dir-row" class="hidden mt-2 flex justify-end">
+          <button type="button" onclick="openDirPicker()"
+            class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">
+            选择文件夹
+          </button>
+        </div>
       </div>
       <div class="flex justify-end gap-3">
         <button type="button" onclick="closeNewProjectModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
-        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建并初始化</button>
+        <button id="proj-submit-btn" type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建并初始化</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Directory Picker Modal -->
+<div id="modal-dir-picker" class="hidden fixed inset-0 bg-black/70 z-40 flex items-center justify-center p-4" onclick="closeDirPicker()">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl" onclick="event.stopPropagation()">
+    <div class="px-5 py-3 border-b border-slate-700 flex items-center justify-between">
+      <h3 class="font-semibold text-white">选择项目目录</h3>
+      <button type="button" onclick="closeDirPicker()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <div class="p-5 space-y-3">
+      <div class="flex items-center gap-2">
+        <button id="dp-btn-up" type="button" onclick="dpGoUp()"
+          class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">↑ 上级</button>
+        <button type="button" onclick="dpRefresh()"
+          class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">刷新</button>
+      </div>
+      <div class="text-xs text-slate-500">当前目录</div>
+      <div id="dp-current-path" class="text-xs font-mono text-slate-300 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 break-all"></div>
+      <div id="dp-list" class="max-h-80 overflow-y-auto border border-slate-700 rounded-lg bg-slate-900"></div>
+    </div>
+    <div class="px-5 py-3 border-t border-slate-700 flex justify-end gap-3">
+      <button type="button" onclick="closeDirPicker()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
+      <button type="button" onclick="selectDirFromPicker()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">选择当前目录</button>
+    </div>
   </div>
 </div>
 
@@ -576,6 +614,9 @@ let currentTaskId = null;
 let ws = null;
 let terminalsVisible = true;
 let _editingAgentKey = null;  // null = create mode
+let newProjectMode = "new";    // "new" | "existing"
+let dpCurrentPath = "";
+let dpParentPath = null;
 
 // ── Agent Types ────────────────────────────────────────────────────────────────
 function loadAgentTypes(list) {
@@ -811,6 +852,16 @@ function loadProjects(list) {
     currentProjectId = list[0].id;
   }
   updateProjectUI();
+}
+
+function upsertProjectOption(project) {
+  const sel = document.getElementById("project-select");
+  const existing = sel.querySelector(`option[value="${project.id}"]`);
+  if (existing) {
+    existing.textContent = project.name;
+    return;
+  }
+  sel.insertAdjacentHTML("beforeend", `<option value="${project.id}">${escHtml(project.name)}</option>`);
 }
 
 function onProjectChange() {
@@ -1263,34 +1314,138 @@ function closePanel() {
 }
 
 // ── New Project Modal ─────────────────────────────────────────────────────────
-function openNewProjectModal()  { document.getElementById("modal-project").classList.remove("hidden"); }
+function openNewProjectModal()  {
+  setProjectMode("new");
+  document.getElementById("modal-project").classList.remove("hidden");
+}
 function closeNewProjectModal() { document.getElementById("modal-project").classList.add("hidden"); }
+function setProjectMode(mode) {
+  newProjectMode = mode === "existing" ? "existing" : "new";
+  const isExisting = newProjectMode === "existing";
+  const btnNew = document.getElementById("proj-mode-new");
+  const btnExisting = document.getElementById("proj-mode-existing");
+  const title = document.getElementById("modal-project-title");
+  const pathLabel = document.getElementById("proj-path-label");
+  const pathHint = document.getElementById("proj-path-hint");
+  const submitBtn = document.getElementById("proj-submit-btn");
+  const pathInput = document.getElementById("proj-path");
+  const nameInput = document.getElementById("proj-name");
+  const pickDirRow = document.getElementById("proj-pick-dir-row");
+
+  btnNew.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800" : "bg-slate-700 text-white"}`;
+  btnExisting.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`;
+  title.textContent = isExisting ? "添加现有项目" : "新建项目";
+  pathLabel.textContent = isExisting ? "现有项目目录（绝对路径）*" : "项目目录（绝对路径）*";
+  pathHint.textContent = isExisting ? "只会添加已存在目录；若目录没有 git，会自动初始化" : "目录不存在会自动创建，并初始化 git 仓库";
+  submitBtn.textContent = isExisting ? "添加并检查 Git" : "创建并初始化";
+  pathInput.placeholder = isExisting ? "~/projects/existing-project" : "~/projects/my-awesome-project";
+  nameInput.required = !isExisting;
+  pickDirRow.classList.toggle("hidden", !isExisting);
+}
+function openDirPicker() {
+  const rawPath = document.getElementById("proj-path").value.trim();
+  document.getElementById("modal-dir-picker").classList.remove("hidden");
+  dpLoadDirectories(rawPath || "~");
+}
+function closeDirPicker() {
+  document.getElementById("modal-dir-picker").classList.add("hidden");
+}
+function dpRefresh() {
+  dpLoadDirectories(dpCurrentPath || "~");
+}
+function dpGoUp() {
+  if (!dpParentPath) return;
+  dpLoadDirectories(dpParentPath);
+}
+async function dpLoadDirectories(path) {
+  const currentEl = document.getElementById("dp-current-path");
+  const listEl = document.getElementById("dp-list");
+  const upBtn = document.getElementById("dp-btn-up");
+  currentEl.textContent = "加载中...";
+  listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">加载中...</div>';
+  try {
+    const res = await fetch(`${API}/fs/directories?path=${encodeURIComponent(path || "~")}`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    dpCurrentPath = data.path;
+    dpParentPath = data.parent || null;
+    currentEl.textContent = dpCurrentPath;
+    upBtn.disabled = !dpParentPath;
+    upBtn.classList.toggle("opacity-40", !dpParentPath);
+    upBtn.classList.toggle("cursor-not-allowed", !dpParentPath);
+    const dirs = data.directories || [];
+    if (!dirs.length) {
+      listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">当前目录没有可进入的子目录</div>';
+      return;
+    }
+    listEl.innerHTML = dirs.map(d => `
+      <button type="button" onclick="dpLoadDirectories('${escAttr(d.path)}')"
+        class="w-full flex items-center gap-2 px-3 py-2 text-left border-b border-slate-800 last:border-b-0 hover:bg-slate-800 transition">
+        <span>📁</span>
+        <span class="text-sm text-slate-200 flex-1 truncate">${escHtml(d.name)}</span>
+        <span class="text-xs text-slate-600 font-mono truncate max-w-64">${escHtml(d.path)}</span>
+      </button>`).join("");
+  } catch (err) {
+    dpParentPath = null;
+    upBtn.disabled = true;
+    upBtn.classList.add("opacity-40", "cursor-not-allowed");
+    currentEl.textContent = "";
+    listEl.innerHTML = `<div class="text-sm text-red-400 text-center py-8">加载失败: ${escHtml(err.message)}</div>`;
+  }
+}
+function selectDirFromPicker() {
+  if (!dpCurrentPath) return;
+  document.getElementById("proj-path").value = dpCurrentPath;
+  onProjPathInput();
+  closeDirPicker();
+}
 function updateProjPath() {
+  if (newProjectMode === "existing") return;
   const name = document.getElementById("proj-name").value.trim()
     .toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-_]/g,"");
   if (name) document.getElementById("proj-path").value = `~/projects/${name}`;
 }
+function onProjPathInput() {
+  if (newProjectMode !== "existing") return;
+  const nameInput = document.getElementById("proj-name");
+  if (nameInput.value.trim()) return;
+  const rawPath = document.getElementById("proj-path").value.trim();
+  if (!rawPath) return;
+  const normalized = rawPath.replace(/[\\/]+$/g, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  if (parts.length > 0) nameInput.value = parts[parts.length - 1];
+}
 async function submitNewProject(e) {
   e.preventDefault();
-  const name = document.getElementById("proj-name").value.trim();
+  let name = document.getElementById("proj-name").value.trim();
   const path = document.getElementById("proj-path").value.trim();
+  const importExisting = newProjectMode === "existing";
+  if (!name && importExisting) {
+    const normalized = path.replace(/[\\/]+$/g, "");
+    const parts = normalized.split(/[\\/]/).filter(Boolean);
+    if (parts.length > 0) {
+      name = parts[parts.length - 1];
+      document.getElementById("proj-name").value = name;
+    }
+  }
   if (!name||!path) return;
   try {
     // Create project record
     const res = await fetch(`${API}/projects`,{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({name,path}),
+      body:JSON.stringify({name,path,import_existing:importExisting}),
     });
     if (!res.ok) throw new Error(await res.text());
     const proj = await res.json();
     // Initialize git repo (agent worktrees are created on demand)
     const setupRes = await fetch(`${API}/projects/${proj.id}/setup`,{method:"POST"});
+    if (!setupRes.ok) throw new Error(await setupRes.text());
     const setupData = await setupRes.json();
     console.log("Setup log:", setupData.log);
     projects[proj.id] = proj;
     // Add to selector
+    upsertProjectOption(proj);
     const sel = document.getElementById("project-select");
-    sel.insertAdjacentHTML("beforeend",`<option value="${proj.id}">${escHtml(proj.name)}</option>`);
     sel.value = proj.id;
     currentProjectId = proj.id;
     updateProjectUI();
@@ -1417,7 +1572,7 @@ function connectWS() {
     } else if (msg.event==="project_created") {
       projects[msg.project.id]=msg.project;
       const sel=document.getElementById("project-select");
-      sel.insertAdjacentHTML("beforeend",`<option value="${msg.project.id}">${escHtml(msg.project.name)}</option>`);
+      upsertProjectOption(msg.project);
       if (!currentProjectId) { sel.value=msg.project.id; currentProjectId=msg.project.id; updateProjectUI(); }
     } else if (msg.event==="project_deleted") {
       const pid=msg.project_id;
