@@ -316,6 +316,12 @@ class CancelTaskRequest(BaseModel):
     include_subtasks: bool = True
 
 
+class TaskTransitionRequest(BaseModel):
+    fields: TaskUpdate | None = None
+    handoff: HandoffCreate | None = None
+    log: LogCreate | None = None
+
+
 COMMIT_REQUIRED_STAGES = {
     "dev_to_review",
     "review_to_manager",
@@ -615,6 +621,79 @@ async def update_task(task_id: str, body: TaskUpdate):
             if parent:
                 await manager.broadcast({"event": "task_updated", "task": parent})
     return task
+
+
+@app.post("/tasks/{task_id}/transition")
+async def transition_task(task_id: str, body: TaskTransitionRequest):
+    before = db.get_task(task_id)
+    if not before:
+        raise HTTPException(404, "Task not found")
+
+    fields = body.fields.model_dump(exclude_unset=True) if body.fields else {}
+    fields.pop("create_handoff", None)
+
+    if str(fields.get("status") or "").strip() == "needs_changes":
+        fallback_dev = normalize_agent_key(
+            fields.get("dev_agent")
+            or before.get("dev_agent")
+            or before.get("assigned_agent")
+            or "developer"
+        )
+        if not str(fields.get("assigned_agent") or "").strip():
+            fields["assigned_agent"] = fallback_dev
+        if not str(fields.get("dev_agent") or "").strip():
+            fields["dev_agent"] = fallback_dev
+        fields.setdefault("assignee", None)
+
+    handoff_row = None
+    if body.handoff:
+        task_for_handoff = dict(before)
+        task_for_handoff.update({k: v for k, v in fields.items() if k != "create_handoff"})
+        payload, commit_hash, conclusion = _prepare_handoff(task_for_handoff, body.handoff)
+        handoff_row = {
+            "stage": str(body.handoff.stage or "").strip(),
+            "from_agent": str(body.handoff.from_agent or "").strip(),
+            "to_agent": body.handoff.to_agent,
+            "status_from": body.handoff.status_from,
+            "status_to": body.handoff.status_to,
+            "title": body.handoff.title,
+            "summary": body.handoff.summary,
+            "commit_hash": commit_hash,
+            "conclusion": conclusion,
+            "payload": payload,
+            "artifact_path": body.handoff.artifact_path,
+        }
+
+    log_row = None
+    if body.log:
+        log_row = {"agent": body.log.agent, "message": body.log.message}
+
+    result = db.transition_task(task_id, fields=fields, handoff=handoff_row, log=log_row)
+    if not result:
+        raise HTTPException(404, "Task not found")
+
+    task = result["task"]
+    await manager.broadcast({"event": "task_updated", "task": task})
+
+    handoff = result.get("handoff")
+    if handoff:
+        await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
+
+    log = result.get("log")
+    if log:
+        await broadcast_log(log)
+
+    if "status" in fields and task.get("parent_task_id"):
+        if db.check_parent_completion(task["parent_task_id"]):
+            parent = db.get_task(task["parent_task_id"])
+            if parent:
+                await manager.broadcast({"event": "task_updated", "task": parent})
+
+    return {
+        "task": task,
+        "handoff": _format_handoff(handoff) if handoff else None,
+        "log": log,
+    }
 
 
 @app.post("/tasks/{task_id}/cancel")

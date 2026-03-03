@@ -130,6 +130,35 @@ class BaseAgent:
         r.raise_for_status()
         return r.json()
 
+    async def transition_task(
+        self,
+        task_id: str,
+        *,
+        fields: dict | None = None,
+        handoff: dict | None = None,
+        log_message: str | None = None,
+        log_agent: str | None = None,
+    ) -> dict | None:
+        payload: dict = {}
+        if fields:
+            payload["fields"] = fields
+        if handoff:
+            handoff_payload = dict(handoff)
+            handoff_payload.setdefault("from_agent", self.name)
+            payload["handoff"] = handoff_payload
+        if log_message is not None:
+            payload["log"] = {
+                "agent": log_agent or self.name,
+                "message": log_message,
+            }
+        r = await self.http.post(f"/tasks/{task_id}/transition", json=payload)
+        if r.status_code == 404:
+            # Task may be deleted/cancelled while agent is still finishing up.
+            self._post_output_bg(f"ℹ 任务不存在，停止同步: {task_id}")
+            return None
+        r.raise_for_status()
+        return r.json()
+
     async def get_task(self, task_id: str) -> dict:
         r = await self.http.get(f"/tasks/{task_id}")
         r.raise_for_status()
@@ -410,7 +439,6 @@ class BaseAgent:
             await self.git("cat-file", "-e", f"{commit_hash}^{{commit}}", cwd=worktree)
         except Exception as e:
             msg = f"[系统错误] 交接引用的 commit 不存在：{commit_hash} ({e})"
-            await self.add_log(task_id, msg[:500])
             await self.add_alert(
                 summary="交接 commit 不存在",
                 task_id=task_id,
@@ -420,27 +448,29 @@ class BaseAgent:
                 stage=f"{self.name}_sync_failed",
                 metadata={"commit_hash": commit_hash, "source_branch": source_branch},
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage=f"{self.name}_sync_failed",
-                to_agent=self.name,
-                status_from=task.get("status"),
-                status_to="blocked",
-                title="交接同步失败",
-                summary=msg[:300],
-                commit_hash=commit_hash,
-                conclusion="交接 commit 丢失，任务阻塞",
-                payload={"reason": "missing_commit_object", "source_branch": source_branch},
-            )
-            await self.update_task(
-                task_id,
-                status="blocked",
-                assignee=None,
-                assigned_agent=self.name,
-                review_feedback=msg[:500],
-                feedback_source=self.name,
-                feedback_stage=f"{self.name}_sync_failed",
-                feedback_actor=self.name,
+                fields={
+                    "status": "blocked",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "review_feedback": msg[:500],
+                    "feedback_source": self.name,
+                    "feedback_stage": f"{self.name}_sync_failed",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": f"{self.name}_sync_failed",
+                    "to_agent": self.name,
+                    "status_from": task.get("status"),
+                    "status_to": "blocked",
+                    "title": "交接同步失败",
+                    "summary": msg[:300],
+                    "commit_hash": commit_hash,
+                    "conclusion": "交接 commit 丢失，任务阻塞",
+                    "payload": {"reason": "missing_commit_object", "source_branch": source_branch},
+                },
+                log_message=msg[:500],
             )
             return {"status": "failed", "reason": "missing_commit_object"}
 
@@ -462,7 +492,6 @@ class BaseAgent:
             except Exception:
                 pass
             msg = f"[系统错误] 交接 commit 同步失败：{commit_hash}（{strategy}）{err[:260]}"
-            await self.add_log(task_id, msg[:500])
             await self.add_alert(
                 summary="交接同步失败",
                 task_id=task_id,
@@ -476,32 +505,34 @@ class BaseAgent:
                     "strategy": strategy,
                 },
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage=f"{self.name}_sync_failed",
-                to_agent=self.name,
-                status_from=task.get("status"),
-                status_to="blocked",
-                title="交接同步失败",
-                summary=msg[:300],
-                commit_hash=commit_hash,
-                conclusion="交接同步冲突/失败，任务阻塞",
-                payload={
-                    "reason": "sync_failed",
-                    "strategy": strategy,
-                    "source_branch": source_branch,
+                fields={
+                    "status": "blocked",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "review_feedback": msg[:500],
+                    "feedback_source": self.name,
+                    "feedback_stage": f"{self.name}_sync_failed",
+                    "feedback_actor": self.name,
                 },
-                artifact_path=str(worktree),
-            )
-            await self.update_task(
-                task_id,
-                status="blocked",
-                assignee=None,
-                assigned_agent=self.name,
-                review_feedback=msg[:500],
-                feedback_source=self.name,
-                feedback_stage=f"{self.name}_sync_failed",
-                feedback_actor=self.name,
+                handoff={
+                    "stage": f"{self.name}_sync_failed",
+                    "to_agent": self.name,
+                    "status_from": task.get("status"),
+                    "status_to": "blocked",
+                    "title": "交接同步失败",
+                    "summary": msg[:300],
+                    "commit_hash": commit_hash,
+                    "conclusion": "交接同步冲突/失败，任务阻塞",
+                    "payload": {
+                        "reason": "sync_failed",
+                        "strategy": strategy,
+                        "source_branch": source_branch,
+                    },
+                    "artifact_path": str(worktree),
+                },
+                log_message=msg[:500],
             )
             return {"status": "failed", "reason": "sync_failed"}
 

@@ -723,8 +723,8 @@ def list_tasks(project_id: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def update_task(task_id: str, **fields) -> dict | None:
-    conn = get_conn()
+def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
+    fields = dict(fields or {})
     # Control/meta fields used by API/agents but not persisted directly.
     feedback_source = str(fields.pop("feedback_source", "") or "").strip() or "system"
     feedback_stage = str(fields.pop("feedback_stage", "") or "").strip()
@@ -736,7 +736,6 @@ def update_task(task_id: str, **fields) -> dict | None:
         (task_id,),
     ).fetchone()
     if not current:
-        conn.close()
         return None
     # Canceled tasks are immutable by normal updates so late agent writes
     # cannot resurrect them.
@@ -744,13 +743,11 @@ def update_task(task_id: str, **fields) -> dict | None:
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
         ).fetchone()
-        conn.close()
         return dict(row) if row else None
     if not fields:
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
         ).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     target_status = str(fields.get("status") or current["status"] or "").strip()
@@ -803,12 +800,20 @@ def update_task(task_id: str, **fields) -> dict | None:
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
     conn.execute(f"UPDATE tasks SET {set_clause} WHERE id=?", values)
-    conn.commit()
     row = conn.execute(
         _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
     ).fetchone()
-    conn.close()
     return dict(row) if row else None
+
+
+def update_task(task_id: str, **fields) -> dict | None:
+    conn = get_conn()
+    try:
+        row = _update_task_in_conn(conn, task_id, **fields)
+        conn.commit()
+        return row
+    finally:
+        conn.close()
 
 
 def get_tasks_by_status(status: str, project_id: str | None = None) -> list[dict]:
@@ -996,8 +1001,7 @@ def recover_stale_tasks_for_agent(agent_key: str) -> list[dict]:
     return changed
 
 
-def add_log(task_id: str, agent: str, message: str) -> dict:
-    conn = get_conn()
+def _add_log_in_conn(conn, task_id: str, agent: str, message: str) -> dict:
     now = _now()
     cur = conn.execute(
         "INSERT INTO logs (task_id, agent, message, created_at) VALUES (?,?,?,?)",
@@ -1005,21 +1009,21 @@ def add_log(task_id: str, agent: str, message: str) -> dict:
     )
     log = {"id": cur.lastrowid, "task_id": task_id, "agent": agent,
            "message": message, "created_at": now}
-    conn.commit()
-    conn.close()
     return log
 
 
-def get_logs(task_id: str) -> list[dict]:
+def add_log(task_id: str, agent: str, message: str) -> dict:
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM logs WHERE task_id=? ORDER BY created_at ASC", (task_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        log = _add_log_in_conn(conn, task_id, agent, message)
+        conn.commit()
+        return log
+    finally:
+        conn.close()
 
 
-def add_handoff(
+def _add_handoff_in_conn(
+    conn,
     task_id: str,
     stage: str,
     from_agent: str,
@@ -1033,7 +1037,6 @@ def add_handoff(
     payload: dict | None = None,
     artifact_path: str | None = None,
 ) -> dict:
-    conn = get_conn()
     now = _now()
     payload_text = json.dumps(payload or {}, ensure_ascii=False)
     cur = conn.execute(
@@ -1058,12 +1061,10 @@ def add_handoff(
             now,
         ),
     )
-    conn.commit()
     row = conn.execute(
         "SELECT * FROM task_handoffs WHERE id=?",
         (cur.lastrowid,),
     ).fetchone()
-    conn.close()
     return dict(row) if row else {
         "id": cur.lastrowid,
         "task_id": task_id,
@@ -1080,6 +1081,109 @@ def add_handoff(
         "artifact_path": artifact_path,
         "created_at": now,
     }
+
+
+def add_handoff(
+    task_id: str,
+    stage: str,
+    from_agent: str,
+    to_agent: str | None = None,
+    status_from: str | None = None,
+    status_to: str | None = None,
+    title: str = "",
+    summary: str = "",
+    commit_hash: str | None = None,
+    conclusion: str | None = None,
+    payload: dict | None = None,
+    artifact_path: str | None = None,
+) -> dict:
+    conn = get_conn()
+    try:
+        row = _add_handoff_in_conn(
+            conn,
+            task_id=task_id,
+            stage=stage,
+            from_agent=from_agent,
+            to_agent=to_agent,
+            status_from=status_from,
+            status_to=status_to,
+            title=title,
+            summary=summary,
+            commit_hash=commit_hash,
+            conclusion=conclusion,
+            payload=payload,
+            artifact_path=artifact_path,
+        )
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
+def transition_task(
+    task_id: str,
+    fields: dict | None = None,
+    handoff: dict | None = None,
+    log: dict | None = None,
+) -> dict | None:
+    """
+    Atomically apply task update + optional handoff + optional log in one tx.
+    Returns {"task": ..., "handoff": ..., "log": ...} or None when task missing.
+    """
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        update_fields = dict(fields or {})
+        task = _update_task_in_conn(conn, task_id, **update_fields)
+        if not task:
+            conn.rollback()
+            return None
+
+        is_cancelled = (
+            str(task.get("status") or "").strip().lower() == CANCELLED_STATUS
+            or int(task.get("archived") or 0) == 1
+        )
+        created_handoff = None
+        created_log = None
+        if not is_cancelled and handoff:
+            created_handoff = _add_handoff_in_conn(
+                conn,
+                task_id=task_id,
+                stage=str(handoff.get("stage") or "").strip(),
+                from_agent=str(handoff.get("from_agent") or "").strip(),
+                to_agent=handoff.get("to_agent"),
+                status_from=handoff.get("status_from"),
+                status_to=handoff.get("status_to"),
+                title=str(handoff.get("title") or ""),
+                summary=str(handoff.get("summary") or ""),
+                commit_hash=handoff.get("commit_hash"),
+                conclusion=handoff.get("conclusion"),
+                payload=handoff.get("payload") if isinstance(handoff.get("payload"), dict) else {},
+                artifact_path=handoff.get("artifact_path"),
+            )
+        if not is_cancelled and log:
+            created_log = _add_log_in_conn(
+                conn,
+                task_id=task_id,
+                agent=str(log.get("agent") or "system").strip() or "system",
+                message=str(log.get("message") or ""),
+            )
+        conn.commit()
+        return {"task": task, "handoff": created_handoff, "log": created_log}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_logs(task_id: str) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM logs WHERE task_id=? ORDER BY created_at ASC", (task_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_handoffs(task_id: str) -> list[dict]:
