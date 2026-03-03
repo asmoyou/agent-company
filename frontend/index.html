@@ -706,7 +706,6 @@ let projects = {};
 let agentTypes = {};          // key → agent_type record
 let currentProjectId = null;
 let currentTaskId = null;
-let currentBlockedRetryAction = null;
 let ws = null;
 let wsPingTimer = null;
 let terminalsVisible = true;
@@ -1308,12 +1307,7 @@ async function openPanel(id) {
 
   // Retry button for blocked
   const retryWrap = document.getElementById("panel-retry-blocked-btn");
-  const retryLabel = document.getElementById("panel-retry-blocked-label");
-  currentBlockedRetryAction = getBlockedRetryAction(task);
-  retryWrap.classList.toggle("hidden", !currentBlockedRetryAction);
-  if (retryLabel && currentBlockedRetryAction) {
-    retryLabel.textContent = currentBlockedRetryAction.label;
-  }
+  retryWrap.classList.toggle("hidden", task.status !== "blocked");
 
   // Cancel button: hide for completed/cancelled tasks
   const cancelBtn = document.getElementById("panel-cancel-btn");
@@ -1542,7 +1536,8 @@ function renderHandoffs(handoffs) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 async function acceptTask() {
   if (!currentTaskId) return;
-  await patchTask(currentTaskId,{status:"completed"});
+  const updated = await taskAction(currentTaskId, "accept");
+  if (!updated) return;
   document.getElementById("panel-acceptance").classList.add("hidden");
   document.getElementById("panel-archive-btn").classList.remove("hidden");
 }
@@ -1551,76 +1546,26 @@ function showRejectInput() {
 }
 async function rejectTask() {
   if (!currentTaskId) return;
-  const task = tasks[currentTaskId];
-  if (!task) return;
   const fb=document.getElementById("reject-feedback").value.trim();
   if (!fb){alert("请填写修改意见");return;}
-  const devAgent = String(task.dev_agent || task.assigned_agent || "developer").trim() || "developer";
-  const updated = await patchTask(currentTaskId,{
-    status:"needs_changes",
-    assignee:null,
-    assigned_agent:devAgent,
-    dev_agent:devAgent,
-    review_feedback:fb,
-    feedback_source:"user",
-    feedback_stage:"user_to_dev",
-    feedback_actor:"user",
-    create_handoff:true,
-  });
+  const updated = await taskAction(currentTaskId, "reject", {feedback: fb});
   if (updated) closePanel();
-}
-function getBlockedRetryAction(task) {
-  if (!task || task.status !== "blocked") return null;
-  const owner = String(task.assigned_agent || "").trim().toLowerCase();
-  const fb = String(task.review_feedback || "");
-
-  if (owner === "reviewer" || fb.includes("[review_retry=") || fb.includes("审查器")) {
-    return {
-      status: "in_review",
-      assigned_agent: "reviewer",
-      label: "♻ 重试审查（恢复到 in_review）",
-    };
-  }
-  if (owner === "leader") {
-    const devAgent = String(task.dev_agent || "").trim();
-    const resumeAssignee = (devAgent && devAgent.toLowerCase() !== "leader") ? devAgent : null;
-    const forceDecompose = fb.includes(".leader-force-decompose.json") || fb.includes("leader_force_decompose");
-    if (forceDecompose) {
-      return {
-        status: "decompose",
-        assigned_agent: resumeAssignee,
-        label: "♻ 重试分解（恢复到 decompose）",
-      };
-    }
-    return {
-      status: "triage",
-      assigned_agent: resumeAssignee,
-      label: "♻ 重试评估（恢复到 triage）",
-    };
-  }
-  return null;
 }
 async function retryBlockedCurrentTask() {
   if (!currentTaskId) return;
-  const task = tasks[currentTaskId];
-  const action = currentBlockedRetryAction || getBlockedRetryAction(task);
-  if (!action) return;
-  await patchTask(currentTaskId, {
-    status: action.status,
-    assigned_agent: action.assigned_agent,
-    assignee: null,
-  });
+  await taskAction(currentTaskId, "retry_blocked");
 }
 async function archiveCurrentTask() {
   if (!currentTaskId) return;
-  await patchTask(currentTaskId,{archived:1});
+  const updated = await taskAction(currentTaskId, "archive");
+  if (!updated) return;
   closePanel();
   refreshBoard();
 }
 async function decomposeCurrentTask() {
   if (!currentTaskId) return;
   if (!confirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？")) return;
-  await patchTask(currentTaskId, {status: "decompose"});
+  await taskAction(currentTaskId, "decompose");
 }
 async function cancelCurrentTask() {
   if (!currentTaskId) return;
@@ -1661,9 +1606,10 @@ function renderSubtaskList(parentId) {
     </div>`;
   }).join("");
 }
-async function patchTask(id,fields) {
-  const res=await fetch(`${API}/tasks/${id}`,{
-    method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});
+async function taskAction(id, action, extra = {}) {
+  const res=await fetch(`${API}/tasks/${id}/actions`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action, ...extra})});
   if (!res.ok) {
     alert("操作失败: "+await res.text());
     return null;
