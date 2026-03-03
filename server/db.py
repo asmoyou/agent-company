@@ -31,7 +31,7 @@ DEVELOPER_PROMPT_DEFAULT = (
     "1. **所有成果必须写入文件**，不要只在终端打印输出\n"
     "   - 代码任务 → 创建对应语言的源文件（.py / .ts / .go 等）\n"
     "   - 文档/方案任务 → 创建 `.md` 文件，把完整内容写入\n"
-    "   - 至少创建一个文件，否则任务无法通过审查\n\n"
+    "   - 目标是形成可审查的交付物；若本轮无需新增文件，需在交接中写明依据\n\n"
     "2. **质量标准**\n"
     "   - 代码需有适当注释，边界情况需处理\n"
     "   - 文档需完整、结构清晰\n\n"
@@ -432,6 +432,17 @@ def _seed_builtin_agents(conn):
              AND INSTR(prompt, '所有成果必须写入文件') > 0
              AND INSTR(prompt, '分支与交接约束') = 0""",
         (BUILTIN_PROMPTS["developer"],),
+    )
+    # Migrate strict built-in developer line that required creating at least one file.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=REPLACE(
+                prompt,
+                '   - 至少创建一个文件，否则任务无法通过审查',
+                '   - 目标是形成可审查的交付物；若本轮无需新增文件，需在交接中写明依据'
+           )
+           WHERE key='developer' AND is_builtin=1
+             AND INSTR(prompt, '至少创建一个文件，否则任务无法通过审查') > 0""",
     )
     # Migrate outdated built-in manager prompt that did not require exact commit_hash merge.
     conn.execute(

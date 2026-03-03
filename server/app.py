@@ -615,6 +615,7 @@ class TaskTransitionRequest(BaseModel):
 class TaskActionRequest(BaseModel):
     action: Literal["accept", "reject", "retry_blocked", "decompose", "archive"]
     feedback: str | None = None
+    force: bool = False
 
 
 COMMIT_REQUIRED_STAGES = {
@@ -723,9 +724,11 @@ async def _apply_transition_and_broadcast(
     log_row: dict | None = None,
     expected_run_id: str | None = None,
     expected_lease_token: str | None = None,
+    skip_status_validation: bool = False,
 ) -> dict:
     normalized_fields = _normalize_transition_fields(before, fields)
-    _validate_status_transition(before, normalized_fields)
+    if not skip_status_validation:
+        _validate_status_transition(before, normalized_fields)
 
     try:
         result = db.transition_task(
@@ -816,7 +819,6 @@ def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None,
     raw_commit = (
         str(body.commit_hash or "").strip()
         or str(payload.get("commit_hash") or "").strip()
-        or str(task.get("commit_hash") or "").strip()
         or (related_candidates[0] if related_candidates else "")
     )
     commit_hash = raw_commit[:120] if raw_commit else None
@@ -1200,9 +1202,12 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
     status = _norm_status(before.get("status"))
     archived = int(before.get("archived") or 0)
     action = body.action
+    force_action = bool(body.force)
+    if force_action and not _is_admin(user):
+        raise HTTPException(403, "force 模式仅管理员可用")
 
     if action == "archive":
-        if status != "completed":
+        if status != "completed" and not force_action:
             raise HTTPException(409, f"仅 completed 任务可归档，当前为 {status}")
         if archived == 1:
             return {"task": before, "handoff": None, "log": None, "action": action}
@@ -1214,7 +1219,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
         await broadcast_log(log)
         return {"task": task, "handoff": None, "log": log, "action": action}
 
-    if status == "cancelled" or archived == 1:
+    if (status == "cancelled" or archived == 1) and not force_action:
         raise HTTPException(409, "任务已取消/归档，不能执行该动作")
 
     fields: dict = {}
@@ -1222,7 +1227,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
     log_row: dict | None = None
 
     if action == "accept":
-        if status != "pending_acceptance":
+        if status != "pending_acceptance" and not force_action:
             raise HTTPException(409, f"仅 pending_acceptance 可验收通过，当前为 {status}")
         fields = {"status": "completed", "assignee": None}
         handoff_obj = HandoffCreate(
@@ -1238,7 +1243,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
         )
         log_row = {"agent": "user", "message": "✅ 用户验收通过，任务完成"}
     elif action == "reject":
-        if status != "pending_acceptance":
+        if status != "pending_acceptance" and not force_action:
             raise HTTPException(409, f"仅 pending_acceptance 可退回修改，当前为 {status}")
         feedback = str(body.feedback or "").strip()
         if not feedback:
@@ -1275,7 +1280,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
         )
         log_row = {"agent": "user", "message": f"↩ 人工退回：{feedback[:300]}"}
     elif action == "retry_blocked":
-        if status != "blocked":
+        if status != "blocked" and not force_action:
             raise HTTPException(409, f"仅 blocked 可重试，当前为 {status}")
         target = _resolve_blocked_retry(before)
         if not target:
@@ -1301,7 +1306,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
         )
         log_row = {"agent": "user", "message": f"♻ 人工重试：{label}（{to_status}）"}
     elif action == "decompose":
-        if status != "todo":
+        if status != "todo" and not force_action:
             raise HTTPException(409, f"仅 todo 可转为分解，当前为 {status}")
         if before.get("parent_task_id"):
             raise HTTPException(409, "子任务不支持手动转分解")
@@ -1331,8 +1336,10 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
         fields=normalized_fields,
         handoff_row=handoff_row,
         log_row=log_row,
+        skip_status_validation=force_action,
     )
     result["action"] = action
+    result["forced"] = force_action
     return result
 
 
@@ -1456,11 +1463,12 @@ async def add_handoff(task_id: str, body: HandoffCreate):
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    has_fence = bool(str(body.expected_run_id or "").strip() and str(body.expected_lease_token or "").strip())
     ok, reason = db.validate_task_lease(
         task_id=task_id,
         expected_run_id=body.expected_run_id,
         expected_lease_token=body.expected_lease_token,
-        strict_if_active=True,
+        strict_if_active=has_fence,
     )
     if not ok:
         if reason == "task_not_found":

@@ -259,6 +259,52 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(bad.status_code, 409)
 
+    def test_force_action_allows_admin_override_status_gate(self):
+        task = self._create_task(status="todo")
+        res = self.client.post(
+            f"/tasks/{task['id']}/actions",
+            json={"action": "accept", "force": True},
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "completed")
+        self.assertTrue(data.get("forced"))
+
+    def test_add_handoff_without_fence_allows_active_lease(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claim = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+        )
+        self.assertEqual(claim.status_code, 200)
+        claimed = claim.json()["task"]
+        self.assertEqual(claimed["status"], "in_progress")
+
+        res = self.client.post(
+            f"/tasks/{task['id']}/handoffs",
+            json={
+                "stage": "manual_repair_note",
+                "from_agent": "system",
+                "to_agent": "developer",
+                "status_from": "in_progress",
+                "status_to": "in_progress",
+                "title": "人工记录",
+                "summary": "无需租约 fence 也允许补录交接说明",
+                "conclusion": "交接补录完成",
+                "payload": {"note": "recovery"},
+            },
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["stage"], "manual_repair_note")
+
     def test_task_files_branch_falls_back_to_assignee(self):
         task = self._create_task(status="in_progress")
         db.update_task(

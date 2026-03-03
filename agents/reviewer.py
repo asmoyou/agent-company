@@ -41,6 +41,7 @@ REVIEW_DECISION_SCHEMA = {
 
 REVIEWER_SYSTEM_RETRY_MAX = int(os.getenv("REVIEWER_SYSTEM_RETRY_MAX", "3"))
 REVIEWER_SYSTEM_RETRY_BACKOFF_SECS = int(os.getenv("REVIEWER_SYSTEM_RETRY_BACKOFF_SECS", "20"))
+REVIEW_DIFF_PREVIEW_CHARS = int(os.getenv("REVIEW_DIFF_PREVIEW_CHARS", "12000"))
 
 
 class ReviewerAgent(BaseAgent):
@@ -309,6 +310,25 @@ class ReviewerAgent(BaseAgent):
 
         await self.add_log(task_id, f"获取到 commit diff ({len(diff)} 字符): {commit_hash}")
 
+        diff_file = decision_dir / f"{task_id}.review.patch"
+        try:
+            diff_file.write_text(diff, encoding="utf-8")
+            await self.add_log(task_id, f"已写入完整 diff 文件: {diff_file}")
+        except Exception as e:
+            await self.add_log(task_id, f"写入完整 diff 文件失败，回退内联摘要: {e}")
+            diff_file = None
+
+        preview_chars = max(1000, int(REVIEW_DIFF_PREVIEW_CHARS))
+        diff_preview = diff[:preview_chars]
+        diff_for_prompt = diff_preview
+        if diff_file is not None:
+            diff_for_prompt = (
+                f"[完整 diff 文件] {diff_file}\n"
+                f"[diff 总字符数] {len(diff)}\n"
+                "请基于该文件进行完整审查，不要仅依赖以下预览。\n\n"
+                f"{diff_preview}"
+            )
+
         # ── Build prompt from template ────────────────────────────────────────
         template = (self.prompt_template or "").strip()
         if template:
@@ -318,15 +338,24 @@ class ReviewerAgent(BaseAgent):
                     task_description=task["description"] or "(无额外描述)",
                     commit_hash=commit_hash,
                     dev_agent=dev_agent,
-                    diff=diff[:8000],
+                    diff=diff_for_prompt,
+                    diff_file=str(diff_file) if diff_file is not None else "",
+                    diff_preview=diff_preview,
+                    diff_total_chars=len(diff),
                 )
             except Exception:
                 prompt = template
         else:
             prompt = (
-                f"审查任务「{task['title']}」的代码变更（commit={commit_hash}）：\n\n```\n{diff[:8000]}\n```\n\n"
+                f"审查任务「{task['title']}」的代码变更（commit={commit_hash}）：\n\n```\n{diff_for_prompt}\n```\n\n"
                 "输出 JSON 决定：{\"decision\":\"approve\",\"comment\":\"...\"} "
                 "或 {\"decision\":\"request_changes\",\"feedback\":\"...\"}"
+            )
+        if diff_file is not None:
+            prompt += (
+                "\n\n## 审查完整性要求\n"
+                f"- 完整 diff 文件位于：{diff_file}\n"
+                "- 必须基于完整 diff 给出结论，不可只依据预览片段。"
             )
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:

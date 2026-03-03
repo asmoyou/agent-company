@@ -126,68 +126,39 @@ class GenericAgent(BaseAgent):
             await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
         if diff.strip():
-            try:
-                await self.git(
-                    "-c", "user.email=agent@opc-demo.local",
-                    "-c", "user.name=OPC Agent",
-                    "commit", "-m", f"{self.name}: {task['title'][:72]}\n\nTask ID: {task_id}",
-                    cwd=worktree_dev,
-                )
-                commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
-                await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
-                update_fields = {
-                    "status": self.next_status,
-                    "assignee": None,
-                    "commit_hash": commit_hash,
-                }
-                if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
-                    return
-                if self.next_status == "in_review":
-                    update_fields["assigned_agent"] = self.name
-                    update_fields["dev_agent"] = self.name
-                await self.transition_task(
-                    task_id,
-                    fields=update_fields,
-                    handoff={
-                        "stage": f"{self.name}_handoff",
-                        "to_agent": (update_fields.get("assigned_agent") or self.next_status),
-                        "status_from": prev_status,
-                        "status_to": self.next_status,
-                        "title": f"{self._display_name} 交接",
-                        "summary": f"已提交 commit {commit_hash}，推进到 {self.next_status}",
-                        "commit_hash": commit_hash,
-                        "conclusion": f"{self._display_name} 完成，推进到 {self.next_status}",
-                        "payload": {"commit_hash": commit_hash, "diff_stat": diff.strip(), "source_branch": branch},
-                        "artifact_path": str(worktree_dev),
-                    },
-                )
+            await self.add_log(
+                task_id,
+                "检测到未提交文件变更；外围不会自动提交，请在 CLI 内完成 commit 后再交接。",
+            )
+            if await self.stop_if_task_cancelled(task_id, "检测到未提交变更回退前"):
                 return
-            except Exception as e:
-                await self.add_log(task_id, f"提交失败: {e}")
-                await self.add_alert(
-                    summary=f"{self._display_name} 提交失败",
-                    task_id=task_id,
-                    message=str(e),
-                    kind="error",
-                    code=f"{self.name}_commit_failed",
-                    stage=f"{self.name}_failed",
-                )
-                await self.transition_task(
-                    task_id,
-                    fields={"status": prev_status, "assignee": None},
-                    handoff={
-                        "stage": f"{self.name}_failed",
-                        "to_agent": self.name,
-                        "status_from": prev_status,
-                        "status_to": prev_status,
-                        "title": f"{self._display_name} 提交失败",
-                        "summary": str(e)[:300],
-                        "conclusion": f"{self._display_name} 提交失败，任务回退",
-                        "payload": {"error": str(e)},
+            update_fields = {"status": prev_status, "assignee": None}
+            if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+                update_fields["assigned_agent"] = self.name
+                update_fields["dev_agent"] = self.name
+            await self.transition_task(
+                task_id,
+                fields=update_fields,
+                handoff={
+                    "stage": f"{self.name}_commit_required",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": prev_status,
+                    "title": f"{self._display_name} 需在 CLI 内提交",
+                    "summary": "检测到未提交改动，未自动提交，保持当前状态",
+                    "conclusion": "请在 CLI 内完成提交后再交接",
+                    "payload": {
+                        "has_commit": False,
+                        "requires_cli_commit": True,
+                        "source_branch": branch,
+                        "diff_stat": diff.strip()[:1200],
+                        "head_changed": cli_created_commit,
                     },
-                    log_message=f"提交失败: {e}",
-                )
-                return
+                    "artifact_path": str(worktree_dev),
+                },
+                log_message=f"检测到未提交改动，保持 {prev_status}",
+            )
+            return
 
         if cli_created_commit and head_after:
             commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
