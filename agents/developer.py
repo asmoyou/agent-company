@@ -95,18 +95,20 @@ class DeveloperAgent(BaseAgent):
                 stage="developer_failed",
                 metadata={"exit_code": returncode, "rollback_to": prev_status},
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="developer_failed",
-                to_agent=self.name,
-                status_from=prev_status,
-                status_to=prev_status,
-                title="开发执行失败",
-                summary=f"CLI 执行失败（exit={returncode}），已退回 {prev_status}",
-                conclusion=f"开发执行失败，回退到 {prev_status}",
-                payload={"exit_code": returncode},
+                fields={"status": prev_status, "assignee": None},
+                handoff={
+                    "stage": "developer_failed",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": prev_status,
+                    "title": "开发执行失败",
+                    "summary": f"CLI 执行失败（exit={returncode}），已退回 {prev_status}",
+                    "conclusion": f"开发执行失败，回退到 {prev_status}",
+                    "payload": {"exit_code": returncode},
+                },
             )
-            await self.update_task(task_id, status=prev_status, assignee=None)
             return
         if output.strip():
             await self.add_log(task_id, f"CLI 输出摘要:\n{output[:400]}")
@@ -130,27 +132,28 @@ class DeveloperAgent(BaseAgent):
             diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
 
         if not diff.strip():
-            await self.add_log(task_id, "无文件变更，提交审查")
-            await self.add_handoff(
-                task_id,
-                stage="dev_to_review",
-                to_agent="reviewer",
-                status_from=prev_status,
-                status_to="in_review",
-                title="开发交接审查（无提交）",
-                summary="本轮无文件变更，推进到审查",
-                conclusion="无代码变更，直接交接审查",
-                payload={"has_commit": False, "source_branch": branch},
-                artifact_path=str(worktree_dev),
-            )
             if await self.stop_if_task_cancelled(task_id, "推进审查前"):
                 return
-            await self.update_task(
+            await self.transition_task(
                 task_id,
-                status="in_review",
-                assignee=None,
-                assigned_agent=self.name,
-                dev_agent=self.name,
+                fields={
+                    "status": "in_review",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "dev_agent": self.name,
+                },
+                handoff={
+                    "stage": "dev_to_review",
+                    "to_agent": "reviewer",
+                    "status_from": prev_status,
+                    "status_to": "in_review",
+                    "title": "开发交接审查（无提交）",
+                    "summary": "本轮无文件变更，推进到审查",
+                    "conclusion": "无代码变更，直接交接审查",
+                    "payload": {"has_commit": False, "source_branch": branch},
+                    "artifact_path": str(worktree_dev),
+                },
+                log_message="无文件变更，提交审查",
             )
             return
 
@@ -163,7 +166,6 @@ class DeveloperAgent(BaseAgent):
             )
             commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
         except Exception as e:
-            await self.add_log(task_id, f"提交失败: {e}")
             await self.add_alert(
                 summary="开发提交失败",
                 task_id=task_id,
@@ -172,18 +174,21 @@ class DeveloperAgent(BaseAgent):
                 code="developer_commit_failed",
                 stage="developer_failed",
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="developer_failed",
-                to_agent=self.name,
-                status_from=prev_status,
-                status_to="todo",
-                title="开发提交失败",
-                summary=f"提交失败，任务退回 todo：{e}",
-                conclusion="提交失败，任务回退到 todo",
-                payload={"error": str(e)},
+                fields={"status": "todo", "assignee": None},
+                handoff={
+                    "stage": "developer_failed",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": "todo",
+                    "title": "开发提交失败",
+                    "summary": f"提交失败，任务退回 todo：{e}",
+                    "conclusion": "提交失败，任务回退到 todo",
+                    "payload": {"error": str(e)},
+                },
+                log_message=f"提交失败: {e}",
             )
-            await self.update_task(task_id, status="todo", assignee=None)
             return
 
         await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
@@ -191,18 +196,40 @@ class DeveloperAgent(BaseAgent):
             return
 
         # Commit is already done locally. If task update fails transiently,
-        # retry status sync instead of incorrectly rolling the task back to todo.
+        # retry state+handoff sync atomically instead of splitting writes.
         update_error = None
         for i in range(1, 7):
             try:
-                await self.update_task(
+                result = await self.transition_task(
                     task_id,
-                    status="in_review",
-                    assignee=None,
-                    assigned_agent=self.name,
-                    dev_agent=self.name,
-                    commit_hash=commit_hash,
+                    fields={
+                        "status": "in_review",
+                        "assignee": None,
+                        "assigned_agent": self.name,
+                        "dev_agent": self.name,
+                        "commit_hash": commit_hash,
+                    },
+                    handoff={
+                        "stage": "dev_to_review",
+                        "to_agent": "reviewer",
+                        "status_from": prev_status,
+                        "status_to": "in_review",
+                        "title": "开发交接审查",
+                        "summary": f"已提交 commit {commit_hash}，等待审查",
+                        "commit_hash": commit_hash,
+                        "conclusion": "开发完成，等待审查结论",
+                        "payload": {
+                            "commit_hash": commit_hash,
+                            "diff_stat": diff.strip(),
+                            "source_branch": branch,
+                        },
+                        "artifact_path": str(worktree_dev),
+                    },
                 )
+                if result is None:
+                    # Task was deleted/cancelled while syncing post-commit state.
+                    await self.stop_if_task_cancelled(task_id, "提交后同步状态")
+                    return
                 update_error = None
                 break
             except Exception as e:
@@ -230,24 +257,6 @@ class DeveloperAgent(BaseAgent):
                 metadata={"commit_hash": commit_hash},
             )
             return
-
-        await self.add_handoff(
-            task_id,
-            stage="dev_to_review",
-            to_agent="reviewer",
-            status_from=prev_status,
-            status_to="in_review",
-            title="开发交接审查",
-            summary=f"已提交 commit {commit_hash}，等待审查",
-            commit_hash=commit_hash,
-            conclusion="开发完成，等待审查结论",
-            payload={
-                "commit_hash": commit_hash,
-                "diff_stat": diff.strip(),
-                "source_branch": branch,
-            },
-            artifact_path=str(worktree_dev),
-        )
 
 
 if __name__ == "__main__":

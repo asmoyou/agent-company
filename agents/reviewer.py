@@ -98,27 +98,28 @@ class ReviewerAgent(BaseAgent):
             out_summary = summarize_output(output)
             if out_summary:
                 await self.add_log(task_id, f"错误输出摘要:\n{out_summary}")
-            await self.update_task(
+            await self.transition_task(
                 task_id,
-                status="in_review",
-                assignee=None,
-                assigned_agent=self.name,
-                dev_agent=dev_agent,
-                review_feedback=feedback,
-                feedback_source=self.name,
-                feedback_stage="review_system_retry",
-                feedback_actor=self.name,
-            )
-            await self.add_handoff(
-                task_id,
-                stage="review_system_retry",
-                to_agent=self.name,
-                status_from="in_review",
-                status_to="in_review",
-                title="审查系统错误重试",
-                summary=feedback,
-                conclusion="审查器临时错误，自动重试中",
-                payload={"retry": next_retry, "max": REVIEWER_SYSTEM_RETRY_MAX, "reason": reason},
+                fields={
+                    "status": "in_review",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback,
+                    "feedback_source": self.name,
+                    "feedback_stage": "review_system_retry",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "review_system_retry",
+                    "to_agent": self.name,
+                    "status_from": "in_review",
+                    "status_to": "in_review",
+                    "title": "审查系统错误重试",
+                    "summary": feedback,
+                    "conclusion": "审查器临时错误，自动重试中",
+                    "payload": {"retry": next_retry, "max": REVIEWER_SYSTEM_RETRY_MAX, "reason": reason},
+                },
             )
             # Back off before next poll cycle to avoid rapid retry loops.
             await asyncio.sleep(REVIEWER_SYSTEM_RETRY_BACKOFF_SECS)
@@ -132,16 +133,28 @@ class ReviewerAgent(BaseAgent):
         out_summary = summarize_output(output)
         if out_summary:
             await self.add_log(task_id, f"错误输出摘要:\n{out_summary}")
-        await self.update_task(
+        await self.transition_task(
             task_id,
-            status="blocked",
-            assignee=None,
-            assigned_agent=self.name,
-            dev_agent=dev_agent,
-            review_feedback=feedback,
-            feedback_source=self.name,
-            feedback_stage="review_system_failed",
-            feedback_actor=self.name,
+            fields={
+                "status": "blocked",
+                "assignee": None,
+                "assigned_agent": self.name,
+                "dev_agent": dev_agent,
+                "review_feedback": feedback,
+                "feedback_source": self.name,
+                "feedback_stage": "review_system_failed",
+                "feedback_actor": self.name,
+            },
+            handoff={
+                "stage": "review_system_failed",
+                "to_agent": self.name,
+                "status_from": "in_review",
+                "status_to": "blocked",
+                "title": "审查系统错误终止",
+                "summary": feedback,
+                "conclusion": "审查流程阻塞，等待环境修复后重试",
+                "payload": {"reason": reason},
+            },
         )
         await self.add_alert(
             summary="审查器执行失败，任务已阻塞",
@@ -151,17 +164,6 @@ class ReviewerAgent(BaseAgent):
             code="reviewer_system_failed",
             stage="review_system_failed",
             metadata={"reason": reason},
-        )
-        await self.add_handoff(
-            task_id,
-            stage="review_system_failed",
-            to_agent=self.name,
-            status_from="in_review",
-            status_to="blocked",
-            title="审查系统错误终止",
-            summary=feedback,
-            conclusion="审查流程阻塞，等待环境修复后重试",
-            payload={"reason": reason},
         )
 
     async def get_diff_for_commit(self, worktree_dev, commit_hash: str, repo_root=None) -> str:
@@ -198,17 +200,29 @@ class ReviewerAgent(BaseAgent):
 
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法进行精确审查。请 developer 重新提交。"
-            await self.add_log(task_id, feedback)
-            await self.update_task(
+            await self.transition_task(
                 task_id,
-                status="needs_changes",
-                assignee=None,
-                assigned_agent=dev_agent,
-                dev_agent=dev_agent,
-                review_feedback=feedback,
-                feedback_source=self.name,
-                feedback_stage="review_to_dev",
-                feedback_actor=self.name,
+                fields={
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": dev_agent,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback,
+                    "feedback_source": self.name,
+                    "feedback_stage": "review_to_dev",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "review_to_dev",
+                    "to_agent": dev_agent,
+                    "status_from": "in_review",
+                    "status_to": "needs_changes",
+                    "title": "审查退回开发",
+                    "summary": feedback,
+                    "conclusion": "缺少可审查 commit，退回开发重提",
+                    "payload": {"reason": "missing_commit_hash", "has_commit": False},
+                },
+                log_message=feedback,
             )
             await self.add_alert(
                 summary="审查前置条件缺失：commit_hash",
@@ -217,17 +231,6 @@ class ReviewerAgent(BaseAgent):
                 kind="error",
                 code="reviewer_missing_commit_hash",
                 stage="review_to_dev",
-            )
-            await self.add_handoff(
-                task_id,
-                stage="review_to_dev",
-                to_agent=dev_agent,
-                status_from="in_review",
-                status_to="needs_changes",
-                title="审查退回开发",
-                summary=feedback,
-                conclusion="缺少可审查 commit，退回开发重提",
-                payload={"reason": "missing_commit_hash", "has_commit": False},
             )
             return
 
@@ -248,17 +251,30 @@ class ReviewerAgent(BaseAgent):
             diff = await self.get_diff_for_commit(worktree_dev, commit_hash, repo_root=proj_root)
         except Exception as e:
             feedback = f"[系统错误] 无法读取目标 commit={commit_hash}：{e}"
-            await self.add_log(task_id, feedback[:500])
-            await self.update_task(
+            await self.transition_task(
                 task_id,
-                status="needs_changes",
-                assignee=None,
-                assigned_agent=dev_agent,
-                dev_agent=dev_agent,
-                review_feedback=feedback[:500],
-                feedback_source=self.name,
-                feedback_stage="review_to_dev",
-                feedback_actor=self.name,
+                fields={
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": dev_agent,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback[:500],
+                    "feedback_source": self.name,
+                    "feedback_stage": "review_to_dev",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "review_to_dev",
+                    "to_agent": dev_agent,
+                    "status_from": "in_review",
+                    "status_to": "needs_changes",
+                    "title": "审查退回开发",
+                    "summary": feedback[:300],
+                    "commit_hash": commit_hash,
+                    "conclusion": "目标 commit 无法读取，退回开发处理",
+                    "payload": {"reason": "cannot_read_commit", "commit_hash": commit_hash},
+                },
+                log_message=feedback[:500],
             )
             await self.add_alert(
                 summary="审查无法读取目标 commit",
@@ -268,18 +284,6 @@ class ReviewerAgent(BaseAgent):
                 code="reviewer_cannot_read_commit",
                 stage="review_to_dev",
                 metadata={"commit_hash": commit_hash},
-            )
-            await self.add_handoff(
-                task_id,
-                stage="review_to_dev",
-                to_agent=dev_agent,
-                status_from="in_review",
-                status_to="needs_changes",
-                title="审查退回开发",
-                summary=feedback[:300],
-                commit_hash=commit_hash,
-                conclusion="目标 commit 无法读取，退回开发处理",
-                payload={"reason": "cannot_read_commit", "commit_hash": commit_hash},
             )
             return
 
@@ -357,55 +361,57 @@ class ReviewerAgent(BaseAgent):
 
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")
-            await self.add_log(task_id, f"✅ 审查通过: {comment[:200]}")
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="review_to_manager",
-                to_agent="manager",
-                status_from="in_review",
-                status_to="approved",
-                title="审查通过，交接合并",
-                summary=comment[:300],
-                commit_hash=commit_hash,
-                conclusion=comment[:300] or "审查通过",
-                payload={"decision": "approve", "commit_hash": commit_hash, "source_branch": branch},
-                artifact_path=str(decision_file),
-            )
-            await self.update_task(
-                task_id,
-                status="approved",
-                assignee=None,
-                review_feedback=comment,
-                feedback_source=self.name,
-                feedback_stage="review_to_manager",
-                feedback_actor=self.name,
+                fields={
+                    "status": "approved",
+                    "assignee": None,
+                    "review_feedback": comment,
+                    "feedback_source": self.name,
+                    "feedback_stage": "review_to_manager",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "review_to_manager",
+                    "to_agent": "manager",
+                    "status_from": "in_review",
+                    "status_to": "approved",
+                    "title": "审查通过，交接合并",
+                    "summary": comment[:300],
+                    "commit_hash": commit_hash,
+                    "conclusion": comment[:300] or "审查通过",
+                    "payload": {"decision": "approve", "commit_hash": commit_hash, "source_branch": branch},
+                    "artifact_path": str(decision_file),
+                },
+                log_message=f"✅ 审查通过: {comment[:200]}",
             )
         else:
             feedback = decision.get("feedback", "请修复问题")
-            await self.add_log(task_id, f"↩ 需修改: {feedback[:200]}")
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="review_to_dev",
-                to_agent=dev_agent,
-                status_from="in_review",
-                status_to="needs_changes",
-                title="审查退回开发",
-                summary=feedback[:300],
-                commit_hash=commit_hash,
-                conclusion=feedback[:300] or "审查未通过",
-                payload={"decision": "request_changes", "commit_hash": commit_hash, "source_branch": branch},
-                artifact_path=str(decision_file),
-            )
-            await self.update_task(
-                task_id,
-                status="needs_changes",
-                assignee=None,
-                assigned_agent=dev_agent,
-                dev_agent=dev_agent,
-                review_feedback=feedback,
-                feedback_source=self.name,
-                feedback_stage="review_to_dev",
-                feedback_actor=self.name,
+                fields={
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": dev_agent,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback,
+                    "feedback_source": self.name,
+                    "feedback_stage": "review_to_dev",
+                    "feedback_actor": self.name,
+                },
+                handoff={
+                    "stage": "review_to_dev",
+                    "to_agent": dev_agent,
+                    "status_from": "in_review",
+                    "status_to": "needs_changes",
+                    "title": "审查退回开发",
+                    "summary": feedback[:300],
+                    "commit_hash": commit_hash,
+                    "conclusion": feedback[:300] or "审查未通过",
+                    "payload": {"decision": "request_changes", "commit_hash": commit_hash, "source_branch": branch},
+                    "artifact_path": str(decision_file),
+                },
+                log_message=f"↩ 需修改: {feedback[:200]}",
             )
 
 

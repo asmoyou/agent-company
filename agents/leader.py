@@ -394,26 +394,27 @@ class LeaderAgent(BaseAgent):
             code=stage_code,
             stage="leader_failed",
         )
-        await self.add_handoff(
+        await self.transition_task(
             task_id,
-            stage="leader_failed",
-            to_agent=self.name,
-            status_from=prev_status,
-            status_to="blocked",
-            title="Leader 结构化结果无效",
-            summary=msg,
-            conclusion="结构化结果无效，任务阻塞等待修复",
-            payload={"reason": reason, "stage_code": stage_code},
-        )
-        await self.update_task(
-            task_id,
-            status="blocked",
-            assignee=None,
-            assigned_agent=self.name,
-            review_feedback=msg,
-            feedback_source=self.name,
-            feedback_stage="leader_failed",
-            feedback_actor=self.name,
+            fields={
+                "status": "blocked",
+                "assignee": None,
+                "assigned_agent": self.name,
+                "review_feedback": msg,
+                "feedback_source": self.name,
+                "feedback_stage": "leader_failed",
+                "feedback_actor": self.name,
+            },
+            handoff={
+                "stage": "leader_failed",
+                "to_agent": self.name,
+                "status_from": prev_status,
+                "status_to": "blocked",
+                "title": "Leader 结构化结果无效",
+                "summary": msg,
+                "conclusion": "结构化结果无效，任务阻塞等待修复",
+                "payload": {"reason": reason, "stage_code": stage_code},
+            },
         )
 
     async def _create_subtasks(self, task: dict, subtasks: list[dict]) -> int:
@@ -542,7 +543,8 @@ class LeaderAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
                 return
             prev_status = task.get("_claimed_from_status", task.get("status", "triage"))
-            await self.add_log(task_id, f"❌ Leader 评估失败（exit={returncode}），退回 {prev_status}")
+            fail_msg = f"❌ Leader 评估失败（exit={returncode}），退回 {prev_status}"
+            await self.add_log(task_id, fail_msg)
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
             await self.add_alert(
@@ -554,18 +556,20 @@ class LeaderAgent(BaseAgent):
                 stage="leader_failed",
                 metadata={"exit_code": returncode},
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="leader_failed",
-                to_agent=self.name,
-                status_from=prev_status,
-                status_to=prev_status,
-                title="任务评估失败",
-                summary=f"Leader 评估失败（exit={returncode}），保持状态 {prev_status}",
-                conclusion=f"评估失败，保持状态 {prev_status}",
-                payload={"exit_code": returncode},
+                fields={"status": prev_status, "assignee": None},
+                handoff={
+                    "stage": "leader_failed",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": prev_status,
+                    "title": "任务评估失败",
+                    "summary": f"Leader 评估失败（exit={returncode}），保持状态 {prev_status}",
+                    "conclusion": f"评估失败，保持状态 {prev_status}",
+                    "payload": {"exit_code": returncode},
+                },
             )
-            await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"评估输出:\n{output[:600]}")
         if await self.stop_if_task_cancelled(task_id, "评估输出后"):
@@ -618,44 +622,47 @@ class LeaderAgent(BaseAgent):
                 )
             await self.add_log(task_id, f"判断为复杂任务，分解为 {len(subtasks)} 个子任务")
             n = await self._create_subtasks(task, subtasks)
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="leader_to_decomposed",
-                to_agent="multi-agent",
-                status_from=task.get("_claimed_from_status", task.get("status")),
-                status_to="decomposed",
-                title="任务分解完成",
-                summary=f"已分解为 {n} 个子任务并分配",
-                conclusion=f"复杂任务，已拆分为 {n} 个子任务",
-                payload={"subtask_count": n, "decision": "decompose"},
-                artifact_path=str(decision_file),
+                fields={"status": "decomposed", "assignee": None},
+                handoff={
+                    "stage": "leader_to_decomposed",
+                    "to_agent": "multi-agent",
+                    "status_from": task.get("_claimed_from_status", task.get("status")),
+                    "status_to": "decomposed",
+                    "title": "任务分解完成",
+                    "summary": f"已分解为 {n} 个子任务并分配",
+                    "conclusion": f"复杂任务，已拆分为 {n} 个子任务",
+                    "payload": {"subtask_count": n, "decision": "decompose"},
+                    "artifact_path": str(decision_file),
+                },
+                log_message=f"✅ 分解完成，共创建 {n} 个子任务",
             )
-            await self.update_task(task_id, status="decomposed", assignee=None)
-            await self.add_log(task_id, f"✅ 分解完成，共创建 {n} 个子任务")
             self._post_output_bg(f"✓ 已分解为 {n} 个子任务")
             return
 
         # Simple task — push to todo
         reason = decision.get("reason", "判定为简单任务")
-        await self.add_log(task_id, f"判断为简单任务：{reason}")
         todo_agent = self._todo_assigned_agent(task) or "developer"
-        await self.add_handoff(
+        await self.transition_task(
             task_id,
-            stage="leader_to_todo",
-            to_agent=todo_agent,
-            status_from=task.get("_claimed_from_status", task.get("status")),
-            status_to="todo",
-            title="任务转入开发",
-            summary=reason[:300],
-            conclusion=reason[:300] or "判定为简单任务，转入开发",
-            payload={"action": "simple"},
-            artifact_path=str(decision_file),
-        )
-        await self.update_task(
-            task_id,
-            status="todo",
-            assignee=None,
-            assigned_agent=self._todo_assigned_agent(task),
+            fields={
+                "status": "todo",
+                "assignee": None,
+                "assigned_agent": self._todo_assigned_agent(task),
+            },
+            handoff={
+                "stage": "leader_to_todo",
+                "to_agent": todo_agent,
+                "status_from": task.get("_claimed_from_status", task.get("status")),
+                "status_to": "todo",
+                "title": "任务转入开发",
+                "summary": reason[:300],
+                "conclusion": reason[:300] or "判定为简单任务，转入开发",
+                "payload": {"action": "simple"},
+                "artifact_path": str(decision_file),
+            },
+            log_message=f"判断为简单任务：{reason}",
         )
         self._post_output_bg(f"✓ 简单任务，推进至 todo")
 
@@ -714,7 +721,8 @@ class LeaderAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):
                 return
             prev_status = task.get("_claimed_from_status", task.get("status", "decompose"))
-            await self.add_log(task_id, f"❌ Leader 分解失败（exit={returncode}），退回 {prev_status}")
+            fail_msg = f"❌ Leader 分解失败（exit={returncode}），退回 {prev_status}"
+            await self.add_log(task_id, fail_msg)
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
             await self.add_alert(
@@ -726,18 +734,20 @@ class LeaderAgent(BaseAgent):
                 stage="leader_failed",
                 metadata={"exit_code": returncode},
             )
-            await self.add_handoff(
+            await self.transition_task(
                 task_id,
-                stage="leader_failed",
-                to_agent=self.name,
-                status_from=prev_status,
-                status_to=prev_status,
-                title="任务分解失败",
-                summary=f"Leader 分解失败（exit={returncode}），保持状态 {prev_status}",
-                conclusion=f"分解失败，保持状态 {prev_status}",
-                payload={"exit_code": returncode},
+                fields={"status": prev_status, "assignee": None},
+                handoff={
+                    "stage": "leader_failed",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": prev_status,
+                    "title": "任务分解失败",
+                    "summary": f"Leader 分解失败（exit={returncode}），保持状态 {prev_status}",
+                    "conclusion": f"分解失败，保持状态 {prev_status}",
+                    "payload": {"exit_code": returncode},
+                },
             )
-            await self.update_task(task_id, status=prev_status, assignee=None)
             return
         await self.add_log(task_id, f"分解输出:\n{output[:600]}")
         if await self.stop_if_task_cancelled(task_id, "分解输出后"):
@@ -770,20 +780,22 @@ class LeaderAgent(BaseAgent):
             return
 
         n = await self._create_subtasks(task, subtasks)
-        await self.add_handoff(
+        await self.transition_task(
             task_id,
-            stage="leader_to_decomposed",
-            to_agent="multi-agent",
-            status_from=task.get("_claimed_from_status", task.get("status")),
-            status_to="decomposed",
-            title="强制分解完成",
-            summary=f"已强制分解为 {n} 个子任务",
-            conclusion=f"强制分解完成，共 {n} 个子任务",
-            payload={"subtask_count": n, "forced": True},
-            artifact_path=str(decision_file),
+            fields={"status": "decomposed", "assignee": None},
+            handoff={
+                "stage": "leader_to_decomposed",
+                "to_agent": "multi-agent",
+                "status_from": task.get("_claimed_from_status", task.get("status")),
+                "status_to": "decomposed",
+                "title": "强制分解完成",
+                "summary": f"已强制分解为 {n} 个子任务",
+                "conclusion": f"强制分解完成，共 {n} 个子任务",
+                "payload": {"subtask_count": n, "forced": True},
+                "artifact_path": str(decision_file),
+            },
+            log_message=f"✅ 强制分解完成，共创建 {n} 个子任务",
         )
-        await self.update_task(task_id, status="decomposed", assignee=None)
-        await self.add_log(task_id, f"✅ 强制分解完成，共创建 {n} 个子任务")
         self._post_output_bg(f"✓ 强制分解完成: {n} 个子任务")
 
 
