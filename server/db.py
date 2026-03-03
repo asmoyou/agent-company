@@ -208,9 +208,6 @@ def init_db():
             created_at     TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id);
-        CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id);
-        CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at);
     """)
 
     # Migrations for existing DBs: ensure all runtime-required columns exist.
@@ -298,9 +295,15 @@ def init_db():
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
 
+    # Build indexes after column backfill to keep old DBs migration-safe.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at)")
+
     _seed_admin_user(conn)
     _cleanup_expired_sessions(conn)
     _seed_builtin_agents(conn)
+    _cleanup_orphan_agent_outputs(conn)
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
     _backfill_subtask_order(conn)
@@ -340,6 +343,18 @@ def _seed_admin_user(conn):
 
 def _cleanup_expired_sessions(conn):
     conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (_now(),))
+
+
+def _cleanup_orphan_agent_outputs(conn):
+    """
+    Remove terminal rows belonging to deleted/non-existent agent types.
+    """
+    conn.execute(
+        """
+        DELETE FROM agent_outputs
+         WHERE agent NOT IN (SELECT key FROM agent_types)
+        """
+    )
 
 
 def _seed_builtin_agents(conn):
