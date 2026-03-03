@@ -40,3 +40,6 @@ Thumbs.db
 
 # Claude project metadata
 .claude/
+
+# Local reference workspace (not part of this repo)
+vibe-kanban-main/
