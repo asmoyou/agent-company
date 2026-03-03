@@ -60,6 +60,11 @@ class GenericAgent(BaseAgent):
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
+        head_before = ""
+        try:
+            head_before = (await self.git("rev-parse", "HEAD", cwd=worktree_dev)).strip()
+        except Exception:
+            head_before = ""
 
         returncode, output = await self.run_cli(
             prompt,
@@ -108,18 +113,17 @@ class GenericAgent(BaseAgent):
         # Stage & check diff
         await self.git("add", "-A", cwd=worktree_dev)
         diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
+        head_after = ""
+        try:
+            head_after = (await self.git("rev-parse", "HEAD", cwd=worktree_dev)).strip()
+        except Exception:
+            head_after = ""
+        cli_created_commit = bool(
+            head_before and head_after and head_before != head_after
+        )
 
-        # Fallback: save stdout as .md if nothing was written to disk
         if not diff.strip() and output.strip() and len(output) > 50:
-            safe = "".join(
-                c if c.isalnum() or c in "-_ " else "_"
-                for c in task["title"][:40]
-            ).strip().replace(" ", "_")
-            fallback = worktree_dev / f"{safe or 'deliverable'}.md"
-            fallback.write_text(f"# {task['title']}\n\n{output}\n", encoding="utf-8")
-            await self.add_log(task_id, f"无文件创建，输出已保存为 {fallback.name}")
-            await self.git("add", "-A", cwd=worktree_dev)
-            diff = await self.git("diff", "--cached", "--stat", cwd=worktree_dev)
+            await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
         if diff.strip():
             try:
@@ -185,28 +189,60 @@ class GenericAgent(BaseAgent):
                 )
                 return
 
-        await self.add_log(task_id, f"无文件变更，推进至 {self.next_status}")
-        if await self.stop_if_task_cancelled(task_id, "无变更推进前"):
+        if cli_created_commit and head_after:
+            commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
+            await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_hash}")
+            if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
+                return
+            update_fields = {
+                "status": self.next_status,
+                "assignee": None,
+                "commit_hash": commit_hash,
+            }
+            if self.next_status == "in_review":
+                update_fields["assigned_agent"] = self.name
+                update_fields["dev_agent"] = self.name
+            await self.transition_task(
+                task_id,
+                fields=update_fields,
+                handoff={
+                    "stage": f"{self.name}_handoff",
+                    "to_agent": (update_fields.get("assigned_agent") or self.next_status),
+                    "status_from": prev_status,
+                    "status_to": self.next_status,
+                    "title": f"{self._display_name} 交接",
+                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {self.next_status}",
+                    "commit_hash": commit_hash,
+                    "conclusion": f"{self._display_name} 完成，推进到 {self.next_status}",
+                    "payload": {"commit_hash": commit_hash, "source_branch": branch, "committed_by_cli": True},
+                    "artifact_path": str(worktree_dev),
+                },
+                log_message=f"检测到 CLI 已生成提交，推进至 {self.next_status}",
+            )
             return
-        update_fields = {"status": self.next_status, "assignee": None}
-        if self.next_status == "in_review":
+
+        await self.add_log(task_id, "未检测到新提交或文件改动，不推进状态。")
+        if await self.stop_if_task_cancelled(task_id, "无变更回退前"):
+            return
+        update_fields = {"status": prev_status, "assignee": None}
+        if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
             update_fields["assigned_agent"] = self.name
             update_fields["dev_agent"] = self.name
         await self.transition_task(
             task_id,
             fields=update_fields,
             handoff={
-                "stage": f"{self.name}_handoff",
-                "to_agent": (update_fields.get("assigned_agent") or self.next_status),
+                "stage": f"{self.name}_no_progress",
+                "to_agent": self.name,
                 "status_from": prev_status,
-                "status_to": self.next_status,
-                "title": f"{self._display_name} 交接",
-                "summary": f"无文件变更，推进到 {self.next_status}",
-                "conclusion": f"无文件变更，推进到 {self.next_status}",
-                "payload": {"has_commit": False, "source_branch": branch},
+                "status_to": prev_status,
+                "title": f"{self._display_name} 未产生新变更",
+                "summary": f"未检测到新提交或文件改动，保持在 {prev_status}",
+                "conclusion": "本轮未产出可交付变更，等待下一轮执行",
+                "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
                 "artifact_path": str(worktree_dev),
             },
-            log_message=f"无文件变更，推进至 {self.next_status}",
+            log_message=f"无文件变更，保持 {prev_status}",
         )
 
     def working_status_for(self, status: str) -> str:
