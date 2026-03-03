@@ -147,6 +147,19 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(bad.status_code, 409)
 
+    def test_task_files_branch_falls_back_to_assignee(self):
+        task = self._create_task(status="in_progress")
+        db.update_task(
+            task["id"],
+            assignee="asmo-dev",
+            assigned_agent=None,
+            dev_agent=None,
+        )
+        res = self.client.get(f"/tasks/{task['id']}/files")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["branch"], "agent/asmo-dev")
+
 
 if __name__ == "__main__":
     unittest.main()
