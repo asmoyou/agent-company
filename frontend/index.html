@@ -1263,16 +1263,12 @@ function renderTerminals() {
 }
 
 function ensureAgentTerminal(key) {
+  if (!agentTypes[key]) return false;
   if (!Array.isArray(agentTermLines[key])) agentTermLines[key] = [];
   if (!terminalStreamState[key]) terminalStreamState[key] = {running:false, exit_code:null, updated_at:""};
   if (typeof terminalAutoFollow[key] !== "boolean") terminalAutoFollow[key] = true;
-  if (!agentTypes[key]) {
-    agentTypes[key] = {key, name: key, is_builtin: 0};
-    renderAgentStatusBadges();
-    renderTerminals();
-    return;
-  }
   if (!document.getElementById(`term-${key}`)) renderTerminals();
+  return true;
 }
 
 // ── Agent modal ───────────────────────────────────────────────────────────────
@@ -2174,7 +2170,7 @@ function setAgentStatus(agent, status, taskTitle, rawState = null) {
 
 function initAgentOutputs(data) {
   for (const [agent, d] of Object.entries(data||{})) {
-    ensureAgentTerminal(agent);
+    if (!ensureAgentTerminal(agent)) continue;
     const lines = Array.isArray(d.lines) ? d.lines.map(normalizeTermEntry) : [];
     agentTermLines[agent] = lines.slice(-TERMINAL_MAX_LINES);
     rebuildTerminalStreamState(agent);
@@ -2877,8 +2873,9 @@ function connectWS() {
         }
       }
     } else if (msg.event==="agent_output") {
-      ensureAgentTerminal(msg.agent);
-      appendTermLine(msg.agent, msg.output || msg.line);
+      if (ensureAgentTerminal(msg.agent)) {
+        appendTermLine(msg.agent, msg.output || msg.line);
+      }
     } else if (msg.event==="handoff_added") {
       if (currentTaskId === msg.handoff.task_id) loadTaskHandoffs(currentTaskId);
     } else if (msg.event==="agent_alert") {
@@ -2887,7 +2884,9 @@ function connectWS() {
       const who = msg.agent ? `${msg.agent} · ` : "";
       showToast(`⚠ ${who}${title}`, msg.message || msg.summary || "请查看日志", msg.kind || "error");
     } else if (msg.event==="agent_status") {
-      setAgentStatus(msg.agent, msg.status, msg.task, msg);
+      if (ensureAgentTerminal(msg.agent)) {
+        setAgentStatus(msg.agent, msg.status, msg.task, msg);
+      }
     } else if (msg.event==="files_changed") {
       // Auto-refresh file browser if open and viewing the same project/path
       if (msg.project_id === currentProjectId && document.getElementById("file-panel").classList.contains("open")) {
