@@ -1138,6 +1138,24 @@ function escHtml(s) {
   return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+function parseTimestamp(ts) {
+  const raw = String(ts || "").trim();
+  if (!raw) return null;
+  const hasTimezone = /([zZ]|[+\-]\d{2}:\d{2})$/.test(raw);
+  const withTimezone = hasTimezone ? raw : `${raw}Z`;
+  // Keep milliseconds for broader browser compatibility.
+  const normalized = withTimezone.replace(/\.(\d{3})\d+(?=(Z|[+\-]\d{2}:\d{2})$)/, ".$1");
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatLocalDateTime(ts) {
+  const d = parseTimestamp(ts);
+  if (!d) return String(ts || "").replace("T", " ").slice(0, 19);
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 function showToast(title, message, kind = "error") {
   const wrap = document.getElementById("toast-wrap");
   if (!wrap) return;
@@ -1337,7 +1355,7 @@ function renderLogs(logs) {
     <div class="log-entry">
       <div class="text-indigo-400 font-medium">${escHtml(log.agent)}</div>
       <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(log.message)}</div>
-      <div class="text-slate-600 mt-0.5">${log.created_at.replace("T"," ").slice(0,19)}</div>
+      <div class="text-slate-600 mt-0.5">${formatLocalDateTime(log.created_at)}</div>
     </div>`).join("");
 }
 
@@ -1380,7 +1398,7 @@ function renderHandoffs(handoffs) {
     const commitHash = escHtml(h.commit_hash || h.payload?.commit_hash || "");
     const sourceBranch = escHtml(h.payload?.source_branch || "");
     const conclusion = escHtml(h.conclusion || h.payload?.conclusion || "");
-    const at = escHtml((h.created_at || "").replace("T", " ").slice(0, 19));
+    const at = escHtml(formatLocalDateTime(h.created_at));
     const payload = escHtml(fmtPayload(h.payload));
     const artifact = h.artifact_path ? `<div class="text-cyan-400 mt-1 break-all">📎 ${escHtml(h.artifact_path)}</div>` : "";
     const commitLine = commitHash ? `<div class="text-emerald-400 mt-1 font-mono">commit: ${commitHash}</div>` : "";
@@ -1815,7 +1833,7 @@ function connectWS() {
         const d=document.createElement("div");d.className="log-entry";
         d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
           <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
-          <div class="text-slate-600 mt-0.5">${msg.log.created_at.replace("T"," ").slice(0,19)}</div>`;
+          <div class="text-slate-600 mt-0.5">${formatLocalDateTime(msg.log.created_at)}</div>`;
         el.appendChild(d); el.scrollTop=el.scrollHeight;
       }
     } else if (msg.event==="agent_output") {
