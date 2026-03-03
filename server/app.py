@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hmac
 import json
 import mimetypes
 import os
@@ -20,6 +21,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -40,6 +42,7 @@ TASK_LEASE_TTL_SECS = int(os.getenv("TASK_LEASE_TTL_SECS", "180"))
 TASK_LEASE_RENEW_MIN_SECS = int(os.getenv("TASK_LEASE_RENEW_MIN_SECS", "30"))
 TASK_LEASE_RENEW_MAX_SECS = int(os.getenv("TASK_LEASE_RENEW_MAX_SECS", "1800"))
 TASK_LEASE_RECOVERY_GRACE_SECS = int(os.getenv("TASK_LEASE_RECOVERY_GRACE_SECS", "0"))
+AGENT_API_TOKEN = str(os.getenv("AGENT_API_TOKEN", "opc-agent-internal")).strip()
 
 
 def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
@@ -83,6 +86,31 @@ def require_user(authorization: str | None = Header(default=None, alias="Authori
     if not user:
         raise HTTPException(401, "登录已失效，请重新登录")
     return user
+
+
+def _has_valid_agent_token(x_agent_token: str | None) -> bool:
+    provided = str(x_agent_token or "").strip()
+    expected = str(AGENT_API_TOKEN or "").strip()
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+def require_agent_or_user(
+    request: Request,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> dict:
+    if _has_valid_agent_token(x_agent_token):
+        return {"id": "agent", "username": "agent", "role": "agent", "auth_type": "agent"}
+    token = _extract_bearer_token(authorization)
+    if token:
+        user = db.get_session_user(token)
+        if user:
+            user["auth_type"] = "user"
+            return user
+        raise HTTPException(401, "登录已失效，请重新登录")
+    raise HTTPException(401, "未授权（需要用户登录或有效的 X-Agent-Token）")
 
 
 def require_admin(user: dict = Depends(require_user)) -> dict:
@@ -1067,7 +1095,7 @@ async def tasks_by_status(status: str, project_id: str | None = None):
     return db.get_tasks_by_status(status, project_id)
 
 @app.post("/tasks/claim")
-async def claim_task(body: TaskClaim):
+async def claim_task(body: TaskClaim, _principal: dict = Depends(require_agent_or_user)):
     effective_status = str(body.status or "").strip()
     effective_working_status = str(body.working_status or "").strip()
     lease_ttl_secs = int(body.lease_ttl_secs or TASK_LEASE_TTL_SECS)
@@ -1104,23 +1132,28 @@ async def claim_task(body: TaskClaim):
             await manager.broadcast({"event": "task_updated", "task": task})
             return {"task": task}
 
-        # Project path no longer exists: immediately cancel this task so it
-        # won't be picked again, then continue claiming next available task.
-        cancelled = db.cancel_task(task["id"], include_subtasks=False) or []
-        for item in cancelled:
-            await manager.broadcast({"event": "task_updated", "task": item})
-            log = db.add_log(
-                item["id"],
-                "system",
-                "⚠ 项目目录不存在，任务已自动取消并跳过分配。",
+        # Project path no longer exists: task is invalid and should not remain
+        # in queue. Hard-delete it (and descendants) and continue claiming.
+        deleted_task_ids = db.delete_task_permanently(task["id"], include_subtasks=True) or []
+        for tid in deleted_task_ids:
+            await manager.broadcast(
+                {
+                    "event": "task_deleted",
+                    "task_id": tid,
+                    "reason": "missing_project_path",
+                    "message": "项目目录不存在，任务已自动删除并跳过分配。",
+                }
             )
-            await broadcast_log(log)
 
     return {"task": None}
 
 
 @app.post("/tasks/{task_id}/lease/renew")
-async def renew_task_lease(task_id: str, body: TaskLeaseRenewRequest):
+async def renew_task_lease(
+    task_id: str,
+    body: TaskLeaseRenewRequest,
+    _principal: dict = Depends(require_agent_or_user),
+):
     lease_ttl_secs = int(body.lease_ttl_secs or TASK_LEASE_TTL_SECS)
     lease_ttl_secs = max(TASK_LEASE_RENEW_MIN_SECS, min(TASK_LEASE_RENEW_MAX_SECS, lease_ttl_secs))
     try:
@@ -1168,7 +1201,11 @@ async def update_task(task_id: str, body: TaskUpdate, user: dict = Depends(requi
 
 
 @app.post("/tasks/{task_id}/transition")
-async def transition_task(task_id: str, body: TaskTransitionRequest):
+async def transition_task(
+    task_id: str,
+    body: TaskTransitionRequest,
+    _principal: dict = Depends(require_agent_or_user),
+):
     before = db.get_task(task_id)
     if not before:
         raise HTTPException(404, "Task not found")
@@ -1387,7 +1424,7 @@ async def get_logs(task_id: str, user: dict = Depends(require_user)):
     return db.get_logs(task_id)
 
 @app.post("/tasks/{task_id}/logs", status_code=201)
-async def add_log(task_id: str, body: LogCreate):
+async def add_log(task_id: str, body: LogCreate, _principal: dict = Depends(require_agent_or_user)):
     agent_name = str(body.agent or "").strip().lower()
     strict_fence = agent_name not in {"system", "user"}
     ok, reason = db.validate_task_lease(
@@ -1409,7 +1446,7 @@ async def add_log(task_id: str, body: LogCreate):
 
 
 @app.post("/alerts", status_code=201)
-async def add_alert(body: AgentAlertCreate):
+async def add_alert(body: AgentAlertCreate, _principal: dict = Depends(require_agent_or_user)):
     kind = (body.kind or "error").strip().lower()
     if kind not in {"error", "warning", "info"}:
         kind = "error"
@@ -1459,7 +1496,11 @@ async def get_handoffs(task_id: str):
 
 
 @app.post("/tasks/{task_id}/handoffs", status_code=201)
-async def add_handoff(task_id: str, body: HandoffCreate):
+async def add_handoff(
+    task_id: str,
+    body: HandoffCreate,
+    _principal: dict = Depends(require_agent_or_user),
+):
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -1827,7 +1868,11 @@ async def get_agent_outputs(_user: dict = Depends(require_user)):
     return _agent_outputs_snapshot()
 
 @app.post("/agents/{agent_name}/output")
-async def agent_output(agent_name: str, body: AgentOutput):
+async def agent_output(
+    agent_name: str,
+    body: AgentOutput,
+    _principal: dict = Depends(require_agent_or_user),
+):
     state = _ensure_agent_state(agent_name)
     entry = _normalize_agent_output_entry(
         {
@@ -1867,7 +1912,11 @@ async def agent_output(agent_name: str, body: AgentOutput):
     return {"ok": True}
 
 @app.post("/agents/{agent_name}/status")
-async def agent_status(agent_name: str, body: AgentStatusUpdate):
+async def agent_status(
+    agent_name: str,
+    body: AgentStatusUpdate,
+    _principal: dict = Depends(require_agent_or_user),
+):
     prev = _ensure_agent_state(agent_name)
     busy = str(body.status or "").strip().lower() == "busy"
     status_value = str(body.status or "").strip() or "idle"

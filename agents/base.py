@@ -26,6 +26,7 @@ TASK_LEASE_RENEW_FAIL_HARD_AFTER_ERRORS = int(
 )
 TASK_STATUS_POLL_FAILURE_MAX = int(os.getenv("TASK_STATUS_POLL_FAILURE_MAX", "30"))
 OUTPUT_POST_MAX_INFLIGHT = int(os.getenv("OUTPUT_POST_MAX_INFLIGHT", "12"))
+AGENT_API_TOKEN = str(os.getenv("AGENT_API_TOKEN", "opc-agent-internal")).strip()
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -106,14 +107,21 @@ class BaseAgent:
 
     def __init__(self, shutdown_event: asyncio.Event | None = None):
         self.shutdown = shutdown_event or asyncio.Event()
+        auth_headers = {"X-Agent-Token": AGENT_API_TOKEN} if AGENT_API_TOKEN else {}
         # trust_env=False: ignore system proxy (SOCKS etc.) for localhost calls
-        self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30, trust_env=False)
+        self.http = httpx.AsyncClient(
+            base_url=SERVER_URL,
+            timeout=30,
+            trust_env=False,
+            headers=auth_headers,
+        )
         # Use a separate, bounded channel for terminal stream output so
         # control-plane calls (lease renew/status/task polling) are not starved.
         self.http_output = httpx.AsyncClient(
             base_url=SERVER_URL,
             timeout=AGENT_POST_TIMEOUT_SECS,
             trust_env=False,
+            headers=auth_headers,
             limits=httpx.Limits(max_keepalive_connections=8, max_connections=24),
         )
         self._output_post_sem = asyncio.Semaphore(max(1, OUTPUT_POST_MAX_INFLIGHT))
