@@ -243,6 +243,21 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["task"]["status"], "todo")
 
+    def test_transition_allows_description_update(self):
+        task = self._create_task(status="triage")
+        refined = (
+            "## 任务目标\n- 完成 API 鉴权链路校验\n\n"
+            "## 范围\n- claim/transition/status/output 接口\n\n"
+            "## 验收标准\n- [ ] 自动化测试覆盖关键路径"
+        )
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={"fields": {"description": refined}},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["task"]["description"], refined)
+
     def test_claim_rejects_status_outside_agent_poll_range(self):
         self._create_task(status="approved")
         res = self.client.post(

@@ -526,6 +526,7 @@ class TaskCreate(BaseModel):
     status: str = "triage"   # default: all new tasks enter triage first
 
 class TaskUpdate(BaseModel):
+    description: str | None = None
     status: str | None = None
     assignee: str | None = None
     assigned_agent: str | None = None

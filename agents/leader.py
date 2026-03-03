@@ -48,6 +48,20 @@ LEADER_PROMPT_QUALITY_BLOCK = (
     "4. 禁止输出空泛词：如“完善功能”“相关逻辑”“进行优化”“处理需求”等。\n"
 )
 
+LEADER_REQUIREMENT_REFINEMENT_PROMPT = (
+    "你是需求分析师。请把原始任务描述整理为可执行、可验收的需求说明。\n\n"
+    "要求：\n"
+    "1. 只能基于已有信息重写，不得杜撰业务事实。\n"
+    "2. 缺失信息请明确标注“待确认：...”。\n"
+    "3. 输出 Markdown，必须包含以下小节（顺序固定）：\n"
+    "   - ## 任务目标\n"
+    "   - ## 范围\n"
+    "   - ## 非范围\n"
+    "   - ## 关键约束\n"
+    "   - ## 验收标准\n"
+    "4. 用清晰、具体的表述，避免空泛词（如“完善功能”“优化体验”）。\n"
+)
+
 LEADER_SUBTASK_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -88,6 +102,7 @@ LEADER_TRIAGE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
+        "refined_description": {"type": "string"},
         "action": {"type": "string", "enum": ["simple", "decompose"]},
         "reason": {"type": "string"},
         "subtasks": {
@@ -99,9 +114,17 @@ LEADER_TRIAGE_SCHEMA = {
 }
 
 LEADER_FORCE_DECOMPOSE_SCHEMA = {
-    "type": "array",
-    "minItems": 2,
-    "items": LEADER_SUBTASK_SCHEMA,
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "refined_description": {"type": "string"},
+        "subtasks": {
+            "type": "array",
+            "minItems": 2,
+            "items": LEADER_SUBTASK_SCHEMA,
+        },
+    },
+    "required": ["subtasks"],
 }
 
 GENERIC_SUBTASK_PATTERNS = [
@@ -357,13 +380,32 @@ class LeaderAgent(BaseAgent):
             )
         return out, issues
 
-    def _normalize_triage_decision(self, raw_decision, parent_requirements: list[dict] | None = None) -> tuple[dict | None, list[str]]:
+    def _normalize_refined_description(self, raw, fallback: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return str(fallback or "").strip()
+        return text[:6000]
+
+    def _normalize_triage_decision(
+        self,
+        raw_decision,
+        parent_requirements: list[dict] | None = None,
+        fallback_description: str = "",
+    ) -> tuple[dict | None, list[str]]:
         if not isinstance(raw_decision, dict):
             return None, ["triage 结果不是对象"]
+        refined_description = self._normalize_refined_description(
+            raw_decision.get("refined_description"),
+            fallback_description,
+        )
         action = str(raw_decision.get("action") or "").strip().lower()
         if action == "simple":
             reason = str(raw_decision.get("reason") or "").strip() or "判定为简单任务"
-            return {"action": "simple", "reason": reason[:500]}, []
+            return {
+                "action": "simple",
+                "reason": reason[:500],
+                "refined_description": refined_description,
+            }, []
         if action == "decompose":
             subtasks, issues = self._normalize_subtasks(
                 raw_decision.get("subtasks"),
@@ -374,7 +416,11 @@ class LeaderAgent(BaseAgent):
             if len(subtasks) < 2:
                 return None, issues + ["decompose 至少需要 2 个子任务"]
             reason = str(raw_decision.get("reason") or "").strip()
-            out = {"action": "decompose", "subtasks": subtasks}
+            out = {
+                "action": "decompose",
+                "subtasks": subtasks,
+                "refined_description": refined_description,
+            }
             if reason:
                 out["reason"] = reason[:500]
             return out, issues
@@ -571,6 +617,7 @@ class LeaderAgent(BaseAgent):
                 agent_list=agent_list,
             )
         parent_requirements = self._build_parent_requirements(task)
+        prompt += f"\n\n{LEADER_REQUIREMENT_REFINEMENT_PROMPT}\n"
         prompt += "\n\n## 父任务需求清单（必须引用编号）\n"
         prompt += self._format_parent_requirements(parent_requirements)
         handoff_context = await self.build_handoff_context(task_id)
@@ -592,8 +639,8 @@ class LeaderAgent(BaseAgent):
             "\n\n## 结构化交付（必须）\n"
             f"请把最终评估写入 JSON 文件：{decision_file}\n"
             "仅允许以下二选一格式：\n"
-            '{"action":"simple","reason":"..."}\n'
-            '{"action":"decompose","subtasks":[{"title":"...","objective":"...","implementation_scope":["..."],'
+            '{"refined_description":"...","action":"simple","reason":"..."}\n'
+            '{"refined_description":"...","action":"decompose","subtasks":[{"title":"...","objective":"...","implementation_scope":["..."],'
             '"parent_refs":["R1"],"todo_steps":["步骤1","步骤2"],"deliverables":["..."],"acceptance_criteria":["...","..."],"agent":"developer"}]}\n'
             "同时在回复最后一行输出同一个 JSON 对象。"
         )
@@ -655,6 +702,7 @@ class LeaderAgent(BaseAgent):
         decision, quality_issues = self._normalize_triage_decision(
             raw_decision,
             parent_requirements=parent_requirements,
+            fallback_description=str(task.get("description") or "").strip(),
         )
         if decision is None:
             issue_text = "; ".join(quality_issues[:6]) if quality_issues else "未知原因"
@@ -667,6 +715,12 @@ class LeaderAgent(BaseAgent):
             )
             return
         await self.add_log(task_id, f"已读取结构化评估结果文件: {decision_file}")
+        refined_description = self._normalize_refined_description(
+            decision.get("refined_description"),
+            str(task.get("description") or "").strip(),
+        )
+        if refined_description and refined_description != str(task.get("description") or "").strip():
+            await self.add_log(task_id, "📝 本次评估已补全任务需求描述")
         complex_by_rule = self._is_complex_task(task)
         await self.add_log(task_id, f"复杂度规则判定: {'complex' if complex_by_rule else 'simple'}")
 
@@ -691,7 +745,11 @@ class LeaderAgent(BaseAgent):
             n = await self._create_subtasks(task, subtasks)
             await self.transition_task(
                 task_id,
-                fields={"status": "decomposed", "assignee": None},
+                fields={
+                    "description": refined_description,
+                    "status": "decomposed",
+                    "assignee": None,
+                },
                 handoff={
                     "stage": "leader_to_decomposed",
                     "to_agent": "multi-agent",
@@ -714,6 +772,7 @@ class LeaderAgent(BaseAgent):
         await self.transition_task(
             task_id,
             fields={
+                "description": refined_description,
                 "status": "todo",
                 "assignee": None,
                 "assigned_agent": self._todo_assigned_agent(task),
@@ -754,6 +813,7 @@ class LeaderAgent(BaseAgent):
                 agent_list=agent_list,
             )
         parent_requirements = self._build_parent_requirements(task)
+        prompt += f"\n\n{LEADER_REQUIREMENT_REFINEMENT_PROMPT}\n"
         prompt += "\n\n## 父任务需求清单（必须引用编号）\n"
         prompt += self._format_parent_requirements(parent_requirements)
         handoff_context = await self.build_handoff_context(task_id)
@@ -772,10 +832,13 @@ class LeaderAgent(BaseAgent):
 
         prompt += (
             "\n\n## 结构化交付（必须）\n"
-            f"请把子任务数组写入 JSON 文件：{decision_file}\n"
-            "文件内容必须是 JSON 数组，每个元素必须包含：\n"
-            '- title\n- objective\n- parent_refs(至少1条，且必须引用需求编号)\n- implementation_scope(可选)\n- todo_steps(至少2条)\n- deliverables(至少1条)\n- acceptance_criteria(至少2条)\n- agent\n'
-            "同时在回复最后一行输出同一个 JSON 数组。"
+            f"请把分解结果写入 JSON 文件：{decision_file}\n"
+            "文件内容必须是 JSON 对象，格式如下：\n"
+            '{"refined_description":"...","subtasks":[{"title":"...","objective":"...","parent_refs":["R1"],'
+            '"implementation_scope":["..."],"todo_steps":["步骤1","步骤2"],"deliverables":["..."],'
+            '"acceptance_criteria":["...","..."],"agent":"developer"}]}\n'
+            "其中 subtasks 至少 2 项，且每项字段完整。\n"
+            "同时在回复最后一行输出同一个 JSON 对象。"
         )
 
         returncode, output = await self.run_cli(
@@ -822,12 +885,8 @@ class LeaderAgent(BaseAgent):
         if await self.stop_if_task_cancelled(task_id, "分解输出后"):
             return
 
-        raw_subtasks = self._load_json_file(decision_file)
-        subtasks, quality_issues = self._normalize_subtasks(
-            raw_subtasks,
-            parent_requirements=parent_requirements,
-        )
-        if raw_subtasks is None:
+        raw_result = self._load_json_file(decision_file)
+        if raw_result is None:
             await self._handle_structured_output_error(
                 task,
                 prev_status=task.get("_claimed_from_status", task.get("status", "decompose")),
@@ -836,7 +895,26 @@ class LeaderAgent(BaseAgent):
                 output=output,
             )
             return
+        fallback_description = str(task.get("description") or "").strip()
+        refined_description = fallback_description
+        raw_subtasks = raw_result
+        if isinstance(raw_result, dict):
+            refined_description = self._normalize_refined_description(
+                raw_result.get("refined_description"),
+                fallback_description,
+            )
+            raw_subtasks = raw_result.get("subtasks")
+        elif isinstance(raw_result, list):
+            raw_subtasks = raw_result
+        else:
+            raw_subtasks = None
+        subtasks, quality_issues = self._normalize_subtasks(
+            raw_subtasks,
+            parent_requirements=parent_requirements,
+        )
         await self.add_log(task_id, f"已读取结构化分解结果文件: {decision_file}")
+        if refined_description and refined_description != fallback_description:
+            await self.add_log(task_id, "📝 本次分解已补全任务需求描述")
         if not subtasks:
             issue_text = "; ".join(quality_issues[:6]) if quality_issues else "未知原因"
             await self._handle_structured_output_error(
@@ -851,7 +929,11 @@ class LeaderAgent(BaseAgent):
         n = await self._create_subtasks(task, subtasks)
         await self.transition_task(
             task_id,
-            fields={"status": "decomposed", "assignee": None},
+            fields={
+                "description": refined_description,
+                "status": "decomposed",
+                "assignee": None,
+            },
             handoff={
                 "stage": "leader_to_decomposed",
                 "to_agent": "multi-agent",
