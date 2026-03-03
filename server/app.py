@@ -141,24 +141,43 @@ for _k in ("developer", "reviewer", "manager"):
 class ConnectionManager:
     def __init__(self):
         self.active: Set[WebSocket] = set()
+        # Serialize broadcasts to preserve per-connection event order and
+        # avoid concurrent writes on the same websocket.
+        self._broadcast_lock = asyncio.Lock()
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
-        self.active.add(ws)
+
+    async def send_init_and_subscribe(self, ws: WebSocket, payload_builder):
+        # Keep init snapshot and subscription atomic relative to broadcasts.
+        async with self._broadcast_lock:
+            payload = payload_builder()
+            await ws.send_json(payload)
+            self.active.add(ws)
 
     def disconnect(self, ws: WebSocket):
         self.active.discard(ws)
 
     async def broadcast(self, data: dict):
-        dead = set()
-        for ws in self.active:
-            try:
+        async with self._broadcast_lock:
+            sockets = list(self.active)
+            if not sockets:
+                return
+
+            async def _send(ws: WebSocket):
                 # Drop slow/broken sockets quickly so broadcasts never block
                 # agent heartbeats or task state transitions for long periods.
                 await asyncio.wait_for(ws.send_json(data), timeout=1.5)
-            except Exception:
-                dead.add(ws)
-        self.active -= dead
+
+            results = await asyncio.gather(
+                *(_send(ws) for ws in sockets),
+                return_exceptions=True,
+            )
+            dead = {
+                ws for ws, res in zip(sockets, results)
+                if isinstance(res, Exception)
+            }
+            self.active -= dead
 
 
 manager = ConnectionManager()
@@ -166,6 +185,10 @@ manager = ConnectionManager()
 
 async def broadcast_log(log: dict):
     await manager.broadcast({"event": "log_added", "log": log})
+
+
+def broadcast_bg(data: dict):
+    asyncio.create_task(manager.broadcast(data))
 
 
 @asynccontextmanager
@@ -1059,7 +1082,7 @@ async def agent_output(agent_name: str, body: AgentOutput):
     state = _ensure_agent_state(agent_name)
     AGENT_OUTPUT[agent_name].append(body.line)
     state["last_output_at"] = _utcnow_iso()
-    await manager.broadcast({"event": "agent_output", "agent": agent_name, "line": body.line})
+    broadcast_bg({"event": "agent_output", "agent": agent_name, "line": body.line})
     return {"ok": True}
 
 @app.post("/agents/{agent_name}/status")
@@ -1071,8 +1094,8 @@ async def agent_status(agent_name: str, body: AgentStatusUpdate):
         "updated_at": _utcnow_iso(),
         "last_output_at": prev.get("last_output_at", ""),
     }
-    await manager.broadcast({"event": "agent_status", "agent": agent_name,
-                              "status": body.status, "task": body.task})
+    broadcast_bg({"event": "agent_status", "agent": agent_name,
+                  "status": body.status, "task": body.task})
     return {"ok": True}
 
 
@@ -1081,18 +1104,21 @@ async def agent_status(agent_name: str, body: AgentStatusUpdate):
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
-        tasks   = db.list_tasks()
-        projects = db.list_projects()
-        await ws.send_json({
-            "event": "init",
-            "tasks": tasks,
-            "projects": projects,
-            "agent_types": db.list_agent_types(),
-            "agent_outputs": _agent_outputs_snapshot(),
-        })
+        await manager.send_init_and_subscribe(
+            ws,
+            lambda: {
+                "event": "init",
+                "tasks": db.list_tasks(),
+                "projects": db.list_projects(),
+                "agent_types": db.list_agent_types(),
+                "agent_outputs": _agent_outputs_snapshot(),
+            },
+        )
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(ws)
 
 
