@@ -166,6 +166,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS agent_outputs (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             agent      TEXT NOT NULL,
+            project_id TEXT,
             task_id    TEXT,
             run_id     TEXT,
             line       TEXT NOT NULL,
@@ -208,6 +209,7 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id);
+        CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at);
     """)
 
@@ -259,6 +261,7 @@ def init_db():
     ])
     _ensure_columns(conn, "agent_outputs", [
         ("agent", "TEXT"),
+        ("project_id", "TEXT"),
         ("task_id", "TEXT"),
         ("run_id", "TEXT"),
         ("line", "TEXT"),
@@ -1097,6 +1100,11 @@ def delete_project(project_id: str) -> bool:
         "DELETE FROM logs WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)",
         (project_id,),
     )
+    # Delete all persisted agent terminal output tied to this project/tasks.
+    conn.execute(
+        "DELETE FROM agent_outputs WHERE project_id=? OR task_id IN (SELECT id FROM tasks WHERE project_id=?)",
+        (project_id, project_id),
+    )
     # Delete all tasks in this project
     conn.execute("DELETE FROM tasks WHERE project_id=?", (project_id,))
     # Delete the project itself
@@ -1911,6 +1919,7 @@ def recover_expired_task_leases(
 def add_agent_output(
     agent: str,
     line: str,
+    project_id: str | None = None,
     task_id: str | None = None,
     run_id: str | None = None,
     kind: str | None = None,
@@ -1925,11 +1934,12 @@ def add_agent_output(
     output_exit_code = None if exit_code is None else int(exit_code)
     cur = conn.execute(
         """
-        INSERT INTO agent_outputs (agent, task_id, run_id, line, kind, event, exit_code, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO agent_outputs (agent, project_id, task_id, run_id, line, kind, event, exit_code, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(agent or "").strip().lower(),
+            str(project_id or "").strip() or None,
             str(task_id or "").strip() or None,
             str(run_id or "").strip() or None,
             str(line or ""),
@@ -1961,6 +1971,7 @@ def add_agent_output(
     return dict(row) if row else {
         "id": row_id,
         "agent": str(agent or "").strip().lower(),
+        "project_id": str(project_id or "").strip() or None,
         "task_id": str(task_id or "").strip() or None,
         "run_id": str(run_id or "").strip() or None,
         "line": str(line or ""),
@@ -1992,7 +2003,7 @@ def get_agent_output_entries(agent: str, limit: int = 1000) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT line, task_id, run_id, kind, event, exit_code, created_at
+        SELECT line, project_id, task_id, run_id, kind, event, exit_code, created_at
           FROM agent_outputs
          WHERE agent=?
          ORDER BY id DESC
@@ -2007,6 +2018,7 @@ def get_agent_output_entries(agent: str, limit: int = 1000) -> list[dict]:
         entries.append(
             {
                 "line": str(r["line"] or ""),
+                "project_id": str(r["project_id"] or "").strip() or None,
                 "task_id": str(r["task_id"] or "").strip() or None,
                 "run_id": str(r["run_id"] or "").strip() or None,
                 "kind": str(r["kind"] or "line").strip().lower() or "line",
@@ -2223,6 +2235,92 @@ def get_handoffs(task_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def clear_task_agent_refs_for_deleted_agent(agent_key: str, working_status: str | None = None) -> list[dict]:
+    """
+    When a custom agent type is deleted, clear task-level references to that agent
+    so the board no longer shows stale assignment/ownership.
+    """
+    key = str(agent_key or "").strip().lower()
+    if not key:
+        return []
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            _join_project(
+                """
+                SELECT *
+                  FROM tasks
+                 WHERE assigned_agent=?
+                    OR dev_agent=?
+                    OR assignee=?
+                """
+            ),
+            (key, key, key),
+        ).fetchall()
+        task_ids = [str(r["id"] or "").strip() for r in rows if str(r["id"] or "").strip()]
+        if not task_ids:
+            conn.rollback()
+            return []
+
+        now = _now()
+        conn.execute(
+            "UPDATE tasks SET assigned_agent=NULL, updated_at=? WHERE assigned_agent=?",
+            (now, key),
+        )
+        conn.execute(
+            "UPDATE tasks SET dev_agent=NULL, updated_at=? WHERE dev_agent=?",
+            (now, key),
+        )
+        if working_status:
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET status='todo',
+                       assignee=NULL,
+                       claim_run_id=NULL,
+                       lease_token=NULL,
+                       lease_expires_at=NULL,
+                       updated_at=?
+                 WHERE assignee=?
+                   AND status=?
+                """,
+                (now, key, str(working_status or "").strip()),
+            )
+        conn.execute(
+            """
+            UPDATE tasks
+               SET assignee=NULL,
+                   claim_run_id=NULL,
+                   lease_token=NULL,
+                   lease_expires_at=NULL,
+                   updated_at=?
+             WHERE assignee=?
+            """,
+            (now, key),
+        )
+        placeholders = ",".join("?" for _ in task_ids)
+        updated_rows = conn.execute(
+            _join_project(f"SELECT * FROM tasks WHERE id IN ({placeholders})"),
+            task_ids,
+        ).fetchall()
+        conn.commit()
+        return [dict(r) for r in updated_rows]
+    finally:
+        conn.close()
+
+
+def delete_agent_outputs_for_agent(agent_key: str) -> int:
+    key = str(agent_key or "").strip().lower()
+    if not key:
+        return 0
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM agent_outputs WHERE agent=?", (key,))
+    conn.commit()
+    conn.close()
+    return int(cur.rowcount or 0)
 
 
 # ── Agent Types ────────────────────────────────────────────────────────────────

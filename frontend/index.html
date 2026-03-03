@@ -1460,6 +1460,7 @@ function onProjectChange() {
   currentProjectId = document.getElementById("project-select").value || null;
   updateProjectUI();
   refreshBoard();
+  renderTerminals();
 }
 
 function updateProjectUI() {
@@ -1881,6 +1882,7 @@ function normalizeTermEntry(raw) {
       line: String(raw.line || ""),
       kind: String(raw.kind || "line").trim().toLowerCase() || "line",
       event: String(raw.event || "line").trim().toLowerCase() || "line",
+      project_id: raw.project_id ? String(raw.project_id) : null,
       task_id: raw.task_id ? String(raw.task_id) : null,
       run_id: raw.run_id ? String(raw.run_id) : null,
       exit_code: Number.isFinite(Number(raw.exit_code)) ? Number(raw.exit_code) : null,
@@ -1891,11 +1893,42 @@ function normalizeTermEntry(raw) {
     line: String(raw || ""),
     kind: "line",
     event: "line",
+    project_id: null,
     task_id: null,
     run_id: null,
     exit_code: null,
     created_at: "",
   };
+}
+
+function resolveTermEntryProjectId(entry) {
+  const direct = String(entry?.project_id || "").trim();
+  if (direct) return direct;
+  const taskId = String(entry?.task_id || "").trim();
+  if (!taskId) return "";
+  const task = tasks[taskId];
+  return task ? String(task.project_id || "").trim() : "";
+}
+
+function isTermEntryVisible(entry) {
+  if (!currentProjectId) return true;
+  const pid = resolveTermEntryProjectId(entry);
+  return !!pid && pid === currentProjectId;
+}
+
+function resolveAgentStateProjectId(state) {
+  const direct = String(state?.project_id || "").trim();
+  if (direct) return direct;
+  const taskId = String(state?.task_id || "").trim();
+  if (!taskId) return "";
+  const task = tasks[taskId];
+  return task ? String(task.project_id || "").trim() : "";
+}
+
+function isAgentStateVisible(state) {
+  if (!currentProjectId) return true;
+  const pid = resolveAgentStateProjectId(state);
+  return !!pid && pid === currentProjectId;
 }
 
 function termTimestampLabel(entry) {
@@ -1913,6 +1946,7 @@ function rebuildTerminalStreamState(agent) {
   let updated_at = "";
   for (const e0 of entries) {
     const e = normalizeTermEntry(e0);
+    if (!isTermEntryVisible(e)) continue;
     if (e.event === "started") {
       running = true;
       exit_code = null;
@@ -2010,7 +2044,9 @@ function attachTerminalScrollListener(agent) {
 function renderTerminalLines(agent) {
   const term = document.getElementById(`term-${agent}`);
   if (!term) return;
-  const lines = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  const lines = (Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [])
+    .map(normalizeTermEntry)
+    .filter(isTermEntryVisible);
   term.innerHTML = "";
   const frag = document.createDocumentFragment();
   lines.forEach(line => frag.appendChild(_renderTermLineElement(line)));
@@ -2039,7 +2075,9 @@ function clearTerminal(agent) {
 }
 
 async function copyTerminal(agent) {
-  const lines = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  const lines = (Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [])
+    .map(normalizeTermEntry)
+    .filter(isTermEntryVisible);
   const text = lines
     .map((entryRaw) => {
       const entry = normalizeTermEntry(entryRaw);
@@ -2074,8 +2112,10 @@ function appendTermLine(agent, line) {
     return;
   }
   attachTerminalScrollListener(agent);
-  term.appendChild(_renderTermLineElement(rawEntry));
-  while (term.children.length > TERMINAL_MAX_LINES) term.removeChild(term.firstChild);
+  if (isTermEntryVisible(rawEntry)) {
+    term.appendChild(_renderTermLineElement(rawEntry));
+    while (term.children.length > TERMINAL_MAX_LINES) term.removeChild(term.firstChild);
+  }
   rebuildTerminalStreamState(agent);
   renderTerminalStreamState(agent);
   if (terminalAutoFollow[agent] !== false) term.scrollTop = term.scrollHeight;
@@ -2101,7 +2141,7 @@ function formatAgentPhase(phase) {
 function setAgentStatus(agent, status, taskTitle, rawState = null) {
   const state = rawState || {};
   agentStates[agent] = { status, task: taskTitle, ...state };
-  const busy = status === "busy";
+  const busy = status === "busy" && isAgentStateVisible(agentStates[agent]);
   const dot  = document.getElementById(`dot-${agent}`);
   const dot2 = document.getElementById(`dot2-${agent}`);
   const statusEl = document.getElementById(`status-${agent}`);
