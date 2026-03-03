@@ -102,6 +102,13 @@ triage -> todo -> in_progress -> in_review -> approved -> pending_acceptance -> 
 decompose -> decomposed -> (subtasks in todo...)
 ```
 
+状态流转由后端判定并执行，前端仅发送动作意图并展示结果：
+
+- 用户动作接口：`POST /tasks/{task_id}/actions`
+  - `accept` / `reject` / `retry_blocked` / `decompose` / `archive`
+- 系统流转接口：`POST /tasks/{task_id}/transition`（供 Agent 使用）
+- `PATCH /tasks/{task_id}` 不允许直接修改 `status`
+
 ## 交接材料（Handoff）
 
 任务交接使用结构化记录，不依赖前端“猜文本”。

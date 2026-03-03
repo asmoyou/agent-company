@@ -483,7 +483,21 @@ class LeaderAgent(BaseAgent):
         r = await self.http.get(f"/tasks/{task_id}/subtasks")
         if r.status_code == 200 and r.json():
             await self.add_log(task_id, "已有子任务，标记为 decomposed（崩溃恢复）")
-            await self.update_task(task_id, status="decomposed", assignee=None)
+            await self.transition_task(
+                task_id,
+                fields={"status": "decomposed", "assignee": None},
+                handoff={
+                    "stage": "leader_recover_decomposed",
+                    "to_agent": "multi-agent",
+                    "status_from": task.get("_claimed_from_status", task.get("status")),
+                    "status_to": "decomposed",
+                    "title": "分解状态恢复",
+                    "summary": "检测到已存在子任务，恢复父任务为 decomposed",
+                    "conclusion": "子任务已存在，父任务标记为 decomposed",
+                    "payload": {"recovered": True},
+                },
+                log_message="检测到已有子任务，恢复父任务状态为 decomposed",
+            )
             return
 
         agent_list  = await self._get_agent_list()

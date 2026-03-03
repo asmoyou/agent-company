@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Literal, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -322,6 +322,11 @@ class TaskTransitionRequest(BaseModel):
     log: LogCreate | None = None
 
 
+class TaskActionRequest(BaseModel):
+    action: Literal["accept", "reject", "retry_blocked", "decompose", "archive"]
+    feedback: str | None = None
+
+
 COMMIT_REQUIRED_STAGES = {
     "dev_to_review",
     "review_to_manager",
@@ -330,6 +335,155 @@ COMMIT_REQUIRED_STAGES = {
     "merge_to_dev",
     "merge_failed",
 }
+
+
+STATUS_FLOW: dict[str, set[str]] = {
+    "triage": {"triage", "triaging", "decompose", "decomposed", "todo", "blocked", "cancelled"},
+    "triaging": {"triaging", "triage", "decompose", "decomposed", "todo", "blocked", "cancelled"},
+    "decompose": {"decompose", "triaging", "decomposed", "blocked", "triage", "cancelled"},
+    "todo": {"todo", "in_progress", "decompose", "blocked", "cancelled"},
+    "in_progress": {"in_progress", "in_review", "todo", "needs_changes", "blocked", "cancelled"},
+    "in_review": {"in_review", "reviewing", "needs_changes", "approved", "blocked", "cancelled"},
+    "reviewing": {"reviewing", "in_review", "needs_changes", "approved", "blocked", "cancelled"},
+    "needs_changes": {"needs_changes", "in_progress", "blocked", "cancelled"},
+    "approved": {"approved", "merging", "pending_acceptance", "needs_changes", "blocked", "cancelled"},
+    "merging": {"merging", "pending_acceptance", "needs_changes", "approved", "blocked", "cancelled"},
+    "pending_acceptance": {"pending_acceptance", "completed", "needs_changes", "cancelled"},
+    "blocked": {"blocked", "triage", "decompose", "in_review", "todo", "needs_changes", "cancelled"},
+    "decomposed": {"decomposed", "completed", "cancelled"},
+    "completed": {"completed"},
+    "cancelled": {"cancelled"},
+}
+
+
+def _norm_status(raw: str | None) -> str:
+    return str(raw or "").strip().lower()
+
+
+def _parse_poll_statuses(raw) -> list[str]:
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [str(x).strip() for x in data if str(x).strip()]
+        except Exception:
+            return []
+    return []
+
+
+def _validate_status_transition(before: dict, fields: dict):
+    if "status" not in fields:
+        return
+    prev = _norm_status(before.get("status"))
+    nxt = _norm_status(fields.get("status"))
+    if not nxt:
+        raise HTTPException(422, "status 不能为空")
+    if prev == nxt:
+        return
+    allowed = STATUS_FLOW.get(prev)
+    if not allowed or nxt not in allowed:
+        raise HTTPException(409, f"非法状态流转: {prev} -> {nxt}")
+
+
+def _normalize_transition_fields(before: dict, fields: dict) -> dict:
+    out = dict(fields or {})
+    out.pop("create_handoff", None)
+    if _norm_status(out.get("status")) == "needs_changes":
+        fallback_dev = normalize_agent_key(
+            out.get("dev_agent")
+            or before.get("dev_agent")
+            or before.get("assigned_agent")
+            or "developer"
+        )
+        if not str(out.get("assigned_agent") or "").strip():
+            out["assigned_agent"] = fallback_dev
+        if not str(out.get("dev_agent") or "").strip():
+            out["dev_agent"] = fallback_dev
+        out.setdefault("assignee", None)
+    return out
+
+
+def _build_handoff_row(task_for_handoff: dict, handoff: HandoffCreate | None) -> dict | None:
+    if not handoff:
+        return None
+    payload, commit_hash, conclusion = _prepare_handoff(task_for_handoff, handoff)
+    return {
+        "stage": str(handoff.stage or "").strip(),
+        "from_agent": str(handoff.from_agent or "").strip(),
+        "to_agent": handoff.to_agent,
+        "status_from": handoff.status_from,
+        "status_to": handoff.status_to,
+        "title": handoff.title,
+        "summary": handoff.summary,
+        "commit_hash": commit_hash,
+        "conclusion": conclusion,
+        "payload": payload,
+        "artifact_path": handoff.artifact_path,
+    }
+
+
+async def _apply_transition_and_broadcast(
+    task_id: str,
+    *,
+    before: dict,
+    fields: dict,
+    handoff_row: dict | None = None,
+    log_row: dict | None = None,
+) -> dict:
+    normalized_fields = _normalize_transition_fields(before, fields)
+    _validate_status_transition(before, normalized_fields)
+
+    result = db.transition_task(
+        task_id,
+        fields=normalized_fields,
+        handoff=handoff_row,
+        log=log_row,
+    )
+    if not result:
+        raise HTTPException(404, "Task not found")
+
+    task = result["task"]
+    await manager.broadcast({"event": "task_updated", "task": task})
+
+    handoff = result.get("handoff")
+    if handoff:
+        await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
+
+    log = result.get("log")
+    if log:
+        await broadcast_log(log)
+
+    if "status" in normalized_fields and task.get("parent_task_id"):
+        if db.check_parent_completion(task["parent_task_id"]):
+            parent = db.get_task(task["parent_task_id"])
+            if parent:
+                await manager.broadcast({"event": "task_updated", "task": parent})
+
+    return {
+        "task": task,
+        "handoff": _format_handoff(handoff) if handoff else None,
+        "log": log,
+    }
+
+
+def _resolve_blocked_retry(task: dict) -> tuple[str, str | None, str] | None:
+    owner = str(task.get("assigned_agent") or "").strip().lower()
+    feedback = str(task.get("review_feedback") or "")
+
+    if owner == "reviewer" or "[review_retry=" in feedback or "审查器" in feedback:
+        return ("in_review", "reviewer", "重试审查")
+
+    if owner == "leader":
+        dev_agent = str(task.get("dev_agent") or "").strip()
+        resume_assignee = dev_agent if dev_agent and dev_agent.lower() != "leader" else None
+        force_decompose = ".leader-force-decompose.json" in feedback or "leader_force_decompose" in feedback
+        if force_decompose:
+            return ("decompose", resume_assignee, "重试分解")
+        return ("triage", resume_assignee, "重试评估")
+
+    return None
 
 
 def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None, str]:
@@ -517,11 +671,25 @@ async def tasks_by_status(status: str, project_id: str | None = None):
 
 @app.post("/tasks/claim")
 async def claim_task(body: TaskClaim):
+    effective_status = str(body.status or "").strip()
+    effective_working_status = str(body.working_status or "").strip()
+    at = db.get_agent_type(body.agent_key)
+    if at:
+        poll_statuses = _parse_poll_statuses(at.get("poll_statuses"))
+        if poll_statuses and effective_status not in poll_statuses:
+            raise HTTPException(
+                409,
+                f"agent={body.agent_key} 不能认领 status={effective_status}，允许: {poll_statuses}",
+            )
+        configured_working = str(at.get("working_status") or "").strip()
+        if configured_working:
+            effective_working_status = configured_working
+
     # Retry loop: skip tasks whose project directory is missing.
     for _ in range(50):
         task = db.claim_task(
-            status=body.status,
-            working_status=body.working_status,
+            status=effective_status,
+            working_status=effective_working_status,
             agent=body.agent,
             agent_key=body.agent_key,
             respect_assignment=body.respect_assignment,
@@ -560,66 +728,22 @@ async def get_task(task_id: str):
 @app.patch("/tasks/{task_id}")
 async def update_task(task_id: str, body: TaskUpdate):
     fields = body.model_dump(exclude_unset=True)
-    create_handoff = bool(fields.get("create_handoff"))
+    fields.pop("create_handoff", None)
 
     before = db.get_task(task_id)
     if not before:
         raise HTTPException(404, "Task not found")
 
-    if create_handoff and str(fields.get("status") or "").strip() == "needs_changes":
-        # Keep the handoff target deterministic when users manually reject.
-        fallback_dev = normalize_agent_key(
-            fields.get("dev_agent")
-            or before.get("dev_agent")
-            or before.get("assigned_agent")
-            or "developer"
+    if "status" in fields:
+        raise HTTPException(
+            403,
+            "禁止直接 PATCH status。请使用后端动作接口 /tasks/{task_id}/actions 或系统流转接口 /tasks/{task_id}/transition。",
         )
-        if not str(fields.get("assigned_agent") or "").strip():
-            fields["assigned_agent"] = fallback_dev
-        if not str(fields.get("dev_agent") or "").strip():
-            fields["dev_agent"] = fallback_dev
-        fields.setdefault("assignee", None)
 
     task = db.update_task(task_id, **fields)
     if not task:
         raise HTTPException(404, "Task not found")
     await manager.broadcast({"event": "task_updated", "task": task})
-
-    if create_handoff and str(fields.get("status") or "").strip() == "needs_changes":
-        feedback = str(fields.get("review_feedback") or "").strip()
-        if feedback:
-            to_agent = normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or "developer")
-            from_agent = str(fields.get("feedback_actor") or "user").strip() or "user"
-            stage = str(fields.get("feedback_stage") or "user_to_dev").strip() or "user_to_dev"
-            handoff = db.add_handoff(
-                task_id=task_id,
-                stage=stage,
-                from_agent=from_agent,
-                to_agent=to_agent,
-                status_from=before.get("status"),
-                status_to="needs_changes",
-                title="人工退回开发",
-                summary=feedback[:300],
-                commit_hash=str(task.get("commit_hash") or before.get("commit_hash") or "").strip() or None,
-                conclusion="用户验收未通过，退回开发修复",
-                payload={
-                    "decision": "request_changes",
-                    "feedback_source": str(fields.get("feedback_source") or "user").strip() or "user",
-                    "feedback_actor": from_agent,
-                    "feedback": feedback[:1000],
-                },
-            )
-            await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
-
-            log = db.add_log(task_id, from_agent, f"↩ 人工退回：{feedback[:300]}")
-            await broadcast_log(log)
-
-    # Auto-complete parent when all subtasks are done
-    if "status" in fields and task.get("parent_task_id"):
-        if db.check_parent_completion(task["parent_task_id"]):
-            parent = db.get_task(task["parent_task_id"])
-            if parent:
-                await manager.broadcast({"event": "task_updated", "task": parent})
     return task
 
 
@@ -630,70 +754,168 @@ async def transition_task(task_id: str, body: TaskTransitionRequest):
         raise HTTPException(404, "Task not found")
 
     fields = body.fields.model_dump(exclude_unset=True) if body.fields else {}
-    fields.pop("create_handoff", None)
-
-    if str(fields.get("status") or "").strip() == "needs_changes":
-        fallback_dev = normalize_agent_key(
-            fields.get("dev_agent")
-            or before.get("dev_agent")
-            or before.get("assigned_agent")
-            or "developer"
-        )
-        if not str(fields.get("assigned_agent") or "").strip():
-            fields["assigned_agent"] = fallback_dev
-        if not str(fields.get("dev_agent") or "").strip():
-            fields["dev_agent"] = fallback_dev
-        fields.setdefault("assignee", None)
-
-    handoff_row = None
-    if body.handoff:
-        task_for_handoff = dict(before)
-        task_for_handoff.update({k: v for k, v in fields.items() if k != "create_handoff"})
-        payload, commit_hash, conclusion = _prepare_handoff(task_for_handoff, body.handoff)
-        handoff_row = {
-            "stage": str(body.handoff.stage or "").strip(),
-            "from_agent": str(body.handoff.from_agent or "").strip(),
-            "to_agent": body.handoff.to_agent,
-            "status_from": body.handoff.status_from,
-            "status_to": body.handoff.status_to,
-            "title": body.handoff.title,
-            "summary": body.handoff.summary,
-            "commit_hash": commit_hash,
-            "conclusion": conclusion,
-            "payload": payload,
-            "artifact_path": body.handoff.artifact_path,
-        }
+    normalized_fields = _normalize_transition_fields(before, fields)
 
     log_row = None
     if body.log:
         log_row = {"agent": body.log.agent, "message": body.log.message}
 
-    result = db.transition_task(task_id, fields=fields, handoff=handoff_row, log=log_row)
-    if not result:
+    task_for_handoff = dict(before)
+    task_for_handoff.update(normalized_fields)
+    handoff_row = _build_handoff_row(task_for_handoff, body.handoff)
+
+    return await _apply_transition_and_broadcast(
+        task_id,
+        before=before,
+        fields=normalized_fields,
+        handoff_row=handoff_row,
+        log_row=log_row,
+    )
+
+
+@app.post("/tasks/{task_id}/actions")
+async def task_action(task_id: str, body: TaskActionRequest):
+    before = db.get_task(task_id)
+    if not before:
         raise HTTPException(404, "Task not found")
 
-    task = result["task"]
-    await manager.broadcast({"event": "task_updated", "task": task})
+    status = _norm_status(before.get("status"))
+    archived = int(before.get("archived") or 0)
+    action = body.action
 
-    handoff = result.get("handoff")
-    if handoff:
-        await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
-
-    log = result.get("log")
-    if log:
+    if action == "archive":
+        if status != "completed":
+            raise HTTPException(409, f"仅 completed 任务可归档，当前为 {status}")
+        if archived == 1:
+            return {"task": before, "handoff": None, "log": None, "action": action}
+        task = db.update_task(task_id, archived=1)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        await manager.broadcast({"event": "task_updated", "task": task})
+        log = db.add_log(task_id, "user", "任务已归档。")
         await broadcast_log(log)
+        return {"task": task, "handoff": None, "log": log, "action": action}
 
-    if "status" in fields and task.get("parent_task_id"):
-        if db.check_parent_completion(task["parent_task_id"]):
-            parent = db.get_task(task["parent_task_id"])
-            if parent:
-                await manager.broadcast({"event": "task_updated", "task": parent})
+    if status == "cancelled" or archived == 1:
+        raise HTTPException(409, "任务已取消/归档，不能执行该动作")
 
-    return {
-        "task": task,
-        "handoff": _format_handoff(handoff) if handoff else None,
-        "log": log,
-    }
+    fields: dict = {}
+    handoff_obj: HandoffCreate | None = None
+    log_row: dict | None = None
+
+    if action == "accept":
+        if status != "pending_acceptance":
+            raise HTTPException(409, f"仅 pending_acceptance 可验收通过，当前为 {status}")
+        fields = {"status": "completed", "assignee": None}
+        handoff_obj = HandoffCreate(
+            stage="acceptance_complete",
+            from_agent="user",
+            to_agent="system",
+            status_from=before.get("status"),
+            status_to="completed",
+            title="验收通过",
+            summary="用户验收通过，任务完成",
+            conclusion="用户验收通过",
+            payload={"decision": "accept"},
+        )
+        log_row = {"agent": "user", "message": "✅ 用户验收通过，任务完成"}
+    elif action == "reject":
+        if status != "pending_acceptance":
+            raise HTTPException(409, f"仅 pending_acceptance 可退回修改，当前为 {status}")
+        feedback = str(body.feedback or "").strip()
+        if not feedback:
+            raise HTTPException(422, "feedback 不能为空")
+        dev_agent = normalize_agent_key(
+            before.get("dev_agent") or before.get("assigned_agent") or "developer"
+        )
+        fields = {
+            "status": "needs_changes",
+            "assignee": None,
+            "assigned_agent": dev_agent,
+            "dev_agent": dev_agent,
+            "review_feedback": feedback[:1000],
+            "feedback_source": "user",
+            "feedback_stage": "user_to_dev",
+            "feedback_actor": "user",
+        }
+        handoff_obj = HandoffCreate(
+            stage="user_to_dev",
+            from_agent="user",
+            to_agent=dev_agent,
+            status_from=before.get("status"),
+            status_to="needs_changes",
+            title="人工退回开发",
+            summary=feedback[:300],
+            commit_hash=str(before.get("commit_hash") or "").strip() or None,
+            conclusion="用户验收未通过，退回开发修复",
+            payload={
+                "decision": "request_changes",
+                "feedback_source": "user",
+                "feedback_actor": "user",
+                "feedback": feedback[:1000],
+            },
+        )
+        log_row = {"agent": "user", "message": f"↩ 人工退回：{feedback[:300]}"}
+    elif action == "retry_blocked":
+        if status != "blocked":
+            raise HTTPException(409, f"仅 blocked 可重试，当前为 {status}")
+        target = _resolve_blocked_retry(before)
+        if not target:
+            raise HTTPException(409, "当前 blocked 任务无法自动判定重试目标，请人工调整")
+        to_status, to_agent, label = target
+        fields = {"status": to_status, "assignee": None}
+        if to_agent is not None:
+            fields["assigned_agent"] = to_agent
+        handoff_obj = HandoffCreate(
+            stage="user_retry_blocked",
+            from_agent="user",
+            to_agent=to_agent,
+            status_from=before.get("status"),
+            status_to=to_status,
+            title="人工重试任务",
+            summary=f"{label}：恢复到 {to_status}",
+            conclusion=f"用户触发重试，恢复到 {to_status}",
+            payload={
+                "action": "retry_blocked",
+                "resume_status": to_status,
+                "resume_assigned_agent": to_agent,
+            },
+        )
+        log_row = {"agent": "user", "message": f"♻ 人工重试：{label}（{to_status}）"}
+    elif action == "decompose":
+        if status != "todo":
+            raise HTTPException(409, f"仅 todo 可转为分解，当前为 {status}")
+        if before.get("parent_task_id"):
+            raise HTTPException(409, "子任务不支持手动转分解")
+        fields = {"status": "decompose", "assignee": None}
+        handoff_obj = HandoffCreate(
+            stage="user_force_decompose",
+            from_agent="user",
+            to_agent="leader",
+            status_from=before.get("status"),
+            status_to="decompose",
+            title="人工要求分解",
+            summary="用户要求将任务转为分解模式",
+            conclusion="已切换到待分解，等待 Leader 处理",
+            payload={"action": "decompose"},
+        )
+        log_row = {"agent": "user", "message": "↪ 人工要求分解：任务已转为 decompose"}
+    else:
+        raise HTTPException(422, f"未知 action: {action}")
+
+    normalized_fields = _normalize_transition_fields(before, fields)
+    task_for_handoff = dict(before)
+    task_for_handoff.update(normalized_fields)
+    handoff_row = _build_handoff_row(task_for_handoff, handoff_obj)
+    result = await _apply_transition_and_broadcast(
+        task_id,
+        before=before,
+        fields=normalized_fields,
+        handoff_row=handoff_row,
+        log_row=log_row,
+    )
+    result["action"] = action
+    return result
 
 
 @app.post("/tasks/{task_id}/cancel")
