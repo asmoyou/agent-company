@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import shutil
 import tempfile
 import time
@@ -586,6 +587,24 @@ class BaseAgent:
         except Exception:
             pass
 
+    async def _terminate_proc_tree(self, proc: asyncio.subprocess.Process) -> None:
+        """
+        Best-effort termination for subprocess and any children.
+        We start subprocesses in a new session and kill the whole process group.
+        """
+        if proc.returncode is not None:
+            return
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+                return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
+        with contextlib.suppress(ProcessLookupError, Exception):
+            proc.kill()
+
     # ── Git ───────────────────────────────────────────────────────────────────
 
     async def git(self, *args: str, cwd: Path, task_id: str | None = None) -> str:
@@ -593,6 +612,7 @@ class BaseAgent:
             "git", *args, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         watch_task_id = task_id or self._active_task_id
 
@@ -604,10 +624,7 @@ class BaseAgent:
                 if proc.returncode is not None:
                     return
                 if await self.is_task_cancelled(watch_task_id):
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    await self._terminate_proc_tree(proc)
                     return
 
         cwatch = asyncio.create_task(cancel_watcher())
@@ -672,6 +689,7 @@ class BaseAgent:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=True,
         )
 
         lines: list[str] = []
@@ -722,6 +740,8 @@ class BaseAgent:
         async def heartbeat():
             while True:
                 await asyncio.sleep(HEARTBEAT_SECS)
+                if proc.returncode is not None:
+                    return
                 elapsed = int(time.monotonic() - start_time)
                 msg = f"⏳ 仍在工作中... 已运行 {elapsed}s"
                 self._post_output_bg(msg)
@@ -750,22 +770,11 @@ class BaseAgent:
                 await asyncio.sleep(1)
                 if proc.returncode is not None:
                     return
-                try:
-                    current = await self.get_task(task_id)
-                except Exception:
-                    continue
-                if not current:
-                    continue
-                status = str(current.get("status") or "").strip().lower()
-                archived = int(current.get("archived") or 0)
-                if status == "cancelled" or archived == 1:
+                if await self.is_task_cancelled(task_id):
                     msg = "🛑 检测到任务已取消/归档，终止当前 CLI 执行"
                     lines.append(msg)
                     self._post_output_bg(msg)
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    await self._terminate_proc_tree(proc)
                     return
 
         hb = asyncio.create_task(heartbeat())
@@ -777,13 +786,15 @@ class BaseAgent:
                 timeout=CLI_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await self._terminate_proc_tree(proc)
             lines.append(f"[TIMEOUT after {CLI_TIMEOUT}s]")
             self._post_output_bg(f"⚠ TIMEOUT after {CLI_TIMEOUT}s")
         finally:
-            hb.cancel()
-            iar.cancel()
-            cwatch.cancel()
+            for t in (hb, iar, cwatch):
+                t.cancel()
+            for t in (hb, iar, cwatch):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
 
         await proc.wait()
 
