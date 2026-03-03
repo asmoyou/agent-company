@@ -144,6 +144,35 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(good.status_code, 200)
         self.assertEqual(good.json()["task"]["status"], "todo")
 
+    def test_transition_accepts_related_history_commits_as_commit_evidence(self):
+        task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {"status": "in_review", "assignee": None},
+                "handoff": {
+                    "stage": "dev_to_review",
+                    "from_agent": "developer",
+                    "to_agent": "reviewer",
+                    "status_from": "in_progress",
+                    "status_to": "in_review",
+                    "title": "开发交接审查（历史证据）",
+                    "summary": "无新增提交，附带历史提交证据",
+                    "conclusion": "使用历史提交证据继续审查",
+                    "payload": {
+                        "has_commit": True,
+                        "related_history_commits": [
+                            {"hash": "abc1234", "short": "abc1234", "subject": "feat: done already"}
+                        ],
+                    },
+                },
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "in_review")
+        self.assertEqual(data["handoff"]["commit_hash"], "abc1234")
+
     def test_claim_rejects_status_outside_agent_poll_range(self):
         self._create_task(status="approved")
         res = self.client.post(

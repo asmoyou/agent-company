@@ -25,13 +25,33 @@ class ManagerAgent(BaseAgent):
             return
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
+        task_commit_hash = commit_hash
+        related_history_commits: list[dict] = []
         target_commit = commit_hash
         proj_root, _, dev_branch = await self.ensure_agent_workspace(
             task, agent_key=dev_agent, sync_with_main=False
         )
+        if not commit_hash:
+            commit_hash, related_history_commits = await self.resolve_handoff_commit_candidate(
+                task_id,
+                proj_root,
+            )
+            target_commit = commit_hash
+        if not task_commit_hash and commit_hash:
+            head = related_history_commits[0] if related_history_commits else {}
+            await self.add_log(
+                task_id,
+                (
+                    "任务未显式提供 commit_hash，已改用历史提交证据继续合并："
+                    f"{head.get('short') or commit_hash[:12]}"
+                ),
+            )
 
         if not commit_hash:
-            feedback = "[系统错误] 缺少 commit_hash，无法精确合并。退回开发重提。"
+            feedback = (
+                "[系统错误] 缺少可合并 commit_hash（未找到可用历史提交证据），"
+                "无法精确合并。退回开发重提。"
+            )
             await self.add_alert(
                 summary="合并前置条件缺失：commit_hash",
                 task_id=task_id,
@@ -60,7 +80,11 @@ class ManagerAgent(BaseAgent):
                     "title": "合并退回开发",
                     "summary": feedback,
                     "conclusion": "缺少目标 commit，退回开发重提",
-                    "payload": {"reason": "missing_commit_hash", "has_commit": False},
+                    "payload": {
+                        "reason": "missing_commit_hash",
+                        "has_commit": False,
+                        "related_commit_candidates": related_history_commits,
+                    },
                 },
                 log_message=feedback,
             )
@@ -121,7 +145,11 @@ class ManagerAgent(BaseAgent):
                             "summary": "目标提交已在主分支，直接进入待验收",
                             "commit_hash": commit_hash,
                             "conclusion": "目标提交已存在于 main，直接进入验收",
-                            "payload": {"commit_hash": commit_hash, "already_up_to_date": True},
+                            "payload": {
+                                "commit_hash": commit_hash,
+                                "already_up_to_date": True,
+                                "related_history_commits": related_history_commits,
+                            },
                         },
                         log_message="Already up to date",
                     )
@@ -148,6 +176,7 @@ class ManagerAgent(BaseAgent):
                         "commit_hash": commit_hash,
                         "source_branch": dev_branch,
                         "reviewed_commit": target_commit,
+                        "related_history_commits": related_history_commits,
                     },
                     "artifact_path": str(proj_root),
                 },
@@ -169,7 +198,10 @@ class ManagerAgent(BaseAgent):
                         "summary": "主分支已是最新，直接进入待验收",
                         "commit_hash": target_commit,
                         "conclusion": "无需合并，进入待验收",
-                        "payload": {"already_up_to_date": True},
+                        "payload": {
+                            "already_up_to_date": True,
+                            "related_history_commits": related_history_commits,
+                        },
                     },
                     log_message="Already up to date，标记为待验收",
                 )

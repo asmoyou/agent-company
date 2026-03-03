@@ -194,9 +194,16 @@ class ReviewerAgent(BaseAgent):
             return
         dev_agent = get_task_dev_agent(task)
         commit_hash = (task.get("commit_hash") or "").strip()
+        task_commit_hash = commit_hash
+        related_history_commits: list[dict] = []
         proj_root, worktree_dev, branch = await self.ensure_agent_workspace(
             task, agent_key=dev_agent, sync_with_main=False
         )
+        if not commit_hash:
+            commit_hash, related_history_commits = await self.resolve_handoff_commit_candidate(
+                task_id,
+                worktree_dev,
+            )
 
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法进行精确审查。请 developer 重新提交。"
@@ -220,7 +227,11 @@ class ReviewerAgent(BaseAgent):
                     "title": "审查退回开发",
                     "summary": feedback,
                     "conclusion": "缺少可审查 commit，退回开发重提",
-                    "payload": {"reason": "missing_commit_hash", "has_commit": False},
+                    "payload": {
+                        "reason": "missing_commit_hash",
+                        "has_commit": False,
+                        "related_commit_candidates": related_history_commits,
+                    },
                 },
                 log_message=feedback,
             )
@@ -233,6 +244,15 @@ class ReviewerAgent(BaseAgent):
                 stage="review_to_dev",
             )
             return
+        if not task_commit_hash and related_history_commits:
+            top = related_history_commits[0]
+            await self.add_log(
+                task_id,
+                (
+                    "任务未显式提供 commit_hash，已使用历史提交证据进行审查："
+                    f"{top.get('short') or str(commit_hash)[:12]}（候选 {len(related_history_commits)} 条）"
+                ),
+            )
 
         decision_dir = worktree_dev / ".opc" / "decisions"
         decision_dir.mkdir(parents=True, exist_ok=True)
@@ -382,7 +402,12 @@ class ReviewerAgent(BaseAgent):
                     "summary": comment[:300],
                     "commit_hash": commit_hash,
                     "conclusion": comment[:300] or "审查通过",
-                    "payload": {"decision": "approve", "commit_hash": commit_hash, "source_branch": branch},
+                    "payload": {
+                        "decision": "approve",
+                        "commit_hash": commit_hash,
+                        "source_branch": branch,
+                        "related_history_commits": related_history_commits,
+                    },
                     "artifact_path": str(decision_file),
                 },
                 log_message=f"✅ 审查通过: {comment[:200]}",
@@ -410,7 +435,12 @@ class ReviewerAgent(BaseAgent):
                     "summary": feedback[:300],
                     "commit_hash": commit_hash,
                     "conclusion": feedback[:300] or "审查未通过",
-                    "payload": {"decision": "request_changes", "commit_hash": commit_hash, "source_branch": branch},
+                    "payload": {
+                        "decision": "request_changes",
+                        "commit_hash": commit_hash,
+                        "source_branch": branch,
+                        "related_history_commits": related_history_commits,
+                    },
                     "artifact_path": str(decision_file),
                 },
                 log_message=f"↩ 需修改: {feedback[:200]}",
