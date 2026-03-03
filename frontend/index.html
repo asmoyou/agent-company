@@ -1901,8 +1901,8 @@ function normalizeTermEntry(raw) {
 function termTimestampLabel(entry) {
   const raw = String(entry?.created_at || "").trim();
   if (!raw) return "";
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return "";
+  const d = parseTimestamp(raw);
+  if (!d || Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString("zh-CN", { hour12: false });
 }
 
@@ -2257,10 +2257,12 @@ function renderFeedbackHistory(task) {
   el.innerHTML = recent.map(item => {
     const fid = escHtml(item.id || "FB????");
     const source = escHtml(item.source || "system");
-    const at = escHtml(String(item.created_at || "").replace("T", " ").slice(0, 19));
+    const createdAtRaw = String(item.created_at || "").trim();
+    const at = escHtml(createdAtRaw ? formatLocalDateTime(createdAtRaw) : "");
     const feedback = escHtml(item.feedback || "");
     const resolved = !!item.resolved;
-    const resolvedAt = escHtml(String(item.resolved_at || "").replace("T", " ").slice(0, 19));
+    const resolvedAtRaw = String(item.resolved_at || "").trim();
+    const resolvedAt = escHtml(resolvedAtRaw ? formatLocalDateTime(resolvedAtRaw) : "");
     const resolvedReason = escHtml(item.resolved_reason || "");
     const statusBadge = resolved
       ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-300">已解决</span>`

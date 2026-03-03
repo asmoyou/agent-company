@@ -1575,7 +1575,7 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
                          WHERE prev.parent_task_id = t.parent_task_id
                            AND prev.id != t.id
                            AND COALESCE(prev.archived, 0) = 0
-                           AND prev.status NOT IN ('completed', '{CANCELLED_STATUS}')
+                           AND prev.status NOT IN ('approved', 'pending_acceptance', 'completed', '{CANCELLED_STATUS}')
                            AND (
                                  (
                                    COALESCE(t.subtask_order, 0) > 0

@@ -287,6 +287,48 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 201)
         self.assertTrue(app_module.AGENT_STATUS["developer"]["last_output_at"])
 
+    def test_agent_status_busy_downgrades_to_idle_when_task_not_owned(self):
+        task = self._create_task(status="pending_acceptance", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/agents/developer/status",
+            json={"status": "busy", "task": task["title"], "task_id": task["id"]},
+        )
+        self.assertEqual(res.status_code, 200)
+        state = app_module.AGENT_STATUS["developer"]
+        self.assertEqual(state["status"], "idle")
+        self.assertEqual(state["task_id"], "")
+
+    def test_agent_status_busy_kept_when_task_is_validly_claimed(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claim = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+        )
+        self.assertEqual(claim.status_code, 200)
+        claimed = claim.json()["task"]
+        self.assertIsNotNone(claimed)
+        res = self.client.post(
+            "/agents/developer/status",
+            json={
+                "status": "busy",
+                "task": task["title"],
+                "task_id": task["id"],
+                "run_id": claimed["claim_run_id"],
+                "lease_token": claimed["lease_token"],
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        state = app_module.AGENT_STATUS["developer"]
+        self.assertEqual(state["status"], "busy")
+        self.assertEqual(state["task_id"], task["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,11 @@ AGENT_POST_TIMEOUT_SECS = float(os.getenv("AGENT_POST_TIMEOUT_SECS", "8"))
 TASK_LEASE_TTL_SECS = int(os.getenv("TASK_LEASE_TTL_SECS", "180"))
 TASK_LEASE_RENEW_INTERVAL_SECS = int(os.getenv("TASK_LEASE_RENEW_INTERVAL_SECS", "20"))
 TASK_LEASE_RENEW_WARN_AFTER_ERRORS = int(os.getenv("TASK_LEASE_RENEW_WARN_AFTER_ERRORS", "3"))
+TASK_LEASE_RENEW_FAIL_HARD_AFTER_ERRORS = int(
+    os.getenv("TASK_LEASE_RENEW_FAIL_HARD_AFTER_ERRORS", "9")
+)
+TASK_STATUS_POLL_FAILURE_MAX = int(os.getenv("TASK_STATUS_POLL_FAILURE_MAX", "30"))
+OUTPUT_POST_MAX_INFLIGHT = int(os.getenv("OUTPUT_POST_MAX_INFLIGHT", "12"))
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -103,6 +108,15 @@ class BaseAgent:
         self.shutdown = shutdown_event or asyncio.Event()
         # trust_env=False: ignore system proxy (SOCKS etc.) for localhost calls
         self.http = httpx.AsyncClient(base_url=SERVER_URL, timeout=30, trust_env=False)
+        # Use a separate, bounded channel for terminal stream output so
+        # control-plane calls (lease renew/status/task polling) are not starved.
+        self.http_output = httpx.AsyncClient(
+            base_url=SERVER_URL,
+            timeout=AGENT_POST_TIMEOUT_SECS,
+            trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=8, max_connections=24),
+        )
+        self._output_post_sem = asyncio.Semaphore(max(1, OUTPUT_POST_MAX_INFLIGHT))
         self._active_task_id: str | None = None
         self._active_run_id: str | None = None
         self._active_lease_token: str | None = None
@@ -170,6 +184,7 @@ class BaseAgent:
                     "lease_token": lease_token,
                     "lease_ttl_secs": lease_ttl_secs,
                 },
+                timeout=AGENT_POST_TIMEOUT_SECS,
             )
             if r.status_code in (404, 409):
                 return False
@@ -818,9 +833,15 @@ class BaseAgent:
     ):
         task_id = self._active_task_id
         run_id = self._active_run_id
+        important = kind in {"meta", "event"} or event in {"started", "finished"}
+        if not important and self._output_post_sem.locked():
+            # Drop low-priority stream lines when backlog is full.
+            return
+
         async def _send():
+            await self._output_post_sem.acquire()
             try:
-                await self.http.post(
+                await self.http_output.post(
                     f"/agents/{self.name}/output",
                     json={
                         "line": line,
@@ -834,6 +855,8 @@ class BaseAgent:
                 )
             except Exception:
                 pass
+            finally:
+                self._output_post_sem.release()
         asyncio.create_task(_send())
 
     async def set_agent_status(
@@ -1068,6 +1091,7 @@ class BaseAgent:
                 return
             expected_status_lc = str(expected_status or "").strip().lower()
             expected_assignee_lc = str(expected_assignee or "").strip().lower()
+            consecutive_api_errors = 0
             while proc.returncode is None:
                 await asyncio.sleep(1)
                 if proc.returncode is not None:
@@ -1080,8 +1104,20 @@ class BaseAgent:
                     return
                 try:
                     task = await self.get_task_if_exists(task_id)
+                    consecutive_api_errors = 0
                 except Exception:
-                    # Ignore transient API errors; only stop on explicit task state changes.
+                    # Short transient API errors are tolerated. Prolonged control-plane
+                    # failures should stop execution to avoid wedging the task.
+                    consecutive_api_errors += 1
+                    if consecutive_api_errors >= max(3, TASK_STATUS_POLL_FAILURE_MAX):
+                        msg = (
+                            f"🛑 连续 {consecutive_api_errors}s 无法获取任务状态，"
+                            "终止当前 CLI 执行以避免任务卡住"
+                        )
+                        lines.append(msg)
+                        self._post_output_bg(msg, kind="meta")
+                        await self._terminate_proc_tree(proc)
+                        return
                     continue
                 if not task:
                     msg = "🛑 检测到任务不存在，终止当前 CLI 执行"
@@ -1391,6 +1427,16 @@ class BaseAgent:
                                     self._post_output_bg(
                                         f"⚠ 租约续期连续失败 {consecutive_errors} 次（将继续重试）"
                                     )
+                                if consecutive_errors >= TASK_LEASE_RENEW_FAIL_HARD_AFTER_ERRORS:
+                                    self._active_lease_lost = True
+                                    self._active_phase = "lease_unreachable"
+                                    msg = (
+                                        f"🛑 租约续期连续失败 {consecutive_errors} 次，"
+                                        "主动终止当前执行并重新进入认领循环"
+                                    )
+                                    self._post_output_bg(msg)
+                                    await self.add_log(task["id"], msg)
+                                    return
 
                         busy_hb = asyncio.create_task(busy_status_heartbeat())
                         lease_hb = asyncio.create_task(lease_heartbeat())
@@ -1438,3 +1484,4 @@ class BaseAgent:
         self._post_output_bg(f"[{self.name}] 已收到关闭信号，停止接受新任务")
         print(f"[{self.name}] Stopped.")
         await self.http.aclose()
+        await self.http_output.aclose()

@@ -1862,6 +1862,8 @@ async def agent_output(agent_name: str, body: AgentOutput):
 async def agent_status(agent_name: str, body: AgentStatusUpdate):
     prev = _ensure_agent_state(agent_name)
     busy = str(body.status or "").strip().lower() == "busy"
+    status_value = str(body.status or "").strip() or "idle"
+    task_value = str(body.task or "")
     task_id = (
         str(body.task_id or "").strip()
         if body.task_id is not None
@@ -1883,9 +1885,39 @@ async def agent_status(agent_name: str, body: AgentStatusUpdate):
         else (str(prev.get("phase") or "").strip() if busy else "")
     )
     pid = body.pid if body.pid is not None else (prev.get("pid") if busy else None)
+
+    if busy:
+        agent_key = normalize_agent_key(agent_name, default=agent_name)
+        task_row = db.get_task(task_id) if task_id else None
+        valid_busy = bool(task_row)
+        if valid_busy:
+            assignee_key = normalize_agent_key(task_row.get("assignee"), default="")
+            valid_busy = assignee_key == agent_key
+        if valid_busy:
+            cfg = db.get_agent_type(agent_key)
+            working_status = str((cfg or {}).get("working_status") or "").strip().lower()
+            if working_status:
+                valid_busy = _norm_status(task_row.get("status")) == working_status
+        if valid_busy and run_id:
+            claim_run_id = str(task_row.get("claim_run_id") or "").strip()
+            if claim_run_id:
+                valid_busy = run_id == claim_run_id
+        if valid_busy and lease_token:
+            row_lease_token = str(task_row.get("lease_token") or "").strip()
+            if row_lease_token:
+                valid_busy = lease_token == row_lease_token
+        if not valid_busy:
+            status_value = "idle"
+            task_value = ""
+            task_id = ""
+            run_id = ""
+            lease_token = ""
+            phase = ""
+            pid = None
+
     AGENT_STATUS[agent_name] = {
-        "status": body.status,
-        "task": body.task,
+        "status": status_value,
+        "task": task_value,
         "task_id": task_id,
         "run_id": run_id,
         "lease_token": lease_token,
@@ -1898,8 +1930,8 @@ async def agent_status(agent_name: str, body: AgentStatusUpdate):
         {
             "event": "agent_status",
             "agent": agent_name,
-            "status": body.status,
-            "task": body.task,
+            "status": status_value,
+            "task": task_value,
             "task_id": task_id,
             "run_id": run_id,
             "lease_token": lease_token,
