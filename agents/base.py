@@ -32,7 +32,8 @@ CLI_TEMPLATES = {
     # Use non-interactive subcommand to avoid TTY requirement in agent subprocesses.
     "codex":  ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
 }
-AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "3"))
+# External stdin auto-reply is disabled by default; enable only if explicitly configured.
+AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "0"))
 # Idle fallback auto-reply is disabled by default to avoid blind ENTER loops.
 AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
