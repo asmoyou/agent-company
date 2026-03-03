@@ -13,7 +13,7 @@ DEVELOPER_PROMPT_DEFAULT = (
     "1. **所有成果必须写入文件**，不要只在终端打印输出\n"
     "   - 代码任务 → 创建对应语言的源文件（.py / .ts / .go 等）\n"
     "   - 文档/方案任务 → 创建 `.md` 文件，把完整内容写入\n"
-    "   - 至少创建一个文件，否则任务无法通过审查\n\n"
+    "   - 目标是形成可审查的交付物；若本轮无需新增文件，需在交接中写明依据\n\n"
     "2. **质量标准**\n"
     "   - 代码需有适当注释，边界情况需处理\n"
     "   - 文档需完整、结构清晰\n\n"
@@ -72,7 +72,7 @@ class DeveloperAgent(BaseAgent):
             prompt = (
                 f"实现任务：{task['title']}\n\n{task['description']}\n\n"
                 f"{rework_section}\n\n"
-                "要求：把所有内容写入文件，不要只输出文字。"
+                "要求：优先把可交付内容写入文件；若无需新增文件，请在交接中说明依据。"
             )
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
@@ -142,222 +142,133 @@ class DeveloperAgent(BaseAgent):
             await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
         if not diff.strip():
-            related_commits: list[dict] = []
-            history_commit = ""
-            history_short = ""
-            if cli_created_commit and head_after:
-                history_commit = head_after
-                history_short = head_after[:7]
-                related_commits = [
-                    {
-                        "hash": history_commit,
-                        "short": history_short,
-                        "subject": "cli_generated_commit",
-                        "created_at": "",
-                        "score": 999,
-                    }
-                ]
-                await self.add_log(
+            if not (cli_created_commit and head_after):
+                await self.add_log(task_id, "未检测到 CLI 内提交或文件改动，保持当前状态。")
+                if await self.stop_if_task_cancelled(task_id, "无提交无变更回退前"):
+                    return
+                fields = {"status": prev_status, "assignee": None}
+                if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+                    fields["assigned_agent"] = self.name
+                    fields["dev_agent"] = self.name
+                await self.transition_task(
                     task_id,
-                    f"检测到 CLI 已直接创建提交：{history_short}，将以该提交交接审查",
+                    fields=fields,
+                    handoff={
+                        "stage": "dev_no_progress",
+                        "to_agent": self.name,
+                        "status_from": prev_status,
+                        "status_to": prev_status,
+                        "title": "开发未产生新提交",
+                        "summary": f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}",
+                        "conclusion": "本轮无可审查交付，等待下一轮开发",
+                        "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
+                        "artifact_path": str(worktree_dev),
+                    },
+                    log_message=f"无新提交，保持 {prev_status}",
                 )
-            else:
-                if str(prev_status or "").strip().lower() == "needs_changes":
-                    await self.add_log(
-                        task_id,
-                        "返工轮次未检测到新提交或文件改动，保持 needs_changes，不推进审查。",
-                    )
-                    await self.transition_task(
+                return
+
+            commit_hash = head_after
+            commit_short = head_after[:7]
+            await self.add_log(task_id, f"检测到 CLI 已直接创建提交：{commit_short}")
+            if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
+                return
+
+            # Commit is done by CLI. If state update fails transiently, retry
+            # transition+handoff sync atomically.
+            update_error = None
+            for i in range(1, 7):
+                try:
+                    result = await self.transition_task(
                         task_id,
                         fields={
-                            "status": "needs_changes",
+                            "status": "in_review",
                             "assignee": None,
                             "assigned_agent": self.name,
                             "dev_agent": self.name,
+                            "commit_hash": commit_hash,
                         },
                         handoff={
-                            "stage": "dev_no_progress",
-                            "to_agent": self.name,
-                            "status_from": "needs_changes",
-                            "status_to": "needs_changes",
-                            "title": "开发未产生新变更",
-                            "summary": "未检测到新提交或文件改动，保留在 needs_changes",
-                            "conclusion": "返工未完成，等待下一轮开发",
-                            "payload": {"no_progress": True, "source_branch": branch},
+                            "stage": "dev_to_review",
+                            "to_agent": "reviewer",
+                            "status_from": prev_status,
+                            "status_to": "in_review",
+                            "title": "开发交接审查",
+                            "summary": f"CLI 已提交 commit {commit_short}，等待审查",
+                            "commit_hash": commit_hash,
+                            "conclusion": "开发完成，等待审查结论",
+                            "payload": {
+                                "commit_hash": commit_hash,
+                                "source_branch": branch,
+                                "committed_by_cli": True,
+                            },
                             "artifact_path": str(worktree_dev),
                         },
-                        log_message="返工未产生新变更，保持 needs_changes",
                     )
-                    return
-                related_commits = await self.collect_task_related_commits(
-                    task,
-                    worktree_dev,
-                    max_count=6,
-                )
-                rejected_commit = str(task.get("commit_hash") or "").strip()
-                if str(prev_status or "").strip().lower() == "needs_changes" and rejected_commit:
-                    filtered_commits = [
-                        item
-                        for item in related_commits
-                        if str(item.get("hash") or "").strip() != rejected_commit
-                    ]
-                    if len(filtered_commits) != len(related_commits):
-                        await self.add_log(task_id, f"已排除上轮被退回提交：{rejected_commit[:7]}")
-                    related_commits = filtered_commits
-                history_commit = str(related_commits[0]["hash"]).strip() if related_commits else ""
-                history_short = str(related_commits[0].get("short") or "").strip() if related_commits else ""
-            if history_commit:
+                    if result is None:
+                        # Task was deleted/cancelled while syncing post-commit state.
+                        await self.stop_if_task_cancelled(task_id, "提交后同步状态")
+                        return
+                    update_error = None
+                    break
+                except Exception as e:
+                    update_error = e
+                    self._post_output_bg(
+                        f"⚠ CLI 已提交 {commit_short}，同步状态失败（{i}/6）：{str(e)[:120]}"
+                    )
+                    await asyncio.sleep(min(2 * i, 10))
+
+            if update_error is not None:
                 await self.add_log(
                     task_id,
                     (
-                        "本轮无新增文件变更；已附带历史提交证据："
-                        f"{history_short or history_commit[:12]}（共 {len(related_commits)} 条）"
+                        f"⚠ CLI 已提交 {commit_short}，但无法把任务推进到 in_review：{update_error}。"
+                        "保持当前状态，等待后续重试/人工处理。"
                     ),
                 )
-            else:
-                await self.add_log(
-                    task_id,
-                    "本轮无新增文件变更；未检索到高置信历史提交证据，将按无提交模式交接审查",
+                await self.add_alert(
+                    summary="提交已完成但状态同步失败",
+                    task_id=task_id,
+                    message=f"commit={commit_hash}; error={update_error}",
+                    kind="warning",
+                    code="developer_commit_sync_failed",
+                    stage="developer_post_commit_sync",
+                    metadata={"commit_hash": commit_hash},
                 )
-            if await self.stop_if_task_cancelled(task_id, "推进审查前"):
-                return
-            fields = {
-                "status": "in_review",
-                "assignee": None,
-                "assigned_agent": self.name,
-                "dev_agent": self.name,
-            }
-            if history_commit:
-                fields["commit_hash"] = history_commit
-            summary = (
-                f"本轮无文件变更，附带历史提交证据 {history_short or history_commit[:12]}，推进到审查"
-                if history_commit
-                else "本轮无文件变更，推进到审查"
-            )
-            await self.transition_task(
-                task_id,
-                fields=fields,
-                handoff={
-                    "stage": "dev_to_review",
-                    "to_agent": "reviewer",
-                    "status_from": prev_status,
-                    "status_to": "in_review",
-                    "title": "开发交接审查（无提交）",
-                    "summary": summary,
-                    "commit_hash": history_commit or None,
-                    "conclusion": "无代码新增变更，附历史提交证据交接审查",
-                    "payload": {
-                        "has_commit": bool(history_commit),
-                        "no_new_changes": True,
-                        "source_branch": branch,
-                        "related_history_commits": related_commits,
-                    },
-                    "artifact_path": str(worktree_dev),
+            return
+
+        await self.add_log(
+            task_id,
+            "检测到未提交文件变更；外围不会自动提交，请在 CLI 内完成 commit 后再交接审查。",
+        )
+        if await self.stop_if_task_cancelled(task_id, "检测到未提交变更回退前"):
+            return
+        fields = {"status": prev_status, "assignee": None}
+        if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+            fields["assigned_agent"] = self.name
+            fields["dev_agent"] = self.name
+        await self.transition_task(
+            task_id,
+            fields=fields,
+            handoff={
+                "stage": "dev_commit_required",
+                "to_agent": self.name,
+                "status_from": prev_status,
+                "status_to": prev_status,
+                "title": "开发需在 CLI 内提交",
+                "summary": "检测到未提交改动，未自动提交，保持当前状态",
+                "conclusion": "请在 CLI 内完成提交后再交接",
+                "payload": {
+                    "has_commit": False,
+                    "requires_cli_commit": True,
+                    "source_branch": branch,
+                    "diff_stat": diff.strip()[:1200],
+                    "head_changed": cli_created_commit,
                 },
-                log_message="无文件变更，提交审查",
-            )
-            return
-
-        try:
-            await self.git(
-                "-c", "user.email=agent@opc-demo.local",
-                "-c", "user.name=OPC Agent",
-                "commit", "-m", f"feat: {task['title'][:72]}\n\nTask ID: {task_id}",
-                cwd=worktree_dev,
-            )
-            commit_hash = await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)
-        except Exception as e:
-            await self.add_alert(
-                summary="开发提交失败",
-                task_id=task_id,
-                message=str(e),
-                kind="error",
-                code="developer_commit_failed",
-                stage="developer_failed",
-            )
-            await self.transition_task(
-                task_id,
-                fields={"status": "todo", "assignee": None},
-                handoff={
-                    "stage": "developer_failed",
-                    "to_agent": self.name,
-                    "status_from": prev_status,
-                    "status_to": "todo",
-                    "title": "开发提交失败",
-                    "summary": f"提交失败，任务退回 todo：{e}",
-                    "conclusion": "提交失败，任务回退到 todo",
-                    "payload": {"error": str(e)},
-                },
-                log_message=f"提交失败: {e}",
-            )
-            return
-
-        await self.add_log(task_id, f"已提交: {commit_hash}\n{diff.strip()}")
-        if await self.stop_if_task_cancelled(task_id, "提交后状态更新前"):
-            return
-
-        # Commit is already done locally. If task update fails transiently,
-        # retry state+handoff sync atomically instead of splitting writes.
-        update_error = None
-        for i in range(1, 7):
-            try:
-                result = await self.transition_task(
-                    task_id,
-                    fields={
-                        "status": "in_review",
-                        "assignee": None,
-                        "assigned_agent": self.name,
-                        "dev_agent": self.name,
-                        "commit_hash": commit_hash,
-                    },
-                    handoff={
-                        "stage": "dev_to_review",
-                        "to_agent": "reviewer",
-                        "status_from": prev_status,
-                        "status_to": "in_review",
-                        "title": "开发交接审查",
-                        "summary": f"已提交 commit {commit_hash}，等待审查",
-                        "commit_hash": commit_hash,
-                        "conclusion": "开发完成，等待审查结论",
-                        "payload": {
-                            "commit_hash": commit_hash,
-                            "diff_stat": diff.strip(),
-                            "source_branch": branch,
-                        },
-                        "artifact_path": str(worktree_dev),
-                    },
-                )
-                if result is None:
-                    # Task was deleted/cancelled while syncing post-commit state.
-                    await self.stop_if_task_cancelled(task_id, "提交后同步状态")
-                    return
-                update_error = None
-                break
-            except Exception as e:
-                update_error = e
-                self._post_output_bg(
-                    f"⚠ 已提交 {commit_hash}，同步状态失败（{i}/6）：{str(e)[:120]}"
-                )
-                await asyncio.sleep(min(2 * i, 10))
-
-        if update_error is not None:
-            await self.add_log(
-                task_id,
-                (
-                    f"⚠ 已本地提交 {commit_hash}，但无法把任务推进到 in_review：{update_error}。"
-                    "保持当前状态，等待后续重试/人工处理。"
-                ),
-            )
-            await self.add_alert(
-                summary="提交已完成但状态同步失败",
-                task_id=task_id,
-                message=f"commit={commit_hash}; error={update_error}",
-                kind="warning",
-                code="developer_commit_sync_failed",
-                stage="developer_post_commit_sync",
-                metadata={"commit_hash": commit_hash},
-            )
-            return
+                "artifact_path": str(worktree_dev),
+            },
+            log_message="检测到未提交改动，保持当前状态等待 CLI 提交",
+        )
 
 
 if __name__ == "__main__":

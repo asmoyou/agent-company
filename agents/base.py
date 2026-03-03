@@ -32,7 +32,7 @@ CLI_TEMPLATES = {
     # Use non-interactive subcommand to avoid TTY requirement in agent subprocesses.
     "codex":  ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
 }
-AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "12"))
+AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "3"))
 # Idle fallback auto-reply is disabled by default to avoid blind ENTER loops.
 AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
@@ -42,9 +42,8 @@ CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "3600"))
 CONTEXT_MAX_HANDOFFS = int(os.getenv("CONTEXT_MAX_HANDOFFS", "24"))
 CONTEXT_MAX_UNRESOLVED_FEEDBACK = int(os.getenv("CONTEXT_MAX_UNRESOLVED_FEEDBACK", "12"))
 INTERACTIVE_PROMPT_RE = re.compile(
-    r"(?i)(press\s+enter|hit\s+enter|按回车|回车继续|是否继续|continue\?|proceed\?|确认继续|"
-    r"\[y/n\]|\[y/N\]|\(y/n\)|yes/no|select\s+an?\s+option|choose\s+an?\s+option|"
-    r"请输入.*继续|input.*continue)"
+    r"(?i)(press\s+enter(?:\s+to\s+continue)?|hit\s+enter(?:\s+to\s+continue)?|"
+    r"请按回车(?:继续)?|按下回车键|按回车继续|回车继续)"
 )
 
 
