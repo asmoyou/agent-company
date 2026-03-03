@@ -140,6 +140,7 @@ AGENT_STATUS: dict = defaultdict(
         "status": "idle",
         "task": "",
         "task_id": "",
+        "project_id": "",
         "run_id": "",
         "lease_token": "",
         "phase": "",
@@ -179,6 +180,7 @@ def _ensure_agent_state(agent_name: str) -> dict:
     state.setdefault("status", "idle")
     state.setdefault("task", "")
     state.setdefault("task_id", "")
+    state.setdefault("project_id", "")
     state.setdefault("run_id", "")
     state.setdefault("lease_token", "")
     state.setdefault("phase", "")
@@ -188,7 +190,7 @@ def _ensure_agent_state(agent_name: str) -> dict:
     return state
 
 
-def _agent_outputs_snapshot() -> dict:
+def _agent_outputs_snapshot(user: dict | None = None) -> dict:
     return {
         name: {"lines": [_normalize_agent_output_entry(x) for x in list(AGENT_OUTPUT[name])], "status": dict(_ensure_agent_state(name))}
         for name in AGENT_OUTPUT
@@ -202,6 +204,7 @@ def _normalize_agent_output_entry(raw) -> dict:
             "line": line,
             "kind": str(raw.get("kind") or "line").strip().lower() or "line",
             "event": str(raw.get("event") or "line").strip().lower() or "line",
+            "project_id": str(raw.get("project_id") or "").strip() or None,
             "task_id": str(raw.get("task_id") or "").strip() or None,
             "run_id": str(raw.get("run_id") or "").strip() or None,
             "exit_code": int(raw["exit_code"]) if raw.get("exit_code") is not None else None,
@@ -211,6 +214,7 @@ def _normalize_agent_output_entry(raw) -> dict:
         "line": str(raw or ""),
         "kind": "line",
         "event": "line",
+        "project_id": None,
         "task_id": None,
         "run_id": None,
         "exit_code": None,
@@ -225,6 +229,7 @@ async def _recover_stale_agent(agent_name: str, stale_secs: int):
         "status": "idle",
         "task": "",
         "task_id": "",
+        "project_id": "",
         "run_id": "",
         "lease_token": "",
         "phase": "",
@@ -239,6 +244,7 @@ async def _recover_stale_agent(agent_name: str, stale_secs: int):
             "status": "idle",
             "task": "",
             "task_id": "",
+            "project_id": "",
             "run_id": "",
             "lease_token": "",
             "phase": "",
@@ -320,6 +326,7 @@ async def _agent_health_watchdog():
                 "status": "idle",
                 "task": "",
                 "task_id": "",
+                "project_id": "",
                 "run_id": "",
                 "lease_token": "",
                 "phase": "",
@@ -334,6 +341,7 @@ async def _agent_health_watchdog():
                     "status": "idle",
                     "task": "",
                     "task_id": "",
+                    "project_id": "",
                     "run_id": "",
                     "lease_token": "",
                     "phase": "",
@@ -365,9 +373,16 @@ class ConnectionManager:
         if not event:
             return True
 
-        # Non-project-scoped events can be shared across users.
-        if event.startswith("agent_") or event.startswith("agent_type_"):
+        if event.startswith("agent_type_"):
             return True
+        if event.startswith("agent_"):
+            pid = str(data.get("project_id") or "").strip()
+            if not pid:
+                output = data.get("output") if isinstance(data.get("output"), dict) else {}
+                pid = str(output.get("project_id") or "").strip()
+            if not pid:
+                return True
+            return db.user_can_access_project(pid, user.get("id"), False)
 
         if event == "project_created":
             project = data.get("project") if isinstance(data.get("project"), dict) else {}
@@ -575,12 +590,14 @@ class AgentOutput(BaseModel):
     kind: str | None = None
     event: str | None = None
     exit_code: int | None = None
+    project_id: str | None = None
     task_id: str | None = None
     run_id: str | None = None
 
 class AgentStatusUpdate(BaseModel):
     status: str
     task: str = ""
+    project_id: str | None = None
     task_id: str | None = None
     run_id: str | None = None
     lease_token: str | None = None
@@ -1853,20 +1870,30 @@ async def update_agent_type(agent_key: str, body: AgentTypeUpdate, _admin: dict 
 
 @app.delete("/agent-types/{agent_key}")
 async def delete_agent_type(agent_key: str, _admin: dict = Depends(require_admin)):
-    at = db.get_agent_type(agent_key)
+    key = normalize_agent_key(agent_key, default=agent_key)
+    at = db.get_agent_type(key)
     if not at:
         raise HTTPException(404, "Not found")
     if at["is_builtin"]:
         raise HTTPException(403, "内置 Agent 不可删除")
-    db.delete_agent_type(agent_key)
-    await manager.broadcast({"event": "agent_type_deleted", "agent_key": agent_key})
+    db.delete_agent_type(key)
+    db.delete_agent_outputs_for_agent(key)
+    AGENT_OUTPUT.pop(key, None)
+    AGENT_STATUS.pop(key, None)
+    touched_tasks = db.clear_task_agent_refs_for_deleted_agent(
+        key,
+        working_status=str(at.get("working_status") or "").strip() or None,
+    )
+    await manager.broadcast({"event": "agent_type_deleted", "agent_key": key})
+    for task in touched_tasks:
+        await manager.broadcast({"event": "task_updated", "task": task})
     return {"ok": True}
 
 
 # ── Agent terminal endpoints ──────────────────────────────────────────────────
 @app.get("/agents/outputs")
-async def get_agent_outputs(_user: dict = Depends(require_user)):
-    return _agent_outputs_snapshot()
+async def get_agent_outputs(user: dict = Depends(require_user)):
+    return _agent_outputs_snapshot(user=user)
 
 @app.post("/agents/{agent_name}/output")
 async def agent_output(
@@ -1874,38 +1901,56 @@ async def agent_output(
     body: AgentOutput,
     _principal: dict = Depends(require_agent_or_user),
 ):
-    state = _ensure_agent_state(agent_name)
+    agent_key = normalize_agent_key(agent_name, default=agent_name)
+    if not db.get_agent_type(agent_key):
+        raise HTTPException(404, "Agent type not found")
+    state = _ensure_agent_state(agent_key)
+    incoming_task_id = str(body.task_id or "").strip() if body.task_id is not None else None
+    incoming_project_id = str(body.project_id or "").strip() if body.project_id is not None else None
+    resolved_project_id = incoming_project_id
+    lookup_task_id = incoming_task_id
+    if lookup_task_id is None:
+        lookup_task_id = str(state.get("task_id") or "").strip() or None
+    if lookup_task_id:
+        task_row = db.get_task(lookup_task_id)
+        if task_row:
+            resolved_project_id = str(task_row.get("project_id") or "").strip() or resolved_project_id
     entry = _normalize_agent_output_entry(
         {
             "line": body.line,
             "kind": body.kind,
             "event": body.event,
-            "task_id": body.task_id,
+            "project_id": resolved_project_id,
+            "task_id": incoming_task_id,
             "run_id": body.run_id,
             "exit_code": body.exit_code,
             "created_at": _utcnow_iso(),
         }
     )
-    AGENT_OUTPUT[agent_name].append(entry)
+    AGENT_OUTPUT[agent_key].append(entry)
     state["last_output_at"] = _utcnow_iso()
     if body.task_id is not None:
-        state["task_id"] = str(body.task_id or "").strip()
+        state["task_id"] = incoming_task_id or ""
+    if incoming_project_id is not None or body.task_id is not None:
+        state["project_id"] = str(resolved_project_id or "").strip()
     if body.run_id is not None:
         state["run_id"] = str(body.run_id or "").strip()
     db.add_agent_output(
-        agent=agent_name,
+        agent=agent_key,
         line=entry["line"],
+        project_id=entry["project_id"],
         kind=entry["kind"],
         event=entry["event"],
         exit_code=entry["exit_code"],
-        task_id=body.task_id,
+        task_id=incoming_task_id,
         run_id=body.run_id,
         keep_last=1000,
     )
     broadcast_bg(
         {
             "event": "agent_output",
-            "agent": agent_name,
+            "agent": agent_key,
+            "project_id": entry["project_id"],
             "line": entry["line"],
             "output": entry,
         }
@@ -1918,10 +1963,19 @@ async def agent_status(
     body: AgentStatusUpdate,
     _principal: dict = Depends(require_agent_or_user),
 ):
-    prev = _ensure_agent_state(agent_name)
+    agent_key = normalize_agent_key(agent_name, default=agent_name)
+    cfg = db.get_agent_type(agent_key)
+    if not cfg:
+        raise HTTPException(404, "Agent type not found")
+    prev = _ensure_agent_state(agent_key)
     busy = str(body.status or "").strip().lower() == "busy"
     status_value = str(body.status or "").strip() or "idle"
     task_value = str(body.task or "")
+    project_id = (
+        str(body.project_id or "").strip()
+        if body.project_id is not None
+        else (str(prev.get("project_id") or "").strip() if busy else "")
+    )
     task_id = (
         str(body.task_id or "").strip()
         if body.task_id is not None
@@ -1945,14 +1999,12 @@ async def agent_status(
     pid = body.pid if body.pid is not None else (prev.get("pid") if busy else None)
 
     if busy:
-        agent_key = normalize_agent_key(agent_name, default=agent_name)
         task_row = db.get_task(task_id) if task_id else None
         valid_busy = bool(task_row)
         if valid_busy:
             assignee_key = normalize_agent_key(task_row.get("assignee"), default="")
             valid_busy = assignee_key == agent_key
         if valid_busy:
-            cfg = db.get_agent_type(agent_key)
             working_status = str((cfg or {}).get("working_status") or "").strip().lower()
             if working_status:
                 valid_busy = _norm_status(task_row.get("status")) == working_status
@@ -1967,15 +2019,19 @@ async def agent_status(
         if not valid_busy:
             status_value = "idle"
             task_value = ""
+            project_id = ""
             task_id = ""
             run_id = ""
             lease_token = ""
             phase = ""
             pid = None
+        else:
+            project_id = str(task_row.get("project_id") or "").strip() if task_row else project_id
 
-    AGENT_STATUS[agent_name] = {
+    AGENT_STATUS[agent_key] = {
         "status": status_value,
         "task": task_value,
+        "project_id": project_id,
         "task_id": task_id,
         "run_id": run_id,
         "lease_token": lease_token,
@@ -1987,9 +2043,10 @@ async def agent_status(
     broadcast_bg(
         {
             "event": "agent_status",
-            "agent": agent_name,
+            "agent": agent_key,
             "status": status_value,
             "task": task_value,
+            "project_id": project_id,
             "task_id": task_id,
             "run_id": run_id,
             "lease_token": lease_token,
@@ -2018,7 +2075,7 @@ async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=No
                 "tasks": db.list_tasks(user_id=user["id"], is_admin=_is_admin(user)),
                 "projects": db.list_projects(user_id=user["id"], is_admin=_is_admin(user)),
                 "agent_types": db.list_agent_types(),
-                "agent_outputs": _agent_outputs_snapshot(),
+                "agent_outputs": _agent_outputs_snapshot(user=user),
                 "user": user,
             },
         )

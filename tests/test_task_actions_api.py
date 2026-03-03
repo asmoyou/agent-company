@@ -43,6 +43,23 @@ class TaskActionsApiTest(unittest.TestCase):
             status=status,
         )
 
+    def _create_custom_agent(self, key: str = "asmo-dev") -> None:
+        res = self.client.post(
+            "/agent-types",
+            json={
+                "key": key,
+                "name": "ASMO Developer",
+                "description": "custom developer",
+                "prompt": "do task",
+                "poll_statuses": ["todo", "needs_changes"],
+                "next_status": "in_review",
+                "working_status": "coding",
+                "cli": "claude",
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 201)
+
     def test_patch_rejects_direct_status_change(self):
         task = self._create_task(status="todo")
         res = self.client.patch(
@@ -540,6 +557,75 @@ class TaskActionsApiTest(unittest.TestCase):
             headers=self._bad_agent_headers,
         )
         self.assertEqual(res.status_code, 401)
+
+    def test_agent_output_persists_project_id_from_task(self):
+        task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/agents/developer/output",
+            json={"line": "ok", "event": "line", "task_id": task["id"]},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        entries = db.get_agent_output_entries("developer", limit=1)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["project_id"], self.project["id"])
+
+    def test_delete_agent_type_cleans_outputs_and_task_references(self):
+        key = "asmo-dev"
+        self._create_custom_agent(key)
+        queued = self._create_task(status="needs_changes", assigned_agent=key, dev_agent=key)
+        running = self._create_task(status="coding", assigned_agent=key, dev_agent=key)
+        db.update_task(
+            running["id"],
+            assignee=key,
+            claim_run_id="run-1",
+            lease_token="lease-1",
+            lease_expires_at="2099-01-01T00:00:00",
+        )
+        out = self.client.post(
+            f"/agents/{key}/output",
+            json={"line": "hello", "event": "line", "task_id": queued["id"]},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(out.status_code, 200)
+        self.assertGreater(len(db.get_agent_output_entries(key, limit=10)), 0)
+
+        deleted = self.client.delete(f"/agent-types/{key}", headers=self._headers)
+        self.assertEqual(deleted.status_code, 200)
+
+        queued_after = db.get_task(queued["id"])
+        self.assertIsNotNone(queued_after)
+        self.assertIsNone(queued_after["assigned_agent"])
+        self.assertIsNone(queued_after["dev_agent"])
+
+        running_after = db.get_task(running["id"])
+        self.assertIsNotNone(running_after)
+        self.assertEqual(running_after["status"], "todo")
+        self.assertIsNone(running_after["assignee"])
+        self.assertIsNone(running_after["claim_run_id"])
+        self.assertIsNone(running_after["lease_token"])
+
+        self.assertEqual(db.get_agent_output_entries(key, limit=10), [])
+
+    def test_deleted_agent_cannot_report_output_or_status(self):
+        key = "asmo-dev"
+        self._create_custom_agent(key)
+        deleted = self.client.delete(f"/agent-types/{key}", headers=self._headers)
+        self.assertEqual(deleted.status_code, 200)
+
+        out = self.client.post(
+            f"/agents/{key}/output",
+            json={"line": "after delete", "event": "line"},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(out.status_code, 404)
+
+        status = self.client.post(
+            f"/agents/{key}/status",
+            json={"status": "idle", "task": ""},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(status.status_code, 404)
 
     def test_alert_accepts_agent_token(self):
         res = self.client.post(
