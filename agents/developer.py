@@ -141,38 +141,27 @@ class DeveloperAgent(BaseAgent):
         if not diff.strip() and output.strip() and len(output) > 50:
             await self.add_log(task_id, "CLI 未生成新的可提交文件变更。")
 
-        if not diff.strip():
-            if not (cli_created_commit and head_after):
-                await self.add_log(task_id, "未检测到 CLI 内提交或文件改动，保持当前状态。")
-                if await self.stop_if_task_cancelled(task_id, "无提交无变更回退前"):
-                    return
-                fields = {"status": prev_status, "assignee": None}
-                if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
-                    fields["assigned_agent"] = self.name
-                    fields["dev_agent"] = self.name
-                await self.transition_task(
-                    task_id,
-                    fields=fields,
-                    handoff={
-                        "stage": "dev_no_progress",
-                        "to_agent": self.name,
-                        "status_from": prev_status,
-                        "status_to": prev_status,
-                        "title": "开发未产生新提交",
-                        "summary": f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}",
-                        "conclusion": "本轮无可审查交付，等待下一轮开发",
-                        "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
-                        "artifact_path": str(worktree_dev),
-                    },
-                    log_message=f"无新提交，保持 {prev_status}",
-                )
-                return
-
+        if cli_created_commit and head_after:
             commit_hash = head_after
             commit_short = head_after[:7]
+            diff_stat = diff.strip()
             await self.add_log(task_id, f"检测到 CLI 已直接创建提交：{commit_short}")
+            if diff_stat:
+                await self.add_log(
+                    task_id,
+                    "检测到额外未提交改动；按最新 commit 推进审查，剩余改动保留在工作区。",
+                )
             if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
                 return
+
+            handoff_payload = {
+                "commit_hash": commit_hash,
+                "source_branch": branch,
+                "committed_by_cli": True,
+            }
+            if diff_stat:
+                handoff_payload["has_uncommitted_changes"] = True
+                handoff_payload["uncommitted_diff_stat"] = diff_stat[:1200]
 
             # Commit is done by CLI. If state update fails transiently, retry
             # transition+handoff sync atomically.
@@ -197,11 +186,7 @@ class DeveloperAgent(BaseAgent):
                             "summary": f"CLI 已提交 commit {commit_short}，等待审查",
                             "commit_hash": commit_hash,
                             "conclusion": "开发完成，等待审查结论",
-                            "payload": {
-                                "commit_hash": commit_hash,
-                                "source_branch": branch,
-                                "committed_by_cli": True,
-                            },
+                            "payload": handoff_payload,
                             "artifact_path": str(worktree_dev),
                         },
                     )
@@ -235,6 +220,32 @@ class DeveloperAgent(BaseAgent):
                     stage="developer_post_commit_sync",
                     metadata={"commit_hash": commit_hash},
                 )
+            return
+
+        if not diff.strip():
+            await self.add_log(task_id, "未检测到 CLI 内提交或文件改动，保持当前状态。")
+            if await self.stop_if_task_cancelled(task_id, "无提交无变更回退前"):
+                return
+            fields = {"status": prev_status, "assignee": None}
+            if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+                fields["assigned_agent"] = self.name
+                fields["dev_agent"] = self.name
+            await self.transition_task(
+                task_id,
+                fields=fields,
+                handoff={
+                    "stage": "dev_no_progress",
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": prev_status,
+                    "title": "开发未产生新提交",
+                    "summary": f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}",
+                    "conclusion": "本轮无可审查交付，等待下一轮开发",
+                    "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
+                    "artifact_path": str(worktree_dev),
+                },
+                log_message=f"无新提交，保持 {prev_status}",
+            )
             return
 
         await self.add_log(
