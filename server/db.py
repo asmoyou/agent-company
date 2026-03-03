@@ -213,6 +213,7 @@ def init_db():
 
     _seed_builtin_agents(conn)
     _recover_reviewer_stuck_tasks(conn)
+    _recover_invalid_todo_assignments(conn)
     conn.commit()
     conn.close()
 
@@ -329,6 +330,61 @@ def _recover_reviewer_stuck_tasks(conn):
         """,
         (_now(),),
     )
+
+
+def _parse_poll_statuses(raw) -> list[str]:
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x) for x in data]
+
+
+def _todo_pollers(conn) -> set[str]:
+    rows = conn.execute("SELECT key, poll_statuses FROM agent_types").fetchall()
+    out: set[str] = set()
+    for row in rows:
+        key = str(row["key"] or "").strip()
+        if not key:
+            continue
+        if "todo" in _parse_poll_statuses(row["poll_statuses"]):
+            out.add(key)
+    return out
+
+
+def _recover_invalid_todo_assignments(conn):
+    """
+    Fix historical rows where todo tasks were assigned to agents
+    that do not poll todo (e.g. leader/reviewer/manager), which blocks claiming.
+    """
+    todo_pollers = _todo_pollers(conn)
+    if not todo_pollers:
+        return
+    rows = conn.execute(
+        """
+        SELECT id, assigned_agent, dev_agent
+          FROM tasks
+         WHERE status='todo'
+           AND archived=0
+           AND assigned_agent IS NOT NULL
+           AND TRIM(assigned_agent) != ''
+        """
+    ).fetchall()
+    if not rows:
+        return
+    now = _now()
+    for row in rows:
+        assigned = str(row["assigned_agent"] or "").strip()
+        if assigned in todo_pollers:
+            continue
+        dev_agent = str(row["dev_agent"] or "").strip()
+        fallback = dev_agent if dev_agent in todo_pollers else None
+        conn.execute(
+            "UPDATE tasks SET assigned_agent=?, updated_at=? WHERE id=?",
+            (fallback, now, row["id"]),
+        )
 
 
 def _now():
@@ -504,7 +560,7 @@ def list_tasks(project_id: str | None = None) -> list[dict]:
 def update_task(task_id: str, **fields) -> dict | None:
     conn = get_conn()
     current = conn.execute(
-        "SELECT status FROM tasks WHERE id=?",
+        "SELECT status, assigned_agent, dev_agent FROM tasks WHERE id=?",
         (task_id,),
     ).fetchone()
     if not current:
@@ -524,6 +580,19 @@ def update_task(task_id: str, **fields) -> dict | None:
         ).fetchone()
         conn.close()
         return dict(row) if row else None
+
+    target_status = str(fields.get("status") or current["status"] or "").strip()
+    if target_status == "todo":
+        todo_pollers = _todo_pollers(conn)
+        # Validate current/effective assignment for todo claimability.
+        if "assigned_agent" in fields:
+            effective_assigned = str(fields.get("assigned_agent") or "").strip()
+        else:
+            effective_assigned = str(current["assigned_agent"] or "").strip()
+        if effective_assigned and effective_assigned not in todo_pollers:
+            fallback_dev = str(fields.get("dev_agent") or current["dev_agent"] or "").strip()
+            fields["assigned_agent"] = fallback_dev if fallback_dev in todo_pollers else None
+
     fields["updated_at"] = _now()
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
