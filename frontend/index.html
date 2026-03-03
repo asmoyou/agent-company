@@ -406,6 +406,12 @@
       <div id="panel-feedback" class="text-sm rounded p-3 whitespace-pre-wrap border"></div>
     </div>
 
+    <!-- 修改意见历史 -->
+    <div id="panel-feedback-history-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-2">修改意见历史</div>
+      <div id="panel-feedback-history" class="space-y-2 text-xs"></div>
+    </div>
+
     <!-- Commit -->
     <div id="panel-commit-wrap" class="hidden">
       <div class="text-xs text-slate-400 mb-1">提交哈希</div>
@@ -1156,6 +1162,53 @@ function formatLocalDateTime(ts) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function parseHeartbeatElapsed(message) {
+  const msg = String(message || "").trim();
+  let m = msg.match(/^⏳\s*仍在工作中\.\.\.\s*已运行\s*(\d+)s$/);
+  if (m) return Number(m[1]);
+  m = msg.match(/^⏳\s*still working\.\.\.\s*(?:elapsed|running)\s*(\d+)s$/i);
+  if (m) return Number(m[1]);
+  return null;
+}
+
+function collapseHeartbeatLogs(logs) {
+  const out = [];
+  let group = null;
+  const flush = () => {
+    if (!group) return;
+    if (group.items.length === 1) {
+      out.push(group.items[0]);
+    } else {
+      const latest = group.elapseds[group.elapseds.length - 1];
+      const first = group.elapseds[0];
+      const omitted = group.items.length - 1;
+      out.push({
+        ...group.items[group.items.length - 1],
+        message: `⏳ 仍在工作中（省略 ${omitted} 条心跳，${first}s → ${latest}s）`,
+      });
+    }
+    group = null;
+  };
+  for (const log of logs || []) {
+    const elapsed = parseHeartbeatElapsed(log?.message);
+    if (elapsed === null) {
+      flush();
+      out.push(log);
+      continue;
+    }
+    const sameAgent = group && String(group.agent || "") === String(log?.agent || "");
+    if (!group || !sameAgent) {
+      flush();
+      group = { agent: log?.agent, items: [log], elapseds: [elapsed] };
+      continue;
+    }
+    group.items.push(log);
+    group.elapseds.push(elapsed);
+  }
+  flush();
+  return out;
+}
+
 function showToast(title, message, kind = "error") {
   const wrap = document.getElementById("toast-wrap");
   if (!wrap) return;
@@ -1293,6 +1346,7 @@ async function openPanel(id) {
         ? "text-amber-300 bg-amber-900/20 border-amber-900/40"
         :"text-green-300 bg-green-900/20 border-green-900/40"}`;
   } else { fbWrap.classList.add("hidden"); }
+  renderFeedbackHistory(task);
 
   // Commit
   const cmWrap = document.getElementById("panel-commit-wrap");
@@ -1304,13 +1358,61 @@ async function openPanel(id) {
   await loadTaskFiles(id, task.status);
   await loadTaskHandoffs(id);
 
-  try {
-    const res = await fetch(`${API}/tasks/${id}/logs`);
-    renderLogs(await res.json());
-  } catch { document.getElementById("panel-logs").innerHTML="<div class='text-slate-500'>无法加载</div>"; }
+  await loadTaskLogs(id);
 
   document.getElementById("panel").classList.remove("hidden-panel");
   document.getElementById("panel-overlay").classList.remove("hidden");
+}
+
+function parseFeedbackHistory(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(x => x && typeof x === "object");
+  if (typeof raw !== "string") return [];
+  try {
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data.filter(x => x && typeof x === "object") : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderFeedbackHistory(task) {
+  const wrap = document.getElementById("panel-feedback-history-wrap");
+  const el = document.getElementById("panel-feedback-history");
+  if (!wrap || !el) return;
+  const history = parseFeedbackHistory(task?.review_feedback_history);
+  if (!history.length) {
+    wrap.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+
+  const recent = history.slice(-12).reverse();
+  el.innerHTML = recent.map(item => {
+    const fid = escHtml(item.id || "FB????");
+    const source = escHtml(item.source || "system");
+    const at = escHtml(String(item.created_at || "").replace("T", " ").slice(0, 19));
+    const feedback = escHtml(item.feedback || "");
+    const resolved = !!item.resolved;
+    const resolvedAt = escHtml(String(item.resolved_at || "").replace("T", " ").slice(0, 19));
+    const resolvedReason = escHtml(item.resolved_reason || "");
+    const statusBadge = resolved
+      ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-300">已解决</span>`
+      : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-300">未解决</span>`;
+    const resolveLine = resolved
+      ? `<div class="text-slate-500 mt-1">${resolvedAt || "-"} ${resolvedReason ? "· " + resolvedReason : ""}</div>`
+      : "";
+    return `<div class="log-entry border-l-slate-600/60">
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-slate-300 font-mono">${fid}</div>
+        ${statusBadge}
+      </div>
+      <div class="text-slate-500 mt-0.5">${source}${at ? " · " + at : ""}</div>
+      <div class="text-slate-200 mt-1 whitespace-pre-wrap">${feedback}</div>
+      ${resolveLine}
+    </div>`;
+  }).join("");
+  wrap.classList.remove("hidden");
 }
 
 async function loadTaskFiles(taskId, status) {
@@ -1348,10 +1450,24 @@ async function loadTaskFiles(taskId, status) {
   }
 }
 
+async function loadTaskLogs(taskId, scrollToBottom = false) {
+  const el = document.getElementById("panel-logs");
+  if (!el) return;
+  try {
+    const res = await fetch(`${API}/tasks/${taskId}/logs`);
+    if (!res.ok) throw new Error(await res.text());
+    renderLogs(await res.json());
+    if (scrollToBottom) el.scrollTop = el.scrollHeight;
+  } catch {
+    el.innerHTML = "<div class='text-slate-500'>无法加载</div>";
+  }
+}
+
 function renderLogs(logs) {
   const el=document.getElementById("panel-logs");
-  if (!logs.length){el.innerHTML="<div class='text-slate-500'>暂无日志</div>";return;}
-  el.innerHTML=logs.map(log=>`
+  const merged = collapseHeartbeatLogs(logs || []);
+  if (!merged.length){el.innerHTML="<div class='text-slate-500'>暂无日志</div>";return;}
+  el.innerHTML=merged.map(log=>`
     <div class="log-entry">
       <div class="text-indigo-400 font-medium">${escHtml(log.agent)}</div>
       <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(log.message)}</div>
@@ -1434,10 +1550,23 @@ function showRejectInput() {
 }
 async function rejectTask() {
   if (!currentTaskId) return;
+  const task = tasks[currentTaskId];
+  if (!task) return;
   const fb=document.getElementById("reject-feedback").value.trim();
   if (!fb){alert("请填写修改意见");return;}
-  await patchTask(currentTaskId,{status:"needs_changes",review_feedback:fb});
-  closePanel();
+  const devAgent = String(task.dev_agent || task.assigned_agent || "developer").trim() || "developer";
+  const updated = await patchTask(currentTaskId,{
+    status:"needs_changes",
+    assignee:null,
+    assigned_agent:devAgent,
+    dev_agent:devAgent,
+    review_feedback:fb,
+    feedback_source:"user",
+    feedback_stage:"user_to_dev",
+    feedback_actor:"user",
+    create_handoff:true,
+  });
+  if (updated) closePanel();
 }
 function getBlockedRetryAction(task) {
   if (!task || task.status !== "blocked") return null;
@@ -1534,7 +1663,11 @@ function renderSubtaskList(parentId) {
 async function patchTask(id,fields) {
   const res=await fetch(`${API}/tasks/${id}`,{
     method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});
-  if (!res.ok) alert("操作失败: "+await res.text());
+  if (!res.ok) {
+    alert("操作失败: "+await res.text());
+    return null;
+  }
+  return await res.json();
 }
 function closePanel() {
   document.getElementById("panel").classList.add("hidden-panel");
@@ -1829,12 +1962,16 @@ function connectWS() {
       }
     } else if (msg.event==="log_added") {
       if (currentTaskId===msg.log.task_id) {
-        const el=document.getElementById("panel-logs");
-        const d=document.createElement("div");d.className="log-entry";
-        d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
-          <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
-          <div class="text-slate-600 mt-0.5">${formatLocalDateTime(msg.log.created_at)}</div>`;
-        el.appendChild(d); el.scrollTop=el.scrollHeight;
+        if (parseHeartbeatElapsed(msg.log.message) !== null) {
+          loadTaskLogs(currentTaskId, true);
+        } else {
+          const el=document.getElementById("panel-logs");
+          const d=document.createElement("div");d.className="log-entry";
+          d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
+            <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
+            <div class="text-slate-600 mt-0.5">${formatLocalDateTime(msg.log.created_at)}</div>`;
+          el.appendChild(d); el.scrollTop=el.scrollHeight;
+        }
       }
     } else if (msg.event==="agent_output") {
       ensureAgentTerminal(msg.agent);

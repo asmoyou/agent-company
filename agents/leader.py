@@ -411,6 +411,9 @@ class LeaderAgent(BaseAgent):
             assignee=None,
             assigned_agent=self.name,
             review_feedback=msg,
+            feedback_source=self.name,
+            feedback_stage="leader_failed",
+            feedback_actor=self.name,
         )
 
     async def _create_subtasks(self, task: dict, subtasks: list[dict]) -> int:

@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -6,6 +7,8 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
 CANCELLED_STATUS = "cancelled"
+ACTIONABLE_FEEDBACK_STATUSES = {"needs_changes", "blocked"}
+FEEDBACK_RESOLVE_STATUSES = {"approved", "pending_acceptance", "completed", CANCELLED_STATUS}
 
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
@@ -108,6 +111,7 @@ def init_db():
             status          TEXT NOT NULL DEFAULT 'todo',
             assignee        TEXT,
             review_feedback TEXT,
+            review_feedback_history TEXT NOT NULL DEFAULT '[]',
             commit_hash     TEXT,
             archived        INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL,
@@ -169,6 +173,7 @@ def init_db():
         ("status", "TEXT NOT NULL DEFAULT 'todo'"),
         ("assignee", "TEXT"),
         ("review_feedback", "TEXT"),
+        ("review_feedback_history", "TEXT NOT NULL DEFAULT '[]'"),
         ("commit_hash", "TEXT"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("parent_task_id", "TEXT"),
@@ -391,6 +396,109 @@ def _now():
     return datetime.utcnow().isoformat()
 
 
+def _parse_feedback_history(raw) -> list[dict]:
+    data = raw
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            return []
+        try:
+            data = json.loads(txt)
+        except Exception:
+            return []
+    if not isinstance(data, list):
+        return []
+
+    out: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        feedback = str(item.get("feedback") or "").strip()
+        if not feedback:
+            continue
+        resolved_at = str(item.get("resolved_at") or "").strip()
+        resolved = bool(item.get("resolved")) or bool(resolved_at)
+        out.append(
+            {
+                "id": str(item.get("id") or "").strip(),
+                "created_at": str(item.get("created_at") or "").strip(),
+                "source": str(item.get("source") or "system").strip() or "system",
+                "status_at": str(item.get("status_at") or "").strip(),
+                "stage": str(item.get("stage") or "").strip(),
+                "actor": str(item.get("actor") or "").strip(),
+                "feedback": feedback[:4000],
+                "resolved": resolved,
+                "resolved_at": resolved_at,
+                "resolved_reason": str(item.get("resolved_reason") or "").strip(),
+            }
+        )
+    return out
+
+
+def _dump_feedback_history(history: list[dict]) -> str:
+    return json.dumps(history, ensure_ascii=False)
+
+
+def _next_feedback_id(history: list[dict]) -> str:
+    max_n = 0
+    for item in history:
+        fid = str(item.get("id") or "").strip().upper()
+        m = re.match(r"^FB(\d+)$", fid)
+        if not m:
+            continue
+        try:
+            max_n = max(max_n, int(m.group(1)))
+        except Exception:
+            continue
+    return f"FB{max_n + 1:04d}"
+
+
+def _resolve_open_feedback(history: list[dict], resolved_at: str, reason: str) -> bool:
+    changed = False
+    for item in history:
+        if bool(item.get("resolved")):
+            continue
+        item["resolved"] = True
+        item["resolved_at"] = resolved_at
+        item["resolved_reason"] = reason[:80]
+        changed = True
+    return changed
+
+
+def _append_feedback_entry(
+    history: list[dict],
+    feedback: str,
+    source: str,
+    status_at: str,
+    stage: str,
+    actor: str,
+    created_at: str,
+) -> bool:
+    text = str(feedback or "").strip()
+    if not text:
+        return False
+
+    _resolve_open_feedback(history, created_at, "superseded")
+    history.append(
+        {
+            "id": _next_feedback_id(history),
+            "created_at": created_at,
+            "source": source[:40] or "system",
+            "status_at": status_at[:40],
+            "stage": stage[:80],
+            "actor": actor[:80],
+            "feedback": text[:4000],
+            "resolved": False,
+            "resolved_at": "",
+            "resolved_reason": "",
+        }
+    )
+    # Keep payload bounded to avoid unbounded task row growth.
+    if len(history) > 120:
+        del history[: len(history) - 120]
+    return True
+
+
 def reset_stuck_tasks():
     """
     On server startup, reset tasks left in transient agent states
@@ -559,8 +667,14 @@ def list_tasks(project_id: str | None = None) -> list[dict]:
 
 def update_task(task_id: str, **fields) -> dict | None:
     conn = get_conn()
+    # Control/meta fields used by API/agents but not persisted directly.
+    feedback_source = str(fields.pop("feedback_source", "") or "").strip() or "system"
+    feedback_stage = str(fields.pop("feedback_stage", "") or "").strip()
+    feedback_actor = str(fields.pop("feedback_actor", "") or "").strip()
+    fields.pop("create_handoff", None)
+
     current = conn.execute(
-        "SELECT status, assigned_agent, dev_agent FROM tasks WHERE id=?",
+        "SELECT status, assigned_agent, dev_agent, review_feedback, review_feedback_history FROM tasks WHERE id=?",
         (task_id,),
     ).fetchone()
     if not current:
@@ -582,6 +696,40 @@ def update_task(task_id: str, **fields) -> dict | None:
         return dict(row) if row else None
 
     target_status = str(fields.get("status") or current["status"] or "").strip()
+    now = _now()
+
+    # ── Feedback history maintenance ────────────────────────────────────────
+    history = _parse_feedback_history(current["review_feedback_history"])
+    history_changed = False
+
+    if "review_feedback" in fields:
+        new_feedback = str(fields.get("review_feedback") or "").strip()
+        old_feedback = str(current["review_feedback"] or "").strip()
+        if (
+            new_feedback
+            and new_feedback != old_feedback
+            and target_status in ACTIONABLE_FEEDBACK_STATUSES
+        ):
+            history_changed = _append_feedback_entry(
+                history,
+                feedback=new_feedback,
+                source=feedback_source,
+                status_at=target_status,
+                stage=feedback_stage,
+                actor=feedback_actor,
+                created_at=now,
+            ) or history_changed
+
+    if target_status in FEEDBACK_RESOLVE_STATUSES:
+        history_changed = _resolve_open_feedback(
+            history,
+            resolved_at=now,
+            reason=f"status:{target_status}",
+        ) or history_changed
+
+    if history_changed:
+        fields["review_feedback_history"] = _dump_feedback_history(history)
+
     if target_status == "todo":
         todo_pollers = _todo_pollers(conn)
         # Validate current/effective assignment for todo claimability.
@@ -593,7 +741,7 @@ def update_task(task_id: str, **fields) -> dict | None:
             fallback_dev = str(fields.get("dev_agent") or current["dev_agent"] or "").strip()
             fields["assigned_agent"] = fallback_dev if fallback_dev in todo_pollers else None
 
-    fields["updated_at"] = _now()
+    fields["updated_at"] = now
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
     conn.execute(f"UPDATE tasks SET {set_clause} WHERE id=?", values)
