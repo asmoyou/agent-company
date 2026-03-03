@@ -34,7 +34,12 @@ def normalize_agent_key(agent_key: str | None, default: str = "developer") -> st
 
 
 def task_dev_agent(task: dict) -> str:
-    return normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or "developer")
+    # Prefer explicit dev ownership; fall back to current assignee for
+    # claimed tasks that have not persisted dev_agent/assigned_agent yet.
+    candidate = task.get("dev_agent") or task.get("assigned_agent")
+    if not str(candidate or "").strip():
+        candidate = task.get("assignee")
+    return normalize_agent_key(candidate or "developer")
 
 
 def task_dev_branch(task: dict) -> str:
