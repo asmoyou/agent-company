@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import subprocess
@@ -21,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import db
 
 PROJECT_ROOT = Path(__file__).parent.parent
+AGENT_STALE_SECS = int(os.getenv("AGENT_STALE_SECS", "150"))
+AGENT_WATCHDOG_SECS = int(os.getenv("AGENT_WATCHDOG_SECS", "15"))
 
 
 def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
@@ -39,11 +43,98 @@ def task_dev_branch(task: dict) -> str:
 
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
 AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=1000))
-AGENT_STATUS: dict = defaultdict(lambda: {"status": "idle", "task": ""})
+AGENT_STATUS: dict = defaultdict(
+    lambda: {"status": "idle", "task": "", "updated_at": "", "last_output_at": ""}
+)
+
+
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.rstrip("Z"))
+    except Exception:
+        return None
+
+
+def _agent_last_seen(status: dict) -> datetime | None:
+    seen = []
+    for key in ("updated_at", "last_output_at"):
+        dt = _parse_iso(status.get(key))
+        if dt is not None:
+            seen.append(dt)
+    return max(seen) if seen else None
+
+
+def _ensure_agent_state(agent_name: str) -> dict:
+    AGENT_OUTPUT[agent_name]
+    state = AGENT_STATUS[agent_name]
+    state.setdefault("status", "idle")
+    state.setdefault("task", "")
+    state.setdefault("updated_at", "")
+    state.setdefault("last_output_at", "")
+    return state
+
+
+def _agent_outputs_snapshot() -> dict:
+    return {
+        name: {"lines": list(AGENT_OUTPUT[name]), "status": dict(_ensure_agent_state(name))}
+        for name in AGENT_OUTPUT
+    }
+
+
+async def _recover_stale_agent(agent_name: str, stale_secs: int):
+    state = _ensure_agent_state(agent_name)
+    last_output_at = state.get("last_output_at", "")
+    AGENT_STATUS[agent_name] = {
+        "status": "idle",
+        "task": "",
+        "updated_at": _utcnow_iso(),
+        "last_output_at": last_output_at,
+    }
+    await manager.broadcast(
+        {"event": "agent_status", "agent": agent_name, "status": "idle", "task": ""}
+    )
+
+    recovered = db.recover_stale_tasks_for_agent(agent_name)
+    for item in recovered:
+        task = item["task"]
+        await manager.broadcast({"event": "task_updated", "task": task})
+        log = db.add_log(
+            task["id"],
+            "system",
+            (
+                f"⚠ 检测到 Agent {agent_name} 超过 {stale_secs}s 无活动，"
+                f"任务自动从 {item['from_status']} 回退到 {item['to_status']}。"
+            ),
+        )
+        await broadcast_log(log)
+
+
+async def _agent_health_watchdog():
+    while True:
+        await asyncio.sleep(AGENT_WATCHDOG_SECS)
+        now = datetime.utcnow()
+        for agent_name, status in list(AGENT_STATUS.items()):
+            if str(status.get("status") or "").strip().lower() != "busy":
+                continue
+            last_seen = _agent_last_seen(status)
+            if not last_seen:
+                continue
+            stale_secs = int((now - last_seen).total_seconds())
+            if stale_secs < AGENT_STALE_SECS:
+                continue
+            await _recover_stale_agent(agent_name, stale_secs)
+
+
 # Pre-populate built-ins so they appear on init
 for _k in ("developer", "reviewer", "manager"):
-    AGENT_OUTPUT[_k]
-    AGENT_STATUS[_k]
+    _ensure_agent_state(_k)
 
 
 # ── WebSocket manager ─────────────────────────────────────────────────────────
@@ -62,7 +153,9 @@ class ConnectionManager:
         dead = set()
         for ws in self.active:
             try:
-                await ws.send_json(data)
+                # Drop slow/broken sockets quickly so broadcasts never block
+                # agent heartbeats or task state transitions for long periods.
+                await asyncio.wait_for(ws.send_json(data), timeout=1.5)
             except Exception:
                 dead.add(ws)
         self.active -= dead
@@ -81,9 +174,14 @@ async def lifespan(app: FastAPI):
     db.reset_stuck_tasks()
     # Pre-populate AGENT_OUTPUT/STATUS for all known agent types
     for at in db.list_agent_types():
-        AGENT_OUTPUT[at["key"]]
-        AGENT_STATUS[at["key"]]
-    yield
+        _ensure_agent_state(at["key"])
+    watchdog = asyncio.create_task(_agent_health_watchdog())
+    try:
+        yield
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
 
 
 app = FastAPI(title="Multi-Agent Task Board", lifespan=lifespan)
@@ -924,22 +1022,25 @@ async def delete_agent_type(agent_key: str):
 # ── Agent terminal endpoints ──────────────────────────────────────────────────
 @app.get("/agents/outputs")
 async def get_agent_outputs():
-    return {
-        name: {"lines": list(AGENT_OUTPUT[name]), "status": AGENT_STATUS.get(name, {})}
-        for name in AGENT_OUTPUT
-    }
+    return _agent_outputs_snapshot()
 
 @app.post("/agents/{agent_name}/output")
 async def agent_output(agent_name: str, body: AgentOutput):
-    buf = AGENT_OUTPUT.get(agent_name)
-    if buf is not None:
-        buf.append(body.line)
+    state = _ensure_agent_state(agent_name)
+    AGENT_OUTPUT[agent_name].append(body.line)
+    state["last_output_at"] = _utcnow_iso()
     await manager.broadcast({"event": "agent_output", "agent": agent_name, "line": body.line})
     return {"ok": True}
 
 @app.post("/agents/{agent_name}/status")
 async def agent_status(agent_name: str, body: AgentStatusUpdate):
-    AGENT_STATUS[agent_name] = {"status": body.status, "task": body.task}
+    prev = _ensure_agent_state(agent_name)
+    AGENT_STATUS[agent_name] = {
+        "status": body.status,
+        "task": body.task,
+        "updated_at": _utcnow_iso(),
+        "last_output_at": prev.get("last_output_at", ""),
+    }
     await manager.broadcast({"event": "agent_status", "agent": agent_name,
                               "status": body.status, "task": body.task})
     return {"ok": True}
@@ -957,10 +1058,7 @@ async def websocket_endpoint(ws: WebSocket):
             "tasks": tasks,
             "projects": projects,
             "agent_types": db.list_agent_types(),
-            "agent_outputs": {
-                name: {"lines": list(AGENT_OUTPUT[name]), "status": AGENT_STATUS.get(name, {})}
-                for name in AGENT_OUTPUT
-            },
+            "agent_outputs": _agent_outputs_snapshot(),
         })
         while True:
             await ws.receive_text()
