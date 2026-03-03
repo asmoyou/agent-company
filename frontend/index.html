@@ -108,11 +108,11 @@
 <body class="min-h-screen font-sans flex flex-col">
 
 <!-- Header -->
-<header class="bg-slate-900 border-b border-slate-700 px-4 py-2.5 flex items-center gap-3 sticky top-0 z-10 flex-wrap">
+<header class="bg-slate-900 border-b border-slate-700 px-4 py-2.5 flex items-center gap-3 sticky top-0 z-10 flex-nowrap overflow-x-auto overflow-y-hidden whitespace-nowrap">
   <div class="w-7 h-7 bg-indigo-500 rounded-lg flex items-center justify-center text-xs font-bold shrink-0">AI</div>
 
   <!-- Project selector -->
-  <div class="flex items-center gap-2">
+  <div class="flex items-center gap-2 shrink-0">
     <select id="project-select"
       onchange="onProjectChange()"
       class="bg-slate-800 border border-slate-600 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
@@ -129,25 +129,25 @@
     </button>
   </div>
 
-  <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1">
+  <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1 shrink-0">
     <span class="ws-dot disconnected" id="ws-dot"></span>
     <span id="ws-label">连接中...</span>
   </div>
 
-  <div class="ml-auto flex items-center gap-2">
+  <div class="ml-auto flex items-center gap-2 shrink-0">
     <!-- Project path indicator -->
-    <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs">
+    <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs shrink-0">
       <span class="text-slate-500 shrink-0">项目目录</span>
       <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-300 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:240px" id="project-path-text" title="点击打开文件浏览器"></button>
       <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制路径">📋</button>
       <span class="text-slate-700">|</span>
     </div>
     <!-- Archive toggle -->
-    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
       <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
       显示已归档
     </label>
-    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
       <input type="checkbox" id="auto-collapse-empty-cols" onchange="refreshBoard()" class="rounded" checked>
       自动压缩空列
     </label>
@@ -162,6 +162,17 @@
       class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
       title="管理 Agent 类型">
       🤖 Agents
+    </button>
+    <button id="btn-user-admin" onclick="openUsersModal()"
+      class="hidden bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      title="管理用户">
+      👤 用户
+    </button>
+    <div id="auth-user-badge" class="hidden text-xs text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 whitespace-nowrap shrink-0"></div>
+    <button id="btn-logout" onclick="logout()"
+      class="hidden bg-slate-700 hover:bg-red-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      title="退出登录">
+      退出
     </button>
     <button onclick="openCreateModal()" id="btn-create-task"
       class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition disabled:opacity-40"
@@ -499,6 +510,62 @@
   </div>
 </div>
 
+<!-- Auth Modal -->
+<div id="modal-auth" class="hidden fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="px-6 py-4 border-b border-slate-700">
+      <h3 id="auth-modal-title" class="font-semibold text-white">登录</h3>
+      <p id="auth-modal-hint" class="text-xs text-slate-500 mt-1"></p>
+    </div>
+    <form onsubmit="submitAuth(event)" class="p-6 space-y-4">
+      <div id="auth-username-wrap">
+        <label class="block text-xs text-slate-400 mb-1">用户名</label>
+        <input id="auth-username" type="text" autocomplete="username" placeholder="admin"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div id="auth-admin-note" class="hidden text-xs text-slate-300 bg-slate-900/60 border border-slate-700 rounded-lg px-3 py-2">
+        管理员账号固定为 <code>admin</code>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">密码</label>
+        <input id="auth-password" type="password" autocomplete="current-password" placeholder="请输入密码"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div class="flex justify-end">
+        <button id="auth-submit-btn" type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">登录</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- User Management Modal -->
+<div id="modal-users" class="hidden fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-xl shadow-2xl flex flex-col" style="max-height:85vh;">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
+      <h3 class="font-semibold text-white">用户管理</h3>
+      <button onclick="closeUsersModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <div class="p-6 space-y-4 overflow-y-auto">
+      <form onsubmit="submitCreateUser(event)" class="space-y-3 bg-slate-900/50 border border-slate-700 rounded-lg p-4">
+        <div class="text-xs text-slate-400">新建普通用户</div>
+        <div class="grid grid-cols-2 gap-3">
+          <input id="new-user-username" type="text" placeholder="用户名，如 dev01"
+            class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+          <input id="new-user-password" type="password" placeholder="密码（至少 6 位）"
+            class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div class="flex justify-end">
+          <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建用户</button>
+        </div>
+      </form>
+      <div>
+        <div class="text-xs text-slate-400 mb-2">用户列表</div>
+        <div id="users-list" class="space-y-2"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Create Task Modal -->
 <div id="modal-task" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
   <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
@@ -608,14 +675,14 @@ async function loadPromptContent() {
   ta.value = "加载中...";
   try {
     const url = `${API}/prompts/${promptAgent}`;
-    const data = await (await fetch(url)).json();
+    const data = await (await apiFetch(url)).json();
     ta.value = data.content || DEFAULT_PROMPTS[promptAgent] || "";
   } catch { ta.value = DEFAULT_PROMPTS[promptAgent] || ""; }
 }
 async function savePrompt() {
   const content = document.getElementById("prompt-editor").value;
   const url = `${API}/prompts/${promptAgent}`;
-  const res = await fetch(url, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({content})});
+  const res = await apiFetch(url, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({content})});
   if (res.ok) {
     const btn = document.querySelector("#modal-prompts button[onclick='savePrompt()']");
     const orig = btn.textContent; btn.textContent = "✓ 已保存";
@@ -629,8 +696,153 @@ function resetPromptToDefault() {
 </script>
 
 <script>
-const WS_URL = `ws://${location.host}/ws`;
-const API    = `${location.protocol}//${location.host}`;
+const API = `${location.protocol}//${location.host}`;
+let authToken = localStorage.getItem("opc_token") || "";
+let currentUser = null;
+let authMode = "login"; // "login" | "setup_admin"
+let _authReadyResolver = null;
+
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const token = encodeURIComponent(authToken || "");
+  return `${proto}://${location.host}/ws?token=${token}`;
+}
+
+function isAdminUser() {
+  return (currentUser?.role || "") === "admin";
+}
+
+async function apiFetch(url, options = {}) {
+  const opts = {...options};
+  const skipAuth = !!opts.skipAuth;
+  delete opts.skipAuth;
+  const headers = new Headers(opts.headers || {});
+  if (!skipAuth && authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  opts.headers = headers;
+  const res = await window.fetch(url, opts);
+  if (!skipAuth && res.status === 401) {
+    localStorage.removeItem("opc_token");
+    authToken = "";
+    alert("登录已失效，请重新登录");
+    location.reload();
+  }
+  return res;
+}
+
+function setAuthUser(user) {
+  currentUser = user || null;
+  const badge = document.getElementById("auth-user-badge");
+  const btnLogout = document.getElementById("btn-logout");
+  const btnAdmin = document.getElementById("btn-user-admin");
+  if (!currentUser) {
+    badge.classList.add("hidden");
+    btnLogout.classList.add("hidden");
+    btnAdmin.classList.add("hidden");
+    return;
+  }
+  const role = currentUser.role === "admin" ? "管理员" : "普通用户";
+  badge.textContent = `${currentUser.username} · ${role}`;
+  badge.classList.remove("hidden");
+  btnLogout.classList.remove("hidden");
+  btnAdmin.classList.toggle("hidden", !isAdminUser());
+  if (!isAdminUser()) closeUsersModal();
+  if (typeof updateProjectModeAvailability === "function") updateProjectModeAvailability();
+}
+
+function showAuthModal(mode, hint = "") {
+  authMode = mode === "setup_admin" ? "setup_admin" : "login";
+  const title = document.getElementById("auth-modal-title");
+  const hintEl = document.getElementById("auth-modal-hint");
+  const usernameWrap = document.getElementById("auth-username-wrap");
+  const adminNote = document.getElementById("auth-admin-note");
+  const submitBtn = document.getElementById("auth-submit-btn");
+  const usernameInput = document.getElementById("auth-username");
+  const pwdInput = document.getElementById("auth-password");
+
+  if (authMode === "setup_admin") {
+    title.textContent = "初始化管理员密码";
+    hintEl.textContent = hint || "首次启动需要先设置 admin 初始密码";
+    usernameWrap.classList.add("hidden");
+    adminNote.classList.remove("hidden");
+    submitBtn.textContent = "设置并登录";
+    usernameInput.value = "admin";
+  } else {
+    title.textContent = "账号登录";
+    hintEl.textContent = hint || "请使用管理员创建的账号登录";
+    usernameWrap.classList.remove("hidden");
+    adminNote.classList.add("hidden");
+    submitBtn.textContent = "登录";
+    if (!usernameInput.value.trim()) usernameInput.value = "admin";
+  }
+  pwdInput.value = "";
+  document.getElementById("modal-auth").classList.remove("hidden");
+  setTimeout(() => pwdInput.focus(), 30);
+}
+
+function closeAuthModal() {
+  document.getElementById("modal-auth").classList.add("hidden");
+}
+
+async function submitAuth(e) {
+  e.preventDefault();
+  const username = (document.getElementById("auth-username").value || "").trim().toLowerCase();
+  const password = (document.getElementById("auth-password").value || "").trim();
+  if (!password) return;
+  try {
+    const payload = authMode === "setup_admin"
+      ? {password}
+      : {username, password};
+    const url = authMode === "setup_admin" ? `${API}/auth/setup-admin` : `${API}/auth/login`;
+    const res = await apiFetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+      skipAuth: true,
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    authToken = data.token || "";
+    if (!authToken) throw new Error("登录响应缺少 token");
+    localStorage.setItem("opc_token", authToken);
+    setAuthUser(data.user || null);
+    closeAuthModal();
+    if (_authReadyResolver) {
+      _authReadyResolver();
+      _authReadyResolver = null;
+    }
+  } catch (err) {
+    alert(`登录失败: ${err.message}`);
+  }
+}
+
+async function ensureAuthenticated() {
+  if (authToken) {
+    try {
+      const meRes = await apiFetch(`${API}/auth/me`);
+      if (meRes.ok) {
+        const me = await meRes.json();
+        setAuthUser(me);
+        return;
+      }
+    } catch {}
+    localStorage.removeItem("opc_token");
+    authToken = "";
+  }
+  const bootRes = await apiFetch(`${API}/auth/bootstrap`, {skipAuth: true});
+  if (!bootRes.ok) throw new Error(await bootRes.text());
+  const boot = await bootRes.json();
+  showAuthModal(boot.admin_password_set ? "login" : "setup_admin");
+  await new Promise(resolve => { _authReadyResolver = resolve; });
+}
+
+async function logout() {
+  try {
+    await apiFetch(`${API}/auth/logout`, {method: "POST"});
+  } catch {}
+  localStorage.removeItem("opc_token");
+  authToken = "";
+  location.reload();
+}
 
 const COLUMNS = [
   { status:"triage",             label:"待评估",   dot:"bg-violet-500",  hint:"新任务进入队列，等待 Leader 评估复杂度" },
@@ -714,6 +926,64 @@ let newProjectMode = "new";    // "new" | "existing"
 let dpCurrentPath = "";
 let dpParentPath = null;
 let _activeColTipTarget = null;
+
+function openUsersModal() {
+  if (!isAdminUser()) return;
+  document.getElementById("modal-users").classList.remove("hidden");
+  loadUsers();
+}
+
+function closeUsersModal() {
+  document.getElementById("modal-users").classList.add("hidden");
+}
+
+async function loadUsers() {
+  const listEl = document.getElementById("users-list");
+  listEl.innerHTML = '<div class="text-xs text-slate-500">加载中...</div>';
+  try {
+    const res = await apiFetch(`${API}/users`);
+    if (!res.ok) throw new Error(await res.text());
+    const users = await res.json();
+    if (!users.length) {
+      listEl.innerHTML = '<div class="text-xs text-slate-500">暂无用户</div>';
+      return;
+    }
+    listEl.innerHTML = users.map(u => {
+      const role = u.role === "admin" ? "管理员" : "普通用户";
+      const pwd = u.password_set ? "已设置密码" : "未设置密码";
+      return `<div class="bg-slate-700/40 rounded-lg px-3 py-2 text-xs flex items-center justify-between">
+        <div>
+          <div class="text-slate-200">${escHtml(u.username)}</div>
+          <div class="text-slate-500">${role} · ${pwd}</div>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (err) {
+    listEl.innerHTML = `<div class="text-xs text-red-400">加载失败: ${escHtml(err.message)}</div>`;
+  }
+}
+
+async function submitCreateUser(e) {
+  e.preventDefault();
+  const usernameInput = document.getElementById("new-user-username");
+  const passwordInput = document.getElementById("new-user-password");
+  const username = usernameInput.value.trim().toLowerCase();
+  const password = passwordInput.value.trim();
+  if (!username || !password) return;
+  try {
+    const res = await apiFetch(`${API}/users`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({username, password}),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    usernameInput.value = "";
+    passwordInput.value = "";
+    await loadUsers();
+  } catch (err) {
+    alert("创建用户失败: " + err.message);
+  }
+}
 
 // ── Agent Types ────────────────────────────────────────────────────────────────
 function loadAgentTypes(list) {
@@ -880,7 +1150,7 @@ async function aiGeneratePrompt() {
   btn.textContent = "生成中..."; btn.disabled = true;
   try {
     const cli = document.getElementById("af-cli").value;
-    const res = await fetch(`${API}/agent-types/generate-prompt`, {
+    const res = await apiFetch(`${API}/agent-types/generate-prompt`, {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({description: desc || name, cli}),
     });
@@ -915,12 +1185,12 @@ async function saveAgentType() {
   try {
     let res;
     if (_editingAgentKey) {
-      res = await fetch(`${API}/agent-types/${_editingAgentKey}`, {
+      res = await apiFetch(`${API}/agent-types/${_editingAgentKey}`, {
         method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
       });
     } else {
       if (!key) { alert("请填写标识符 key"); return; }
-      res = await fetch(`${API}/agent-types`, {
+      res = await apiFetch(`${API}/agent-types`, {
         method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({...body, key, working_status:"in_progress"}),
       });
@@ -933,13 +1203,14 @@ async function saveAgentType() {
 async function deleteAgentType(key) {
   if (!confirm(`确定删除 Agent「${agentTypes[key]?.name || key}」？此操作不可撤销。`)) return;
   try {
-    const res = await fetch(`${API}/agent-types/${key}`, {method:"DELETE"});
+    const res = await apiFetch(`${API}/agent-types/${key}`, {method:"DELETE"});
     if (!res.ok) throw new Error(await res.text());
   } catch(err) { alert("删除失败: " + err.message); }
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 function loadProjects(list) {
+  projects = {};
   list.forEach(p => projects[p.id] = p);
   const sel = document.getElementById("project-select");
   sel.innerHTML = '<option value="">— 选择项目 —</option>' +
@@ -1419,7 +1690,7 @@ async function loadTaskFiles(taskId, status) {
     locEl.textContent="任务尚未开始，暂无文件"; listEl.innerHTML=""; return;
   }
   try {
-    const res  = await fetch(`${API}/tasks/${taskId}/files`);
+    const res  = await apiFetch(`${API}/tasks/${taskId}/files`);
     const data = await res.json();
     const isMain = status==="pending_acceptance"||status==="completed";
     locEl.className = isMain
@@ -1449,7 +1720,7 @@ async function loadTaskLogs(taskId, scrollToBottom = false) {
   const el = document.getElementById("panel-logs");
   if (!el) return;
   try {
-    const res = await fetch(`${API}/tasks/${taskId}/logs`);
+    const res = await apiFetch(`${API}/tasks/${taskId}/logs`);
     if (!res.ok) throw new Error(await res.text());
     renderLogs(await res.json());
     if (scrollToBottom) el.scrollTop = el.scrollHeight;
@@ -1474,7 +1745,7 @@ async function loadTaskHandoffs(taskId) {
   const el = document.getElementById("panel-handoffs");
   if (!el) return;
   try {
-    const res = await fetch(`${API}/tasks/${taskId}/handoffs`);
+    const res = await apiFetch(`${API}/tasks/${taskId}/handoffs`);
     if (!res.ok) throw new Error(await res.text());
     const list = await res.json();
     renderHandoffs(list);
@@ -1572,7 +1843,7 @@ async function cancelCurrentTask() {
   if (!confirm("取消后任务将被归档，且不会再被 Agent 执行。确认取消？")) return;
   const reasonInput = prompt("可选：填写取消原因（会写入任务日志）", "");
   const reason = reasonInput === null ? "" : reasonInput.trim();
-  const res = await fetch(`${API}/tasks/${currentTaskId}/cancel`, {
+  const res = await apiFetch(`${API}/tasks/${currentTaskId}/cancel`, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({reason: reason || null, include_subtasks: true}),
@@ -1619,7 +1890,7 @@ function renderSubtaskList(parentId) {
   }).join("");
 }
 async function taskAction(id, action, extra = {}) {
-  const res=await fetch(`${API}/tasks/${id}/actions`,{
+  const res=await apiFetch(`${API}/tasks/${id}/actions`,{
     method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({action, ...extra})});
   if (!res.ok) {
@@ -1636,11 +1907,19 @@ function closePanel() {
 
 // ── New Project Modal ─────────────────────────────────────────────────────────
 function openNewProjectModal()  {
+  updateProjectModeAvailability();
   setProjectMode("new");
   document.getElementById("modal-project").classList.remove("hidden");
 }
 function closeNewProjectModal() { document.getElementById("modal-project").classList.add("hidden"); }
+function updateProjectModeAvailability() {
+  const existingBtn = document.getElementById("proj-mode-existing");
+  const canImport = isAdminUser();
+  existingBtn.classList.toggle("hidden", !canImport);
+  existingBtn.disabled = !canImport;
+}
 function setProjectMode(mode) {
+  if (mode === "existing" && !isAdminUser()) mode = "new";
   newProjectMode = mode === "existing" ? "existing" : "new";
   const isExisting = newProjectMode === "existing";
   const btnNew = document.getElementById("proj-mode-new");
@@ -1654,16 +1933,17 @@ function setProjectMode(mode) {
   const pickDirRow = document.getElementById("proj-pick-dir-row");
 
   btnNew.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800" : "bg-slate-700 text-white"}`;
-  btnExisting.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`;
+  btnExisting.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"} ${isAdminUser() ? "" : "hidden"}`;
   title.textContent = isExisting ? "添加现有项目" : "新建项目";
   pathLabel.textContent = isExisting ? "现有项目目录（绝对路径）*" : "项目目录（绝对路径）*";
   pathHint.textContent = isExisting ? "只会添加已存在目录；若目录没有 git，会自动初始化" : "目录不存在会自动创建，并初始化 git 仓库";
   submitBtn.textContent = isExisting ? "添加并检查 Git" : "创建并初始化";
   pathInput.placeholder = isExisting ? "~/projects/existing-project" : "~/projects/my-awesome-project";
   nameInput.required = !isExisting;
-  pickDirRow.classList.toggle("hidden", !isExisting);
+  pickDirRow.classList.toggle("hidden", !isExisting || !isAdminUser());
 }
 function openDirPicker() {
+  if (!isAdminUser()) return;
   const rawPath = document.getElementById("proj-path").value.trim();
   document.getElementById("modal-dir-picker").classList.remove("hidden");
   dpLoadDirectories(rawPath || "~");
@@ -1685,7 +1965,7 @@ async function dpLoadDirectories(path) {
   currentEl.textContent = "加载中...";
   listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">加载中...</div>';
   try {
-    const res = await fetch(`${API}/fs/directories?path=${encodeURIComponent(path || "~")}`);
+    const res = await apiFetch(`${API}/fs/directories?path=${encodeURIComponent(path || "~")}`);
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     dpCurrentPath = data.path;
@@ -1740,7 +2020,7 @@ async function submitNewProject(e) {
   e.preventDefault();
   let name = document.getElementById("proj-name").value.trim();
   const path = document.getElementById("proj-path").value.trim();
-  const importExisting = newProjectMode === "existing";
+  const importExisting = newProjectMode === "existing" && isAdminUser();
   if (!name && importExisting) {
     const normalized = path.replace(/[\\/]+$/g, "");
     const parts = normalized.split(/[\\/]/).filter(Boolean);
@@ -1752,14 +2032,14 @@ async function submitNewProject(e) {
   if (!name||!path) return;
   try {
     // Create project record
-    const res = await fetch(`${API}/projects`,{
+    const res = await apiFetch(`${API}/projects`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({name,path,import_existing:importExisting}),
     });
     if (!res.ok) throw new Error(await res.text());
     const proj = await res.json();
     // Initialize git repo (agent worktrees are created on demand)
-    const setupRes = await fetch(`${API}/projects/${proj.id}/setup`,{method:"POST"});
+    const setupRes = await apiFetch(`${API}/projects/${proj.id}/setup`,{method:"POST"});
     if (!setupRes.ok) throw new Error(await setupRes.text());
     const setupData = await setupRes.json();
     console.log("Setup log:", setupData.log);
@@ -1782,7 +2062,7 @@ async function syncProjects() {
   btn.disabled = true;
   btn.textContent = "同步中...";
   try {
-    const res = await fetch(`${API}/projects/sync`, {method:"POST"});
+    const res = await apiFetch(`${API}/projects/sync`, {method:"POST"});
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     if (data.deleted.length === 0) {
@@ -1802,7 +2082,7 @@ async function syncProjects() {
 async function autoSyncProjects() {
   // 静默检查：目录不存在的项目自动清理，无需用户手动点击
   try {
-    const res = await fetch(`${API}/projects/sync`, {method:"POST"});
+    const res = await apiFetch(`${API}/projects/sync`, {method:"POST"});
     if (!res.ok) return;
     const data = await res.json();
     if (data.deleted.length > 0) {
@@ -1830,7 +2110,7 @@ async function submitTask(e) {
   const assignedAgent = document.getElementById("task-assigned-agent").value || null;
   if (!title) return;
   try {
-    const res=await fetch(`${API}/tasks`,{
+    const res=await apiFetch(`${API}/tasks`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
         title,
@@ -1849,7 +2129,8 @@ async function submitTask(e) {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
-  ws = new WebSocket(WS_URL);
+  if (!authToken) return;
+  ws = new WebSocket(wsUrl());
   ws.onopen = () => {
     document.getElementById("ws-dot").className="ws-dot connected";
     document.getElementById("ws-label").textContent="已连接";
@@ -1865,17 +2146,18 @@ function connectWS() {
     }
     document.getElementById("ws-dot").className="ws-dot disconnected";
     document.getElementById("ws-label").textContent="已断开 — 重连中...";
-    setTimeout(connectWS,3000);
+    if (authToken) setTimeout(connectWS,3000);
   };
   ws.onerror = ()=>ws.close();
   ws.onmessage = (e)=>{
     const msg=JSON.parse(e.data);
     if (msg.event==="init") {
+      if (msg.user) setAuthUser(msg.user);
       tasks={};
       msg.tasks.forEach(t=>tasks[t.id]=t);
       loadProjects(msg.projects||[]);
       loadAgentTypes(msg.agent_types||[]);
-      buildBoard();
+      updateProjectModeAvailability();
       refreshBoard();
       initAgentOutputs(msg.agent_outputs);
       autoSyncProjects();
@@ -1980,7 +2262,7 @@ async function fbLoadDirectory(path) {
   const listEl = document.getElementById("fb-list");
   listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">加载中...</div>';
   try {
-    const res = await fetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`);
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`);
     if (!res.ok) throw new Error(await res.text());
     const items = await res.json();
 
@@ -2042,7 +2324,7 @@ async function fbHandleUpload(event) {
   const fd = new FormData();
   for (const f of fileList) fd.append("files", f);
   try {
-    const res = await fetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
       method: "POST", body: fd
     });
     if (!res.ok) throw new Error(await res.text());
@@ -2058,7 +2340,7 @@ function fbDrop(event) {
   if (!files || !files.length || !currentProjectId) return;
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
-  fetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
+  apiFetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
     method: "POST", body: fd
   }).then(res => {
     if (!res.ok) throw new Error("Upload failed");
@@ -2071,7 +2353,7 @@ async function fbDelete(path, isDir) {
   const typeStr = isDir === "true" ? "文件夹" : "文件";
   if (!confirm(`确定删除${typeStr} "${name}" 吗？`)) return;
   try {
-    const res = await fetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`, {method:"DELETE"});
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`, {method:"DELETE"});
     if (!res.ok) throw new Error(await res.text());
     fbLoadDirectory(fbCurrentPath);
   } catch (err) { alert("删除失败: " + err.message); }
@@ -2082,7 +2364,7 @@ async function fbCreateFolder() {
   if (!name || !currentProjectId) return;
   const newPath = fbCurrentPath ? fbCurrentPath + "/" + name : name;
   try {
-    const res = await fetch(`${API}/projects/${currentProjectId}/files/mkdir`, {
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/mkdir`, {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({path: newPath})
     });
@@ -2140,10 +2422,19 @@ function copyProjectPath() {
   }).catch(() => alert("复制失败"));
 }
 
-buildBoard();
-updateBoardLaneWidths();
-window.addEventListener("resize", updateBoardLaneWidths);
-connectWS();
+async function initApp() {
+  buildBoard();
+  updateBoardLaneWidths();
+  window.addEventListener("resize", updateBoardLaneWidths);
+  try {
+    await ensureAuthenticated();
+    connectWS();
+  } catch (err) {
+    alert("初始化失败: " + err.message);
+  }
+}
+
+initApp();
 </script>
 </body>
 </html>

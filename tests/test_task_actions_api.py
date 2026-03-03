@@ -21,6 +21,9 @@ class TaskActionsApiTest(unittest.TestCase):
         db.DB_PATH = Path(self._tmp.name) / "tasks-api-test.db"
         db.init_db()
         self.client = TestClient(app_module.app)
+        setup = self.client.post("/auth/setup-admin", json={"password": "admin123"})
+        self.assertEqual(setup.status_code, 200)
+        self._headers = {"Authorization": f"Bearer {setup.json()['token']}"}
         self.project = db.create_project("api-test", self._tmp.name)
 
     def tearDown(self):
@@ -40,7 +43,11 @@ class TaskActionsApiTest(unittest.TestCase):
 
     def test_patch_rejects_direct_status_change(self):
         task = self._create_task(status="todo")
-        res = self.client.patch(f"/tasks/{task['id']}", json={"status": "in_review"})
+        res = self.client.patch(
+            f"/tasks/{task['id']}",
+            json={"status": "in_review"},
+            headers=self._headers,
+        )
         self.assertEqual(res.status_code, 403)
 
     def test_transition_rejects_invalid_status_flow(self):
@@ -87,7 +94,11 @@ class TaskActionsApiTest(unittest.TestCase):
 
     def test_accept_action_completes_task(self):
         task = self._create_task(status="pending_acceptance")
-        res = self.client.post(f"/tasks/{task['id']}/actions", json={"action": "accept"})
+        res = self.client.post(
+            f"/tasks/{task['id']}/actions",
+            json={"action": "accept"},
+            headers=self._headers,
+        )
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["task"]["status"], "completed")
@@ -97,6 +108,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/actions",
             json={"action": "reject", "feedback": "验收不通过，请修复边界情况"},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -116,6 +128,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/actions",
             json={"action": "retry_blocked"},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -127,6 +140,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/actions",
             json={"action": "decompose"},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["task"]["status"], "decompose")
@@ -136,6 +150,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.post(
             f"/tasks/{task['id']}/actions",
             json={"action": "archive"},
+            headers=self._headers,
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(int(res.json()["task"]["archived"]), 1)
@@ -144,6 +159,7 @@ class TaskActionsApiTest(unittest.TestCase):
         bad = self.client.post(
             f"/tasks/{not_done['id']}/actions",
             json={"action": "archive"},
+            headers=self._headers,
         )
         self.assertEqual(bad.status_code, 409)
 
@@ -155,7 +171,7 @@ class TaskActionsApiTest(unittest.TestCase):
             assigned_agent=None,
             dev_agent=None,
         )
-        res = self.client.get(f"/tasks/{task['id']}/files")
+        res = self.client.get(f"/tasks/{task['id']}/files", headers=self._headers)
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["branch"], "agent/asmo-dev")

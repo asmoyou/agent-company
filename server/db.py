@@ -1,14 +1,20 @@
 import json
+import hashlib
+import hmac
 import re
+import secrets
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
 CANCELLED_STATUS = "cancelled"
 ACTIONABLE_FEEDBACK_STATUSES = {"needs_changes", "blocked"}
 FEEDBACK_RESOLVE_STATUSES = {"approved", "pending_acceptance", "completed", CANCELLED_STATUS}
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+SESSION_TTL_DAYS = 30
 
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
@@ -104,7 +110,26 @@ def init_db():
             id         TEXT PRIMARY KEY,
             name       TEXT NOT NULL,
             path       TEXT NOT NULL UNIQUE,
+            created_by_user_id TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id            TEXT PRIMARY KEY,
+            username      TEXT NOT NULL UNIQUE,
+            password_hash TEXT,
+            role          TEXT NOT NULL DEFAULT 'user',
+            created_by    TEXT,
+            created_at    TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS tasks (
@@ -168,7 +193,21 @@ def init_db():
     _ensure_columns(conn, "projects", [
         ("name", "TEXT NOT NULL DEFAULT ''"),
         ("path", "TEXT NOT NULL DEFAULT ''"),
+        ("created_by_user_id", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "users", [
+        ("username", "TEXT NOT NULL DEFAULT ''"),
+        ("password_hash", "TEXT"),
+        ("role", "TEXT NOT NULL DEFAULT 'user'"),
+        ("created_by", "TEXT"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "sessions", [
+        ("user_id", "TEXT NOT NULL DEFAULT ''"),
+        ("token_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("expires_at", "TEXT NOT NULL DEFAULT ''"),
     ])
     _ensure_columns(conn, "tasks", [
         ("project_id", "TEXT"),
@@ -221,6 +260,8 @@ def init_db():
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
 
+    _seed_admin_user(conn)
+    _cleanup_expired_sessions(conn)
     _seed_builtin_agents(conn)
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
@@ -234,6 +275,33 @@ def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]):
     for col, defn in columns:
         if col not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+
+
+def _seed_admin_user(conn):
+    now = _now()
+    row = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    if not row:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, password_hash, role, created_by, created_at)
+            VALUES (?, 'admin', NULL, ?, NULL, ?)
+            """,
+            (str(uuid.uuid4()), ROLE_ADMIN, now),
+        )
+        return
+    conn.execute(
+        """
+        UPDATE users
+           SET role=?
+         WHERE username='admin'
+           AND COALESCE(TRIM(role), '') != ?
+        """,
+        (ROLE_ADMIN, ROLE_ADMIN),
+    )
+
+
+def _cleanup_expired_sessions(conn):
+    conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (_now(),))
 
 
 def _seed_builtin_agents(conn):
@@ -472,6 +540,206 @@ def _now():
     return datetime.utcnow().isoformat()
 
 
+def _normalize_username(username: str) -> str:
+    return str(username or "").strip().lower()
+
+
+def _password_hash(password: str, iterations: int = 260000) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, encoded: str | None) -> bool:
+    payload = str(encoded or "").strip()
+    if not payload:
+        return False
+    try:
+        algo, iter_s, salt_hex, digest_hex = payload.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        iterations = int(iter_s)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except Exception:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(actual, expected)
+
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _public_user(row) -> dict:
+    data = dict(row)
+    return {
+        "id": data["id"],
+        "username": data["username"],
+        "role": data["role"],
+        "created_by": data.get("created_by"),
+        "created_at": data.get("created_at"),
+        "password_set": bool(str(data.get("password_hash") or "").strip()),
+    }
+
+
+def admin_password_is_set() -> bool:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT password_hash FROM users WHERE username='admin' LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return bool(row and str(row["password_hash"] or "").strip())
+
+
+def set_admin_initial_password(password: str) -> dict | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username='admin' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        if str(row["password_hash"] or "").strip():
+            return None
+        hashed = _password_hash(password)
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (hashed, row["id"]),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+        return _public_user(updated) if updated else None
+    finally:
+        conn.close()
+
+
+def get_user(user_id: str) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    return _public_user(row) if row else None
+
+
+def get_user_by_username(username: str) -> dict | None:
+    uname = _normalize_username(username)
+    if not uname:
+        return None
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE username=?", (uname,)).fetchone()
+    conn.close()
+    return _public_user(row) if row else None
+
+
+def authenticate_user(username: str, password: str) -> dict | None:
+    uname = _normalize_username(username)
+    if not uname:
+        return None
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE username=?", (uname,)).fetchone()
+        if not row:
+            return None
+        if not _verify_password(password, row["password_hash"]):
+            return None
+        return _public_user(row)
+    finally:
+        conn.close()
+
+
+def create_user(username: str, password: str, role: str = ROLE_USER, created_by: str | None = None) -> dict:
+    uname = _normalize_username(username)
+    if not uname:
+        raise ValueError("username 不能为空")
+    if role not in {ROLE_ADMIN, ROLE_USER}:
+        raise ValueError("role 不合法")
+    now = _now()
+    uid = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, password_hash, role, created_by, created_at)
+            VALUES (?,?,?,?,?,?)
+            """,
+            (uid, uname, _password_hash(password), role, created_by, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            raise RuntimeError("create_user failed")
+        return _public_user(row)
+    finally:
+        conn.close()
+
+
+def list_users() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM users ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, created_at ASC"
+    ).fetchall()
+    conn.close()
+    return [_public_user(r) for r in rows]
+
+
+def create_session(user_id: str, ttl_days: int = SESSION_TTL_DAYS) -> dict:
+    token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    expires = now + timedelta(days=max(1, int(ttl_days)))
+    row = {
+        "id": str(uuid.uuid4()),
+        "token": token,
+        "token_hash": _hash_session_token(token),
+        "user_id": user_id,
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+    }
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at)
+            VALUES (?,?,?,?,?)
+            """,
+            (row["id"], row["user_id"], row["token_hash"], row["created_at"], row["expires_at"]),
+        )
+        conn.commit()
+        return {"token": token, "expires_at": row["expires_at"]}
+    finally:
+        conn.close()
+
+
+def revoke_session(token: str) -> bool:
+    hashed = _hash_session_token(token)
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM sessions WHERE token_hash=?", (hashed,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def get_session_user(token: str) -> dict | None:
+    hashed = _hash_session_token(token)
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (_now(),))
+        row = conn.execute(
+            """
+            SELECT u.*
+              FROM sessions s
+              JOIN users u ON u.id = s.user_id
+             WHERE s.token_hash=?
+               AND s.expires_at > ?
+             LIMIT 1
+            """,
+            (hashed, _now()),
+        ).fetchone()
+        conn.commit()
+        return _public_user(row) if row else None
+    finally:
+        conn.close()
+
+
 def _parse_feedback_history(raw) -> list[dict]:
     data = raw
     if isinstance(raw, str):
@@ -599,32 +867,93 @@ def reset_stuck_tasks():
 
 # ── Projects ──────────────────────────────────────────────────────────────────
 
-def create_project(name: str, path: str) -> dict:
+def create_project(name: str, path: str, created_by_user_id: str | None = None) -> dict:
     conn = get_conn()
     pid = str(uuid.uuid4())
     now = _now()
     conn.execute(
-        "INSERT INTO projects (id, name, path, created_at) VALUES (?,?,?,?)",
-        (pid, name, path, now),
+        "INSERT INTO projects (id, name, path, created_by_user_id, created_at) VALUES (?,?,?,?,?)",
+        (pid, name, path, created_by_user_id, now),
     )
     conn.commit()
-    row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    row = conn.execute(
+        """
+        SELECT p.*, u.username AS created_by_username
+          FROM projects p
+          LEFT JOIN users u ON u.id = p.created_by_user_id
+         WHERE p.id=?
+        """,
+        (pid,),
+    ).fetchone()
     conn.close()
     return dict(row)
 
 
-def get_project(project_id: str) -> dict | None:
+def get_project(project_id: str, user_id: str | None = None, is_admin: bool = True) -> dict | None:
     conn = get_conn()
-    row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    if user_id and not is_admin:
+        row = conn.execute(
+            """
+            SELECT p.*, u.username AS created_by_username
+              FROM projects p
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             WHERE p.id=?
+               AND p.created_by_user_id=?
+            """,
+            (project_id, user_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT p.*, u.username AS created_by_username
+              FROM projects p
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             WHERE p.id=?
+            """,
+            (project_id,),
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def list_projects() -> list[dict]:
+def list_projects(user_id: str | None = None, is_admin: bool = True) -> list[dict]:
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+    if user_id and not is_admin:
+        rows = conn.execute(
+            """
+            SELECT p.*, u.username AS created_by_username
+              FROM projects p
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             WHERE p.created_by_user_id=?
+             ORDER BY p.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT p.*, u.username AS created_by_username
+              FROM projects p
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             ORDER BY p.created_at DESC
+            """
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def user_can_access_project(project_id: str, user_id: str | None, is_admin: bool) -> bool:
+    if is_admin:
+        return bool(get_project(project_id))
+    if not user_id:
+        return False
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM projects WHERE id=? AND created_by_user_id=? LIMIT 1",
+        (project_id, user_id),
+    ).fetchone()
+    conn.close()
+    return bool(row)
 
 
 def delete_project(project_id: str) -> bool:
@@ -675,9 +1004,15 @@ def project_has_claimed_tasks(project_id: str) -> bool:
 def _join_project(base_sql: str) -> str:
     """Wrap a task query to also return project.path as project_path."""
     return f"""
-        SELECT t.*, p.path as project_path, p.name as project_name
+        SELECT
+            t.*,
+            p.path as project_path,
+            p.name as project_name,
+            p.created_by_user_id as project_owner_user_id,
+            u.username as project_owner_username
         FROM ({base_sql}) t
         LEFT JOIN projects p ON t.project_id = p.id
+        LEFT JOIN users u ON u.id = p.created_by_user_id
     """
 
 
@@ -709,22 +1044,51 @@ def create_task(title: str, description: str, project_id: str | None = None,
     return dict(row)
 
 
-def list_subtasks(parent_task_id: str) -> list[dict]:
+def list_subtasks(parent_task_id: str, user_id: str | None = None, is_admin: bool = True) -> list[dict]:
     conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT t.*, p.path as project_path, p.name as project_name
-          FROM tasks t
-          LEFT JOIN projects p ON t.project_id = p.id
-         WHERE t.parent_task_id=?
-         ORDER BY
-           CASE WHEN COALESCE(t.subtask_order, 0) > 0 THEN 0 ELSE 1 END ASC,
-           COALESCE(t.subtask_order, 0) ASC,
-           t.created_at ASC,
-           t.id ASC
-        """,
-        (parent_task_id,),
-    ).fetchall()
+    if user_id and not is_admin:
+        rows = conn.execute(
+            """
+            SELECT
+                t.*,
+                p.path as project_path,
+                p.name as project_name,
+                p.created_by_user_id as project_owner_user_id,
+                u.username as project_owner_username
+              FROM tasks t
+              LEFT JOIN projects p ON t.project_id = p.id
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             WHERE t.parent_task_id=?
+               AND p.created_by_user_id=?
+             ORDER BY
+               CASE WHEN COALESCE(t.subtask_order, 0) > 0 THEN 0 ELSE 1 END ASC,
+               COALESCE(t.subtask_order, 0) ASC,
+               t.created_at ASC,
+               t.id ASC
+            """,
+            (parent_task_id, user_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT
+                t.*,
+                p.path as project_path,
+                p.name as project_name,
+                p.created_by_user_id as project_owner_user_id,
+                u.username as project_owner_username
+              FROM tasks t
+              LEFT JOIN projects p ON t.project_id = p.id
+              LEFT JOIN users u ON u.id = p.created_by_user_id
+             WHERE t.parent_task_id=?
+             ORDER BY
+               CASE WHEN COALESCE(t.subtask_order, 0) > 0 THEN 0 ELSE 1 END ASC,
+               COALESCE(t.subtask_order, 0) ASC,
+               t.created_at ASC,
+               t.id ASC
+            """,
+            (parent_task_id,),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -752,26 +1116,69 @@ def check_parent_completion(parent_task_id: str) -> bool:
     return all_done
 
 
-def get_task(task_id: str) -> dict | None:
+def get_task(task_id: str, user_id: str | None = None, is_admin: bool = True) -> dict | None:
     conn = get_conn()
-    row = conn.execute(
-        _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
-    ).fetchone()
+    if user_id and not is_admin:
+        row = conn.execute(
+            _join_project(
+                """
+                SELECT t.*
+                  FROM tasks t
+                  JOIN projects p ON p.id = t.project_id
+                 WHERE t.id=?
+                   AND p.created_by_user_id=?
+                """
+            ),
+            (task_id, user_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def list_tasks(project_id: str | None = None) -> list[dict]:
+def list_tasks(project_id: str | None = None, user_id: str | None = None, is_admin: bool = True) -> list[dict]:
     conn = get_conn()
-    if project_id:
-        rows = conn.execute(
-            _join_project("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC"),
-            (project_id,),
-        ).fetchall()
+    if user_id and not is_admin:
+        if project_id:
+            rows = conn.execute(
+                _join_project(
+                    """
+                    SELECT t.*
+                      FROM tasks t
+                      JOIN projects p ON p.id = t.project_id
+                     WHERE t.project_id=?
+                       AND p.created_by_user_id=?
+                     ORDER BY t.created_at DESC
+                    """
+                ),
+                (project_id, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _join_project(
+                    """
+                    SELECT t.*
+                      FROM tasks t
+                      JOIN projects p ON p.id = t.project_id
+                     WHERE p.created_by_user_id=?
+                     ORDER BY t.created_at DESC
+                    """
+                ),
+                (user_id,),
+            ).fetchall()
     else:
-        rows = conn.execute(
-            _join_project("SELECT * FROM tasks ORDER BY created_at DESC")
-        ).fetchall()
+        if project_id:
+            rows = conn.execute(
+                _join_project("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC"),
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _join_project("SELECT * FROM tasks ORDER BY created_at DESC")
+            ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -869,18 +1276,54 @@ def update_task(task_id: str, **fields) -> dict | None:
         conn.close()
 
 
-def get_tasks_by_status(status: str, project_id: str | None = None) -> list[dict]:
+def get_tasks_by_status(
+    status: str,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    is_admin: bool = True,
+) -> list[dict]:
     conn = get_conn()
-    if project_id:
-        rows = conn.execute(
-            _join_project("SELECT * FROM tasks WHERE status=? AND project_id=? ORDER BY updated_at ASC"),
-            (status, project_id),
-        ).fetchall()
+    if user_id and not is_admin:
+        if project_id:
+            rows = conn.execute(
+                _join_project(
+                    """
+                    SELECT t.*
+                      FROM tasks t
+                      JOIN projects p ON p.id = t.project_id
+                     WHERE t.status=?
+                       AND t.project_id=?
+                       AND p.created_by_user_id=?
+                     ORDER BY t.updated_at ASC
+                    """
+                ),
+                (status, project_id, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _join_project(
+                    """
+                    SELECT t.*
+                      FROM tasks t
+                      JOIN projects p ON p.id = t.project_id
+                     WHERE t.status=?
+                       AND p.created_by_user_id=?
+                     ORDER BY t.updated_at ASC
+                    """
+                ),
+                (status, user_id),
+            ).fetchall()
     else:
-        rows = conn.execute(
-            _join_project("SELECT * FROM tasks WHERE status=? ORDER BY updated_at ASC"),
-            (status,),
-        ).fetchall()
+        if project_id:
+            rows = conn.execute(
+                _join_project("SELECT * FROM tasks WHERE status=? AND project_id=? ORDER BY updated_at ASC"),
+                (status, project_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _join_project("SELECT * FROM tasks WHERE status=? ORDER BY updated_at ASC"),
+                (status,),
+            ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

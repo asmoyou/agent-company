@@ -5,14 +5,25 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Set
+from typing import Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File as FastAPIFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File as FastAPIFile,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +55,50 @@ def task_dev_agent(task: dict) -> str:
 
 def task_dev_branch(task: dict) -> str:
     return f"agent/{task_dev_agent(task)}"
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    raw = str(authorization or "").strip()
+    if not raw:
+        return None
+    if raw.lower().startswith("bearer "):
+        token = raw[7:].strip()
+        return token or None
+    return None
+
+
+def _is_admin(user: dict) -> bool:
+    return str(user.get("role") or "").strip().lower() == db.ROLE_ADMIN
+
+
+def require_user(authorization: str | None = Header(default=None, alias="Authorization")) -> dict:
+    token = _extract_bearer_token(authorization)
+    if not token:
+        raise HTTPException(401, "未登录")
+    user = db.get_session_user(token)
+    if not user:
+        raise HTTPException(401, "登录已失效，请重新登录")
+    return user
+
+
+def require_admin(user: dict = Depends(require_user)) -> dict:
+    if not _is_admin(user):
+        raise HTTPException(403, "仅管理员可操作")
+    return user
+
+
+def require_project_access(project_id: str, user: dict) -> dict:
+    project = db.get_project(project_id, user_id=user["id"], is_admin=_is_admin(user))
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return project
+
+
+def require_task_access(task_id: str, user: dict) -> dict:
+    task = db.get_task(task_id, user_id=user["id"], is_admin=_is_admin(user))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return task
 
 
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
@@ -145,7 +200,7 @@ for _k in ("developer", "reviewer", "manager"):
 # ── WebSocket manager ─────────────────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
-        self.active: Set[WebSocket] = set()
+        self.active: dict[WebSocket, dict] = {}
         # Serialize broadcasts to preserve per-connection event order and
         # avoid concurrent writes on the same websocket.
         self._broadcast_lock = asyncio.Lock()
@@ -153,36 +208,98 @@ class ConnectionManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
 
-    async def send_init_and_subscribe(self, ws: WebSocket, payload_builder):
+    def _can_receive(self, user: dict, data: dict) -> bool:
+        if _is_admin(user):
+            return True
+        event = str(data.get("event") or "").strip()
+        if not event:
+            return True
+
+        # Non-project-scoped events can be shared across users.
+        if event.startswith("agent_") or event.startswith("agent_type_"):
+            return True
+
+        if event == "project_created":
+            project = data.get("project") if isinstance(data.get("project"), dict) else {}
+            pid = str(project.get("id") or "").strip()
+            if not pid:
+                return False
+            return db.user_can_access_project(pid, user.get("id"), False)
+
+        if event == "project_deleted":
+            owner_id = str(data.get("project_owner_user_id") or "").strip()
+            if owner_id:
+                return owner_id == str(user.get("id") or "")
+            pid = str(data.get("project_id") or "").strip()
+            if not pid:
+                return False
+            return db.user_can_access_project(pid, user.get("id"), False)
+
+        if event == "files_changed":
+            pid = str(data.get("project_id") or "").strip()
+            if not pid:
+                return False
+            return db.user_can_access_project(pid, user.get("id"), False)
+
+        if event in {"task_created", "task_updated"}:
+            task = data.get("task") if isinstance(data.get("task"), dict) else {}
+            pid = str(task.get("project_id") or "").strip()
+            if not pid:
+                return False
+            return db.user_can_access_project(pid, user.get("id"), False)
+
+        if event == "log_added":
+            log = data.get("log") if isinstance(data.get("log"), dict) else {}
+            task_id = str(log.get("task_id") or "").strip()
+            if not task_id:
+                return False
+            task = db.get_task(task_id, user_id=user.get("id"), is_admin=False)
+            return task is not None
+
+        if event == "handoff_added":
+            handoff = data.get("handoff") if isinstance(data.get("handoff"), dict) else {}
+            task_id = str(handoff.get("task_id") or "").strip()
+            if not task_id:
+                return False
+            task = db.get_task(task_id, user_id=user.get("id"), is_admin=False)
+            return task is not None
+
+        return True
+
+    async def send_init_and_subscribe(self, ws: WebSocket, user: dict, payload_builder):
         # Keep init snapshot and subscription atomic relative to broadcasts.
         async with self._broadcast_lock:
             payload = payload_builder()
             await ws.send_json(payload)
-            self.active.add(ws)
+            self.active[ws] = user
 
     def disconnect(self, ws: WebSocket):
-        self.active.discard(ws)
+        self.active.pop(ws, None)
 
     async def broadcast(self, data: dict):
         async with self._broadcast_lock:
-            sockets = list(self.active)
+            sockets = list(self.active.items())
             if not sockets:
                 return
 
-            async def _send(ws: WebSocket):
+            async def _send(ws: WebSocket, user: dict):
+                if not self._can_receive(user, data):
+                    return None
                 # Drop slow/broken sockets quickly so broadcasts never block
                 # agent heartbeats or task state transitions for long periods.
                 await asyncio.wait_for(ws.send_json(data), timeout=1.5)
+                return True
 
             results = await asyncio.gather(
-                *(_send(ws) for ws in sockets),
+                *(_send(ws, user) for ws, user in sockets),
                 return_exceptions=True,
             )
             dead = {
-                ws for ws, res in zip(sockets, results)
+                ws for (ws, _), res in zip(sockets, results)
                 if isinstance(res, Exception)
             }
-            self.active -= dead
+            for ws in dead:
+                self.active.pop(ws, None)
 
 
 manager = ConnectionManager()
@@ -225,6 +342,21 @@ class ProjectCreate(BaseModel):
     name: str
     path: str  # absolute filesystem path
     import_existing: bool = False
+
+
+class AdminSetupRequest(BaseModel):
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str
+
 
 class TaskCreate(BaseModel):
     title: str
@@ -535,36 +667,106 @@ async def root():
     return FileResponse(str(index)) if index.exists() else {"status": "ok"}
 
 
+# ── Auth & Users ──────────────────────────────────────────────────────────────
+@app.get("/auth/bootstrap")
+async def auth_bootstrap_status():
+    return {"admin_password_set": db.admin_password_is_set()}
+
+
+@app.post("/auth/setup-admin")
+async def setup_admin_password(body: AdminSetupRequest):
+    password = str(body.password or "")
+    if len(password) < 6:
+        raise HTTPException(422, "密码至少 6 位")
+    if db.admin_password_is_set():
+        raise HTTPException(409, "管理员密码已设置")
+    user = db.set_admin_initial_password(password)
+    if not user:
+        raise HTTPException(500, "初始化管理员失败")
+    session = db.create_session(user["id"])
+    return {"user": user, **session}
+
+
+@app.post("/auth/login")
+async def login(body: LoginRequest):
+    username = str(body.username or "").strip().lower()
+    password = str(body.password or "")
+    if not username or not password:
+        raise HTTPException(422, "用户名和密码不能为空")
+    if username == "admin" and not db.admin_password_is_set():
+        raise HTTPException(409, "管理员尚未设置初始密码")
+    user = db.authenticate_user(username, password)
+    if not user:
+        raise HTTPException(401, "用户名或密码错误")
+    session = db.create_session(user["id"])
+    return {"user": user, **session}
+
+
+@app.post("/auth/logout")
+async def logout(authorization: str | None = Header(default=None, alias="Authorization")):
+    token = _extract_bearer_token(authorization)
+    if token:
+        db.revoke_session(token)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+async def get_me(user: dict = Depends(require_user)):
+    return user
+
+
+@app.get("/users")
+async def list_users(_admin: dict = Depends(require_admin)):
+    return db.list_users()
+
+
+@app.post("/users", status_code=201)
+async def create_user(body: UserCreateRequest, admin: dict = Depends(require_admin)):
+    username = str(body.username or "").strip().lower()
+    password = str(body.password or "")
+    if not re.match(r"^[a-z][a-z0-9._-]{2,31}$", username):
+        raise HTTPException(422, "用户名只能包含小写字母/数字/._-，长度 3-32，且以字母开头")
+    if len(password) < 6:
+        raise HTTPException(422, "密码至少 6 位")
+    if db.get_user_by_username(username):
+        raise HTTPException(409, "用户名已存在")
+    try:
+        return db.create_user(username, password, role=db.ROLE_USER, created_by=admin["id"])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "用户名已存在")
+
+
 # ── Projects ──────────────────────────────────────────────────────────────────
 @app.get("/projects")
-async def list_projects():
-    return db.list_projects()
+async def list_projects(user: dict = Depends(require_user)):
+    return db.list_projects(user_id=user["id"], is_admin=_is_admin(user))
 
 @app.post("/projects", status_code=201)
-async def create_project(body: ProjectCreate):
+async def create_project(body: ProjectCreate, user: dict = Depends(require_user)):
     path = Path(body.path).expanduser().resolve()
     all_projects = db.list_projects()
     if any(p["path"] == str(path) for p in all_projects):
         raise HTTPException(400, "Path already used by another project")
     if body.import_existing:
+        if not _is_admin(user):
+            raise HTTPException(403, "导入现有项目仅管理员可操作")
         if not path.exists():
             raise HTTPException(400, "Existing project path does not exist")
         if not path.is_dir():
             raise HTTPException(400, "Existing project path must be a directory")
-    project = db.create_project(body.name, str(path))
+    project = db.create_project(body.name, str(path), created_by_user_id=user["id"])
     await manager.broadcast({"event": "project_created", "project": project})
     return project
 
 @app.get("/projects/{project_id}")
-async def get_project(project_id: str):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
-    return p
+async def get_project(project_id: str, user: dict = Depends(require_user)):
+    return require_project_access(project_id, user)
 
 
 @app.get("/fs/directories")
-async def list_directories(path: str = "~"):
+async def list_directories(path: str = "~", _admin: dict = Depends(require_admin)):
     raw = (path or "").strip() or "~"
     target = Path(raw).expanduser()
     try:
@@ -593,13 +795,13 @@ async def list_directories(path: str = "~"):
 
 
 @app.post("/projects/sync")
-async def sync_projects():
+async def sync_projects(user: dict = Depends(require_user)):
     """Delete projects whose directories no longer exist on disk.
 
     Safety: do not delete projects that still have claimed (running) tasks,
     otherwise in-flight agents may hit 404 when syncing task status.
     """
-    all_projects = db.list_projects()
+    all_projects = db.list_projects(user_id=user["id"], is_admin=_is_admin(user))
     deleted = []
     kept = []
     skipped_busy = []
@@ -613,16 +815,20 @@ async def sync_projects():
         else:
             db.delete_project(p["id"])
             deleted.append(p)
-            await manager.broadcast({"event": "project_deleted", "project_id": p["id"]})
+            await manager.broadcast(
+                {
+                    "event": "project_deleted",
+                    "project_id": p["id"],
+                    "project_owner_user_id": p.get("created_by_user_id"),
+                }
+            )
     return {"deleted": deleted, "kept": kept, "skipped_busy": skipped_busy}
 
 
 @app.post("/projects/{project_id}/setup")
-async def setup_project(project_id: str):
+async def setup_project(project_id: str, user: dict = Depends(require_user)):
     """Initialize git repo in the project directory (without shared dev worktree)."""
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+    p = require_project_access(project_id, user)
 
     proj_path = Path(p["path"])
     if proj_path.exists() and not proj_path.is_dir():
@@ -660,11 +866,13 @@ async def setup_project(project_id: str):
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 @app.get("/tasks")
-async def list_tasks(project_id: str | None = None):
-    return db.list_tasks(project_id)
+async def list_tasks(project_id: str | None = None, user: dict = Depends(require_user)):
+    return db.list_tasks(project_id, user_id=user["id"], is_admin=_is_admin(user))
 
 @app.post("/tasks", status_code=201)
-async def create_task(body: TaskCreate):
+async def create_task(body: TaskCreate, user: dict = Depends(require_user)):
+    if body.project_id and not db.user_can_access_project(body.project_id, user["id"], _is_admin(user)):
+        raise HTTPException(404, "Project not found")
     task = db.create_task(body.title, body.description, body.project_id,
                           body.parent_task_id, body.assigned_agent, body.dev_agent, body.status,
                           body.subtask_order)
@@ -733,13 +941,11 @@ async def get_task(task_id: str):
     return task
 
 @app.patch("/tasks/{task_id}")
-async def update_task(task_id: str, body: TaskUpdate):
+async def update_task(task_id: str, body: TaskUpdate, user: dict = Depends(require_user)):
     fields = body.model_dump(exclude_unset=True)
     fields.pop("create_handoff", None)
 
-    before = db.get_task(task_id)
-    if not before:
-        raise HTTPException(404, "Task not found")
+    before = require_task_access(task_id, user)
 
     if "status" in fields:
         raise HTTPException(
@@ -781,10 +987,8 @@ async def transition_task(task_id: str, body: TaskTransitionRequest):
 
 
 @app.post("/tasks/{task_id}/actions")
-async def task_action(task_id: str, body: TaskActionRequest):
-    before = db.get_task(task_id)
-    if not before:
-        raise HTTPException(404, "Task not found")
+async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depends(require_user)):
+    before = require_task_access(task_id, user)
 
     status = _norm_status(before.get("status"))
     archived = int(before.get("archived") or 0)
@@ -926,7 +1130,8 @@ async def task_action(task_id: str, body: TaskActionRequest):
 
 
 @app.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, body: CancelTaskRequest | None = None):
+async def cancel_task(task_id: str, body: CancelTaskRequest | None = None, user: dict = Depends(require_user)):
+    require_task_access(task_id, user)
     payload = body or CancelTaskRequest()
     cancelled = db.cancel_task(
         task_id,
@@ -957,10 +1162,14 @@ async def cancel_task(task_id: str, body: CancelTaskRequest | None = None):
 
 @app.get("/tasks/{task_id}/subtasks")
 async def get_subtasks(task_id: str):
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
     return db.list_subtasks(task_id)
 
 @app.get("/tasks/{task_id}/logs")
-async def get_logs(task_id: str):
+async def get_logs(task_id: str, user: dict = Depends(require_user)):
+    require_task_access(task_id, user)
     return db.get_logs(task_id)
 
 @app.post("/tasks/{task_id}/logs", status_code=201)
@@ -1047,10 +1256,8 @@ async def add_handoff(task_id: str, body: HandoffCreate):
     return formatted
 
 @app.get("/tasks/{task_id}/files")
-async def get_task_files(task_id: str):
-    task = db.get_task(task_id)
-    if not task:
-        raise HTTPException(404, "Task not found")
+async def get_task_files(task_id: str, user: dict = Depends(require_user)):
+    task = require_task_access(task_id, user)
 
     project_path = task.get("project_path")
     if not project_path:
@@ -1138,7 +1345,7 @@ async def _update_prompt_and_broadcast(agent_name: str, content: str) -> dict:
 
 
 @app.get("/prompts/{agent_name}")
-async def get_prompt(agent_name: str):
+async def get_prompt(agent_name: str, _user: dict = Depends(require_user)):
     at = _get_prompt_agent(agent_name)
     return {
         "agent": agent_name,
@@ -1148,18 +1355,16 @@ async def get_prompt(agent_name: str):
 
 
 @app.put("/prompts/{agent_name}")
-async def update_prompt(agent_name: str, body: PromptUpdate):
+async def update_prompt(agent_name: str, body: PromptUpdate, _admin: dict = Depends(require_admin)):
     _get_prompt_agent(agent_name)
     await _update_prompt_and_broadcast(agent_name, body.content)
     return {"ok": True, "source": "database"}
 
 
 @app.get("/projects/{project_id}/prompts/{agent_name}")
-async def get_project_prompt(project_id: str, agent_name: str):
+async def get_project_prompt(project_id: str, agent_name: str, user: dict = Depends(require_user)):
     # Project-level prompt overrides are removed; keep endpoint for backward compatibility.
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+    require_project_access(project_id, user)
     at = _get_prompt_agent(agent_name)
     return {
         "agent": agent_name,
@@ -1169,22 +1374,23 @@ async def get_project_prompt(project_id: str, agent_name: str):
 
 
 @app.put("/projects/{project_id}/prompts/{agent_name}")
-async def update_project_prompt(project_id: str, agent_name: str, body: PromptUpdate):
+async def update_project_prompt(
+    project_id: str,
+    agent_name: str,
+    body: PromptUpdate,
+    user: dict = Depends(require_admin),
+):
     # Compatibility route: writes to global DB prompt.
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+    require_project_access(project_id, user)
     _get_prompt_agent(agent_name)
     await _update_prompt_and_broadcast(agent_name, body.content)
     return {"ok": True, "source": "database"}
 
 
 @app.delete("/projects/{project_id}/prompts/{agent_name}")
-async def delete_project_prompt(project_id: str, agent_name: str):
+async def delete_project_prompt(project_id: str, agent_name: str, user: dict = Depends(require_admin)):
     # Compatibility route: project-level override no longer exists.
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+    require_project_access(project_id, user)
     _get_prompt_agent(agent_name)
     return {"ok": True, "source": "database"}
 
@@ -1201,10 +1407,8 @@ def safe_resolve(project_path: str, relative: str) -> Path:
 
 # ── File management endpoints ────────────────────────────────────────────────
 @app.get("/projects/{project_id}/files")
-async def list_project_files(project_id: str, path: str = ""):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+async def list_project_files(project_id: str, path: str = "", user: dict = Depends(require_user)):
+    p = require_project_access(project_id, user)
     target = safe_resolve(p["path"], path)
     if not target.exists() or not target.is_dir():
         raise HTTPException(404, "Directory not found")
@@ -1228,10 +1432,8 @@ async def list_project_files(project_id: str, path: str = ""):
 
 
 @app.get("/projects/{project_id}/files/download")
-async def download_project_file(project_id: str, path: str):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+async def download_project_file(project_id: str, path: str, user: dict = Depends(require_user)):
+    p = require_project_access(project_id, user)
     target = safe_resolve(p["path"], path)
     if not target.exists() or not target.is_file():
         raise HTTPException(404, "File not found")
@@ -1240,10 +1442,13 @@ async def download_project_file(project_id: str, path: str):
 
 
 @app.post("/projects/{project_id}/files/upload")
-async def upload_project_files(project_id: str, files: list[UploadFile] = FastAPIFile(...), path: str = ""):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+async def upload_project_files(
+    project_id: str,
+    files: list[UploadFile] = FastAPIFile(...),
+    path: str = "",
+    user: dict = Depends(require_user),
+):
+    p = require_project_access(project_id, user)
     target_dir = safe_resolve(p["path"], path)
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(404, "Directory not found")
@@ -1262,10 +1467,8 @@ async def upload_project_files(project_id: str, files: list[UploadFile] = FastAP
 
 
 @app.delete("/projects/{project_id}/files")
-async def delete_project_file(project_id: str, path: str):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+async def delete_project_file(project_id: str, path: str, user: dict = Depends(require_user)):
+    p = require_project_access(project_id, user)
     if not path:
         raise HTTPException(400, "Cannot delete project root")
     target = safe_resolve(p["path"], path)
@@ -1281,10 +1484,8 @@ async def delete_project_file(project_id: str, path: str):
 
 
 @app.post("/projects/{project_id}/files/mkdir")
-async def mkdir_project(project_id: str, body: MkdirRequest):
-    p = db.get_project(project_id)
-    if not p:
-        raise HTTPException(404, "Project not found")
+async def mkdir_project(project_id: str, body: MkdirRequest, user: dict = Depends(require_user)):
+    p = require_project_access(project_id, user)
     target = safe_resolve(p["path"], body.path)
     if target.exists():
         raise HTTPException(400, "Path already exists")
@@ -1302,7 +1503,7 @@ async def list_agent_types():
 
 # NOTE: specific routes must come before parametric /{agent_key}
 @app.post("/agent-types/generate-prompt")
-async def generate_agent_prompt(body: GeneratePromptRequest):
+async def generate_agent_prompt(body: GeneratePromptRequest, _admin: dict = Depends(require_admin)):
     """Call the local CLI to generate a prompt template for a new agent."""
     meta_prompt = (
         "你是一个专业的AI Agent提示词工程师。"
@@ -1336,7 +1537,7 @@ async def generate_agent_prompt(body: GeneratePromptRequest):
         raise HTTPException(500, f"CLI 工具 '{cli}' 未找到，请先安装")
 
 @app.post("/agent-types", status_code=201)
-async def create_agent_type(body: AgentTypeCreate):
+async def create_agent_type(body: AgentTypeCreate, _admin: dict = Depends(require_admin)):
     if not re.match(r'^[a-z][a-z0-9_-]*$', body.key):
         raise HTTPException(400, "key 只能包含小写字母、数字、连字符和下划线，且以字母开头")
     if db.get_agent_type(body.key):
@@ -1358,7 +1559,7 @@ async def get_agent_type(agent_key: str):
     return at
 
 @app.put("/agent-types/{agent_key}")
-async def update_agent_type(agent_key: str, body: AgentTypeUpdate):
+async def update_agent_type(agent_key: str, body: AgentTypeUpdate, _admin: dict = Depends(require_admin)):
     if not db.get_agent_type(agent_key):
         raise HTTPException(404, "Not found")
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -1369,7 +1570,7 @@ async def update_agent_type(agent_key: str, body: AgentTypeUpdate):
     return updated
 
 @app.delete("/agent-types/{agent_key}")
-async def delete_agent_type(agent_key: str):
+async def delete_agent_type(agent_key: str, _admin: dict = Depends(require_admin)):
     at = db.get_agent_type(agent_key)
     if not at:
         raise HTTPException(404, "Not found")
@@ -1382,7 +1583,7 @@ async def delete_agent_type(agent_key: str):
 
 # ── Agent terminal endpoints ──────────────────────────────────────────────────
 @app.get("/agents/outputs")
-async def get_agent_outputs():
+async def get_agent_outputs(_user: dict = Depends(require_user)):
     return _agent_outputs_snapshot()
 
 @app.post("/agents/{agent_name}/output")
@@ -1409,17 +1610,24 @@ async def agent_status(agent_name: str, body: AgentStatusUpdate):
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
+    user = db.get_session_user(str(token or "").strip())
+    if not user:
+        await ws.accept()
+        await ws.close(code=4401)
+        return
     await manager.connect(ws)
     try:
         await manager.send_init_and_subscribe(
             ws,
+            user,
             lambda: {
                 "event": "init",
-                "tasks": db.list_tasks(),
-                "projects": db.list_projects(),
+                "tasks": db.list_tasks(user_id=user["id"], is_admin=_is_admin(user)),
+                "projects": db.list_projects(user_id=user["id"], is_admin=_is_admin(user)),
                 "agent_types": db.list_agent_types(),
                 "agent_outputs": _agent_outputs_snapshot(),
+                "user": user,
             },
         )
         while True:
