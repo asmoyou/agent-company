@@ -1088,6 +1088,74 @@ def list_projects(user_id: str | None = None, is_admin: bool = True) -> list[dic
     return [dict(r) for r in rows]
 
 
+def list_worker_projects(
+    include_idle: bool = False,
+    user_id: str | None = None,
+    is_admin: bool = True,
+) -> list[dict]:
+    """
+    Return projects with lightweight queue stats for worker autoscaling decisions.
+    """
+    conn = get_conn()
+    where = []
+    params: list[str] = []
+    if user_id and not is_admin:
+        where.append("p.created_by_user_id=?")
+        params.append(user_id)
+    where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"""
+        SELECT
+            p.*,
+            u.username AS created_by_username,
+            SUM(
+                CASE
+                    WHEN COALESCE(t.archived, 0) = 0
+                     AND COALESCE(t.status, '') NOT IN ('completed', '{CANCELLED_STATUS}')
+                    THEN 1 ELSE 0
+                END
+            ) AS open_task_count,
+            SUM(
+                CASE
+                    WHEN COALESCE(t.archived, 0) = 0
+                     AND COALESCE(t.status, '') IN (
+                         'triage', 'decompose', 'todo', 'needs_changes', 'in_review', 'approved', 'blocked'
+                     )
+                    THEN 1 ELSE 0
+                END
+            ) AS pending_task_count,
+            MIN(
+                CASE
+                    WHEN COALESCE(t.archived, 0) = 0
+                     AND COALESCE(t.status, '') NOT IN ('completed', '{CANCELLED_STATUS}')
+                    THEN t.updated_at
+                    ELSE NULL
+                END
+            ) AS oldest_open_task_updated_at
+          FROM projects p
+          LEFT JOIN users u ON u.id = p.created_by_user_id
+          LEFT JOIN tasks t ON t.project_id = p.id
+          {where_clause}
+         GROUP BY p.id
+         ORDER BY
+            CASE WHEN oldest_open_task_updated_at IS NULL THEN 1 ELSE 0 END ASC,
+            oldest_open_task_updated_at ASC,
+            p.created_at ASC
+        """,
+        tuple(params),
+    ).fetchall()
+    conn.close()
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["open_task_count"] = int(item.get("open_task_count") or 0)
+        item["pending_task_count"] = int(item.get("pending_task_count") or 0)
+        if not include_idle and item["open_task_count"] <= 0:
+            continue
+        out.append(item)
+    return out
+
+
 def user_can_access_project(project_id: str, user_id: str | None, is_admin: bool) -> bool:
     if is_admin:
         return bool(get_project(project_id))
@@ -1621,10 +1689,19 @@ def delete_task_permanently(task_id: str, include_subtasks: bool = True) -> list
         conn.close()
 
 
-def claim_task(status: str, working_status: str, agent: str, agent_key: str,
-               respect_assignment: bool = True,
-               lease_ttl_secs: int = 180,
-               project_id: str | None = None) -> dict | None:
+def claim_task(
+    status: str,
+    working_status: str,
+    agent: str,
+    agent_key: str,
+    respect_assignment: bool = True,
+    lease_ttl_secs: int = 180,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    is_admin: bool = True,
+    per_project_max_workers: int = 0,
+    per_agent_type_max_workers: int = 0,
+) -> dict | None:
     """
     Atomically claim the next task in `status` and move it to `working_status`.
     Returns the claimed task row (with joined project fields) or None.
@@ -1635,14 +1712,56 @@ def claim_task(status: str, working_status: str, agent: str, agent_key: str,
 
         where = ["t.status=?", "t.archived=0"]
         params: list[str] = [status]
+        normalized_agent_key = str(agent_key or "").strip().lower()
 
         if project_id:
             where.append("t.project_id=?")
             params.append(project_id)
 
+        if user_id and not is_admin:
+            where.append(
+                "EXISTS (SELECT 1 FROM projects p WHERE p.id=t.project_id AND p.created_by_user_id=?)"
+            )
+            params.append(user_id)
+
+        if project_id and int(per_project_max_workers or 0) > 0:
+            active_in_project = conn.execute(
+                """
+                SELECT COUNT(1) AS n
+                  FROM tasks
+                 WHERE project_id=?
+                   AND archived=0
+                   AND TRIM(COALESCE(lease_token, '')) != ''
+                   AND status NOT IN ('completed', ?)
+                """,
+                (project_id, CANCELLED_STATUS),
+            ).fetchone()
+            if int(active_in_project["n"] or 0) >= int(per_project_max_workers):
+                conn.rollback()
+                return None
+
+        if int(per_agent_type_max_workers or 0) > 0 and normalized_agent_key:
+            active_for_agent = conn.execute(
+                """
+                SELECT COUNT(1) AS n
+                  FROM tasks
+                 WHERE archived=0
+                   AND status=?
+                   AND TRIM(COALESCE(lease_token, '')) != ''
+                   AND (
+                       LOWER(COALESCE(assignee, ''))=?
+                       OR LOWER(COALESCE(assignee, '')) LIKE ?
+                   )
+                """,
+                (working_status, normalized_agent_key, f"{normalized_agent_key}__%"),
+            ).fetchone()
+            if int(active_for_agent["n"] or 0) >= int(per_agent_type_max_workers):
+                conn.rollback()
+                return None
+
         if respect_assignment:
             where.append("(t.assigned_agent IS NULL OR t.assigned_agent=?)")
-            params.append(agent_key)
+            params.append(normalized_agent_key or agent_key)
 
         if status == "todo":
             where.append(

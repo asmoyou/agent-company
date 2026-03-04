@@ -113,6 +113,21 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 401)
 
+    def test_claim_rejects_missing_project_scope_when_strict(self):
+        self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 422)
+
     def test_claim_accepts_agent_token(self):
         task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
         res = self.client.post(
@@ -131,6 +146,23 @@ class TaskActionsApiTest(unittest.TestCase):
         claimed = res.json()["task"]
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["id"], task["id"])
+
+    def test_create_task_accepts_agent_token(self):
+        res = self.client.post(
+            "/tasks",
+            json={
+                "title": "agent-created-task",
+                "description": "created by agent token",
+                "project_id": self.project["id"],
+                "status": "todo",
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        created = res.json()
+        self.assertEqual(created["title"], "agent-created-task")
+        self.assertEqual(created["project_id"], self.project["id"])
+        self.assertEqual(created["status"], "todo")
 
     def test_claim_rejects_bad_agent_token(self):
         self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
@@ -569,6 +601,66 @@ class TaskActionsApiTest(unittest.TestCase):
         entries = db.get_agent_output_entries("developer", limit=1)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["project_id"], self.project["id"])
+
+    def test_worker_alias_status_and_output_use_agent_key(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claimed = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._headers,
+        ).json()["task"]
+        self.assertIsNotNone(claimed)
+
+        worker_id = "developer__runtime__w1"
+        status = self.client.post(
+            "/agents/dev-worker/status",
+            json={
+                "status": "busy",
+                "task": task["title"],
+                "agent_key": "developer",
+                "worker_id": worker_id,
+                "project_id": self.project["id"],
+                "task_id": task["id"],
+                "run_id": claimed["claim_run_id"],
+                "lease_token": claimed["lease_token"],
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(status.status_code, 200)
+        state = app_module.AGENT_STATUS[worker_id]
+        self.assertEqual(state["agent_key"], "developer")
+        self.assertEqual(state["status"], "busy")
+
+        out = self.client.post(
+            "/agents/dev-worker/output",
+            json={
+                "line": "hello worker",
+                "event": "line",
+                "agent_key": "developer",
+                "worker_id": worker_id,
+                "project_id": self.project["id"],
+                "task_id": task["id"],
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(out.status_code, 200)
+        entries = db.get_agent_output_entries(worker_id, limit=1)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["project_id"], self.project["id"])
+
+    def test_runtime_projects_endpoint_supports_agent_token(self):
+        self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        res = self.client.get("/runtime/projects", headers=self._agent_headers)
+        self.assertEqual(res.status_code, 200)
+        projects = res.json()
+        self.assertTrue(any(str(p.get("id")) == self.project["id"] for p in projects))
 
     def test_delete_agent_type_cleans_outputs_and_task_references(self):
         key = "asmo-dev"

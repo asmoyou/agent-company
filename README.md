@@ -29,6 +29,7 @@ OPC-demo 用结构化任务流和结构化交接材料来解决这些问题。
 - 基于 Git `worktree` 并行开发，每个 Agent 独立工作区。
 - 跨 Agent 自动同步提交（默认 `cherry-pick`）。
 - Leader 自动决策是否分解任务：简单任务不分解直接开发，复杂任务才分解并强制输出 `todo_steps / deliverables / acceptance_criteria`。
+- 支持按项目隔离的 worker 运行：同一 agent 类型可在多个项目并发处理，认领时强制携带 `project_id`（可配置）。
 
 ## 快速开始
 
@@ -142,6 +143,12 @@ decompose -> decomposed -> (subtasks in todo...)
 | `SERVER_URL` | `http://localhost:8080` | Agent 请求后端地址 |
 | `POLL_INTERVAL` | `5` | Agent 轮询间隔（秒） |
 | `CLI_TIMEOUT` | `300` | 单次 CLI 超时（秒） |
+| `FEATURE_STRICT_CLAIM_SCOPE` | `1` | 是否强制 `/tasks/claim` 与任务创建必须带 `project_id` |
+| `PER_PROJECT_MAX_WORKERS` | `0` | 每个项目同时租约中的任务上限（0=不限制） |
+| `PER_AGENT_TYPE_MAX_WORKERS` | `0` | 每种 agent 类型并发上限（0=不限制） |
+| `PROJECT_WORKERS_PER_AGENT` | `1` | `run_all` 每个项目、每个 agent 类型启动的 worker 数 |
+| `INCLUDE_IDLE_RUNTIME_PROJECTS` | `0` | `run_all` 是否为无 open task 的项目也启动 worker |
+| `AGENT_PROJECT_IDS` | `` | 可选项目白名单（逗号分隔 project id），为空则自动发现 |
 | `HANDOFF_SYNC_STRATEGY` | `cherry-pick` | 跨 Agent 提交同步策略：`cherry-pick` / `merge` / `none` |
 | `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 Codex 传 `--output-schema`（默认关闭，降低兼容风险） |
 

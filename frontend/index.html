@@ -1087,6 +1087,7 @@ let wsPingTimer = null;
 let terminalsVisible = true;
 let agentStates = {};          // key -> runtime status payload
 let agentTermLines = {};       // key -> ring buffer of terminal entries
+let runtimeAgents = {};        // runtime-key -> {agent_key, worker_id, project_id}
 let terminalAutoFollow = {};   // key -> whether terminal should follow newest output
 let terminalStreamState = {};  // key -> { running:boolean, exit_code:number|null, updated_at:string }
 const TERMINAL_MAX_LINES = 2000;
@@ -1172,6 +1173,63 @@ function parsePollStatuses(at) {
   }
 }
 
+function runtimeAgentBaseKey(agentKey) {
+  const meta = runtimeAgents[agentKey] || {};
+  const direct = String(meta.agent_key || "").trim();
+  if (direct) return direct;
+  const fromState = String(agentStates[agentKey]?.agent_key || "").trim();
+  if (fromState) return fromState;
+  const fromType = agentTypes[agentKey] ? String(agentKey) : "";
+  if (fromType) return fromType;
+  const m = String(agentKey || "").match(/^([a-z0-9_-]+)__/i);
+  return m ? String(m[1]) : String(agentKey || "");
+}
+
+function registerRuntimeAgent(agentKey, raw = null) {
+  const key = String(agentKey || "").trim();
+  if (!key) return;
+  const prev = runtimeAgents[key] || {};
+  const next = raw && typeof raw === "object" ? raw : {};
+  const merged = {
+    agent_key: String(next.agent_key || prev.agent_key || runtimeAgentBaseKey(key) || key).trim(),
+    worker_id: String(next.worker_id || prev.worker_id || key).trim(),
+    project_id: String(next.project_id || prev.project_id || "").trim(),
+  };
+  runtimeAgents[key] = merged;
+}
+
+function updateAgentBadge(baseKey) {
+  const dot = document.getElementById(`dot-${baseKey}`);
+  const badge = document.getElementById(`ab-${baseKey}`);
+  const label = document.getElementById(`label-${baseKey}`);
+  if (!dot || !badge) return;
+  const name = String(agentTypes[baseKey]?.name || baseKey);
+  let busyCurrent = 0;
+  let busyOther = 0;
+  Object.entries(agentStates).forEach(([runtimeKey, state]) => {
+    if (!state || String(state.status || "").trim().toLowerCase() !== "busy") return;
+    if (runtimeAgentBaseKey(runtimeKey) !== baseKey) return;
+    const pid = resolveAgentStateProjectId(state);
+    if (!currentProjectId || (pid && pid === currentProjectId)) busyCurrent += 1;
+    else busyOther += 1;
+  });
+  dot.classList.remove("bg-slate-600", "bg-green-500", "bg-blue-400", "bg-amber-400");
+  if (busyCurrent > 0) {
+    dot.classList.add("bg-blue-400");
+    badge.classList.add("agent-busy");
+  } else if (busyOther > 0) {
+    dot.classList.add("bg-amber-400");
+    badge.classList.remove("agent-busy");
+  } else {
+    dot.classList.add("bg-green-500");
+    badge.classList.remove("agent-busy");
+  }
+  if (label) {
+    if (busyCurrent || busyOther) label.textContent = `${name} (${busyCurrent}/${busyOther})`;
+    else label.textContent = name;
+  }
+}
+
 function renderTaskAssigneeOptions() {
   const sel = document.getElementById("task-assigned-agent");
   if (!sel) return;
@@ -1188,8 +1246,9 @@ function renderAgentStatusBadges() {
   el.innerHTML = Object.values(agentTypes).map(at => `
     <span id="ab-${at.key}" class="flex items-center gap-1 text-xs">
       <span id="dot-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
-      <span class="text-slate-500">${escHtml(at.name || at.key)}</span>
+      <span id="label-${at.key}" class="text-slate-500">${escHtml(at.name || at.key)}</span>
     </span>`).join("");
+  Object.keys(agentTypes).forEach(updateAgentBadge);
 }
 
 function renderTerminalAgentFilter() {
@@ -1219,35 +1278,60 @@ function renderTerminals() {
   if (!grid) return;
   const cardMinWidth = terminalOnlyMode ? 360 : 300;
   renderTerminalAgentFilter();
-  const baseList = Object.values(agentTypes);
+  const runtimeKeys = new Set([
+    ...Object.keys(agentTypes),
+    ...Object.keys(runtimeAgents),
+    ...Object.keys(agentStates),
+    ...Object.keys(agentTermLines),
+  ]);
+  let rows = Array.from(runtimeKeys).map(key => {
+    registerRuntimeAgent(key);
+    const baseKey = runtimeAgentBaseKey(key);
+    const at = agentTypes[baseKey] || { key: baseKey, name: baseKey, cli: "-" };
+    const pid = String(runtimeAgents[key]?.project_id || agentStates[key]?.project_id || "").trim();
+    const projName = pid ? (projects[pid]?.name || pid) : "";
+    const label = projName && key !== baseKey ? `${at.name || baseKey} @ ${projName}` : (at.name || baseKey);
+    return {
+      key,
+      baseKey,
+      label,
+      cli: at.cli || "-",
+    };
+  });
+  const scopedBases = new Set(rows.filter(row => row.key !== row.baseKey).map(row => row.baseKey));
+  rows = rows.filter(row => !(row.key === row.baseKey && scopedBases.has(row.baseKey)));
   if (terminalAgentFilter && !agentTypes[terminalAgentFilter]) terminalAgentFilter = "";
   const list = terminalAgentFilter
-    ? baseList.filter(at => at.key === terminalAgentFilter)
-    : baseList;
-  grid.innerHTML = list.map(at => `
+    ? rows.filter(row => row.baseKey === terminalAgentFilter)
+    : rows;
+  list.sort((a, b) => {
+    if (a.baseKey !== b.baseKey) return a.baseKey.localeCompare(b.baseKey);
+    return a.key.localeCompare(b.key);
+  });
+  grid.innerHTML = list.map(row => `
     <div class="term-card" style="min-width:${cardMinWidth}px;flex:1">
       <div class="text-xs text-slate-500 mb-1 font-mono term-head">
-        <span id="dot2-${at.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
+        <span id="dot2-${row.key}" class="badge-dot w-2 h-2 rounded-full bg-slate-600"></span>
         <div class="term-main">
-          <span class="term-name" title="${escHtmlAttr(at.name||at.key)}">${escHtml(at.name||at.key)}</span>
+          <span class="term-name" title="${escHtmlAttr(row.label)}">${escHtml(row.label)}</span>
           <span class="term-sep term-hide-md">·</span>
-          <span class="term-cli term-hide-md text-slate-600" title="${escHtmlAttr(at.cli||"-")}">${escHtml(at.cli||"-")}</span>
+          <span class="term-cli term-hide-md text-slate-600" title="${escHtmlAttr(row.cli)}">${escHtml(row.cli)}</span>
           <span class="term-sep">·</span>
-          <span id="status-${at.key}" class="term-status text-slate-600" title="idle">idle</span>
-          <span id="phase-${at.key}" class="term-phase text-slate-600 term-hide-md"></span>
-          <span id="stream-${at.key}" class="term-stream text-slate-600 term-hide-md"></span>
+          <span id="status-${row.key}" class="term-status text-slate-600" title="idle">idle</span>
+          <span id="phase-${row.key}" class="term-phase text-slate-600 term-hide-md"></span>
+          <span id="stream-${row.key}" class="term-stream text-slate-600 term-hide-md"></span>
         </div>
-        <span id="follow-${at.key}" class="term-follow">跟随</span>
+        <span id="follow-${row.key}" class="term-follow">跟随</span>
         <div class="term-actions">
-          <button class="term-btn" title="回到底部" onclick="scrollTermToBottom('${escAttr(at.key)}')">↓</button>
-          <button class="term-btn" title="在新窗口放大此终端" onclick="openTerminalPopout(event,'${escAttr(at.key)}')">↗</button>
-          <button class="term-btn term-hide-sm" title="复制终端内容" onclick="copyTerminal('${escAttr(at.key)}')">复制</button>
-          <button class="term-btn term-hide-sm" title="清空本地终端显示" onclick="clearTerminal('${escAttr(at.key)}')">清空</button>
+          <button class="term-btn" title="回到底部" onclick="scrollTermToBottom('${escAttr(row.key)}')">↓</button>
+          <button class="term-btn" title="在新窗口放大此终端" onclick="openTerminalPopout(event,'${escAttr(row.baseKey)}')">↗</button>
+          <button class="term-btn term-hide-sm" title="复制终端内容" onclick="copyTerminal('${escAttr(row.key)}')">复制</button>
+          <button class="term-btn term-hide-sm" title="清空本地终端显示" onclick="clearTerminal('${escAttr(row.key)}')">清空</button>
         </div>
       </div>
-      <div class="terminal" id="term-${at.key}"></div>
+      <div class="terminal" id="term-${row.key}"></div>
     </div>`).join("");
-  list.map(at => at.key).forEach(key => {
+  list.map(row => row.key).forEach(key => {
     if (!Array.isArray(agentTermLines[key])) agentTermLines[key] = [];
     if (!terminalStreamState[key]) terminalStreamState[key] = {running:false, exit_code:null, updated_at:""};
     if (typeof terminalAutoFollow[key] !== "boolean") terminalAutoFollow[key] = true;
@@ -1262,12 +1346,14 @@ function renderTerminals() {
   });
 }
 
-function ensureAgentTerminal(key) {
-  if (!agentTypes[key]) return false;
+function ensureAgentTerminal(key, rawMeta = null) {
+  registerRuntimeAgent(key, rawMeta);
   if (!Array.isArray(agentTermLines[key])) agentTermLines[key] = [];
   if (!terminalStreamState[key]) terminalStreamState[key] = {running:false, exit_code:null, updated_at:""};
   if (typeof terminalAutoFollow[key] !== "boolean") terminalAutoFollow[key] = true;
   if (!document.getElementById(`term-${key}`)) renderTerminals();
+  const baseKey = runtimeAgentBaseKey(key);
+  if (baseKey) updateAgentBadge(baseKey);
   return true;
 }
 
@@ -1878,6 +1964,8 @@ function normalizeTermEntry(raw) {
       line: String(raw.line || ""),
       kind: String(raw.kind || "line").trim().toLowerCase() || "line",
       event: String(raw.event || "line").trim().toLowerCase() || "line",
+      agent_key: raw.agent_key ? String(raw.agent_key) : null,
+      worker_id: raw.worker_id ? String(raw.worker_id) : null,
       project_id: raw.project_id ? String(raw.project_id) : null,
       task_id: raw.task_id ? String(raw.task_id) : null,
       run_id: raw.run_id ? String(raw.run_id) : null,
@@ -1889,6 +1977,8 @@ function normalizeTermEntry(raw) {
     line: String(raw || ""),
     kind: "line",
     event: "line",
+    agent_key: null,
+    worker_id: null,
     project_id: null,
     task_id: null,
     run_id: null,
@@ -2136,20 +2226,20 @@ function formatAgentPhase(phase) {
 
 function setAgentStatus(agent, status, taskTitle, rawState = null) {
   const state = rawState || {};
+  registerRuntimeAgent(agent, state);
   agentStates[agent] = { status, task: taskTitle, ...state };
+  const baseKey = runtimeAgentBaseKey(agent);
   const busy = status === "busy" && isAgentStateVisible(agentStates[agent]);
-  const dot  = document.getElementById(`dot-${agent}`);
   const dot2 = document.getElementById(`dot2-${agent}`);
   const statusEl = document.getElementById(`status-${agent}`);
   const phaseEl = document.getElementById(`phase-${agent}`);
-  const badge = document.getElementById(`ab-${agent}`);
-  [dot, dot2].forEach(d => {
+  [dot2].forEach(d => {
     if (!d) return;
     d.classList.toggle("bg-blue-400", busy);
     d.classList.toggle("bg-green-500", !busy);
     d.classList.toggle("bg-slate-600", false);
   });
-  if (badge) badge.classList.toggle("agent-busy", busy);
+  if (baseKey) updateAgentBadge(baseKey);
   const phaseText = formatAgentPhase(state.phase);
   if (statusEl) {
     statusEl.textContent = busy ? (taskTitle || "工作中") : "idle";
@@ -2170,8 +2260,9 @@ function setAgentStatus(agent, status, taskTitle, rawState = null) {
 
 function initAgentOutputs(data) {
   for (const [agent, d] of Object.entries(data||{})) {
-    if (!ensureAgentTerminal(agent)) continue;
+    if (!ensureAgentTerminal(agent, d.status || {})) continue;
     const lines = Array.isArray(d.lines) ? d.lines.map(normalizeTermEntry) : [];
+    lines.forEach(line => registerRuntimeAgent(agent, line));
     agentTermLines[agent] = lines.slice(-TERMINAL_MAX_LINES);
     rebuildTerminalStreamState(agent);
     terminalAutoFollow[agent] = true;
@@ -2805,6 +2896,11 @@ function connectWS() {
     if (msg.event==="init") {
       if (msg.user) setAuthUser(msg.user);
       tasks={};
+      agentStates = {};
+      agentTermLines = {};
+      runtimeAgents = {};
+      terminalAutoFollow = {};
+      terminalStreamState = {};
       msg.tasks.forEach(t=>tasks[t.id]=t);
       loadProjects(msg.projects||[]);
       loadAgentTypes(msg.agent_types||[]);
@@ -2873,7 +2969,7 @@ function connectWS() {
         }
       }
     } else if (msg.event==="agent_output") {
-      if (ensureAgentTerminal(msg.agent)) {
+      if (ensureAgentTerminal(msg.agent, msg.output || msg)) {
         appendTermLine(msg.agent, msg.output || msg.line);
       }
     } else if (msg.event==="handoff_added") {
@@ -2884,7 +2980,7 @@ function connectWS() {
       const who = msg.agent ? `${msg.agent} · ` : "";
       showToast(`⚠ ${who}${title}`, msg.message || msg.summary || "请查看日志", msg.kind || "error");
     } else if (msg.event==="agent_status") {
-      if (ensureAgentTerminal(msg.agent)) {
+      if (ensureAgentTerminal(msg.agent, msg)) {
         setAgentStatus(msg.agent, msg.status, msg.task, msg);
       }
     } else if (msg.event==="files_changed") {

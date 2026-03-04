@@ -125,9 +125,12 @@ class BaseAgent:
             limits=httpx.Limits(max_keepalive_connections=8, max_connections=24),
         )
         self._output_post_sem = asyncio.Semaphore(max(1, OUTPUT_POST_MAX_INFLIGHT))
+        self.project_id_scope: str | None = str(os.getenv("AGENT_PROJECT_ID", "")).strip() or None
+        self.worker_id: str | None = str(os.getenv("AGENT_WORKER_ID", "")).strip() or None
         self._active_task_id: str | None = None
         self._active_run_id: str | None = None
         self._active_lease_token: str | None = None
+        self._active_project_id: str | None = None
         self._active_lease_lost: bool = False
         self._active_phase: str = ""
         self._active_cli_pid: int | None = None
@@ -142,16 +145,19 @@ class BaseAgent:
     async def claim_task(
         self, status: str, working_status: str, respect_assignment: bool, project_id: str | None = None
     ) -> dict | None:
+        scope_project_id = project_id
+        if scope_project_id is None:
+            scope_project_id = self.project_id_scope
         r = await self.http.post(
             "/tasks/claim",
             json={
                 "status": status,
                 "working_status": working_status,
                 "agent": self.name,
-                "agent_key": self.name,
+                "agent_key": normalize_agent_key(self.name),
                 "respect_assignment": respect_assignment,
                 "lease_ttl_secs": TASK_LEASE_TTL_SECS,
-                "project_id": project_id,
+                "project_id": scope_project_id,
             },
         )
         r.raise_for_status()
@@ -841,6 +847,7 @@ class BaseAgent:
     ):
         task_id = self._active_task_id
         run_id = self._active_run_id
+        project_id = str(self._active_project_id or self.project_id_scope or "").strip() or None
         important = kind in {"meta", "event"} or event in {"started", "finished"}
         if not important and self._output_post_sem.locked():
             # Drop low-priority stream lines when backlog is full.
@@ -856,6 +863,9 @@ class BaseAgent:
                         "kind": kind,
                         "event": event,
                         "exit_code": exit_code,
+                        "agent_key": normalize_agent_key(self.name),
+                        "worker_id": self.worker_id,
+                        "project_id": project_id,
                         "task_id": task_id,
                         "run_id": run_id,
                     },
@@ -872,6 +882,7 @@ class BaseAgent:
         status: str,
         task_title: str = "",
         *,
+        project_id: str | None = None,
         task_id: str | None = None,
         run_id: str | None = None,
         lease_token: str | None = None,
@@ -880,12 +891,14 @@ class BaseAgent:
     ):
         busy = str(status or "").strip().lower() == "busy"
         if busy:
+            project_id = project_id if project_id is not None else (self._active_project_id or self.project_id_scope)
             task_id = task_id if task_id is not None else self._active_task_id
             run_id = run_id if run_id is not None else self._active_run_id
             lease_token = lease_token if lease_token is not None else self._active_lease_token
             phase = phase if phase is not None else self._active_phase
             pid = pid if pid is not None else self._active_cli_pid
         else:
+            project_id = project_id if project_id is not None else self.project_id_scope
             task_id = ""
             run_id = ""
             lease_token = ""
@@ -897,6 +910,9 @@ class BaseAgent:
                 json={
                     "status": status,
                     "task": task_title,
+                    "agent_key": normalize_agent_key(self.name),
+                    "worker_id": self.worker_id,
+                    "project_id": project_id,
                     "task_id": task_id,
                     "run_id": run_id,
                     "lease_token": lease_token,
@@ -1389,6 +1405,7 @@ class BaseAgent:
                         self._active_task_id = task["id"]
                         self._active_run_id = str(task.get("claim_run_id") or "").strip() or None
                         self._active_lease_token = str(task.get("lease_token") or "").strip() or None
+                        self._active_project_id = str(task.get("project_id") or "").strip() or self.project_id_scope
                         self._active_lease_lost = False
                         self._active_phase = "claimed"
                         self._active_cli_pid = None
@@ -1473,6 +1490,7 @@ class BaseAgent:
                             self._active_task_id = None
                             self._active_run_id = None
                             self._active_lease_token = None
+                            self._active_project_id = None
                             self._active_lease_lost = False
                             self._active_phase = ""
                             self._active_cli_pid = None
