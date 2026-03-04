@@ -519,12 +519,18 @@ def _ensure_agent_state(agent_name: str) -> dict:
     return state
 
 
-def _agent_outputs_snapshot(user: dict | None = None) -> dict:
+def _agent_outputs_snapshot(user: dict | None = None, project_id: str | None = None) -> dict:
     is_admin = _is_admin(user or {}) if user else True
     user_id = str((user or {}).get("id") or "").strip() if user else ""
+    scope_project_id = str(project_id or "").strip()
 
     def visible_project(pid: str | None) -> bool:
         p = str(pid or "").strip()
+        if scope_project_id:
+            if not p:
+                return False
+            if p != scope_project_id:
+                return False
         if not p:
             return True
         if is_admin:
@@ -537,13 +543,23 @@ def _agent_outputs_snapshot(user: dict | None = None) -> dict:
     snapshot: dict[str, dict] = {}
     for name in names:
         state = dict(_ensure_agent_state(name))
-        if not visible_project(state.get("project_id")):
-            continue
         lines = [
             entry
             for entry in (_normalize_agent_output_entry(x) for x in list(AGENT_OUTPUT[name]))
             if visible_project(entry.get("project_id"))
         ]
+        state_visible = visible_project(state.get("project_id"))
+        if not state_visible and not lines:
+            continue
+        if not state_visible and scope_project_id:
+            state["status"] = "idle"
+            state["task"] = ""
+            state["task_id"] = ""
+            state["project_id"] = ""
+            state["run_id"] = ""
+            state["lease_token"] = ""
+            state["phase"] = ""
+            state["pid"] = None
         snapshot[name] = {"lines": lines, "status": state}
     return snapshot
 
@@ -750,12 +766,25 @@ class ConnectionManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
 
-    def _can_receive(self, user: dict, data: dict) -> bool:
-        if _is_admin(user):
-            return True
+    def _can_receive(self, conn: dict, data: dict) -> bool:
+        user = conn.get("user") if isinstance(conn, dict) else None
+        if not isinstance(user, dict):
+            return False
+        scope_project_id = (
+            str(conn.get("project_id") or "").strip()
+            if isinstance(conn, dict)
+            else ""
+        )
+        is_admin = _is_admin(user)
         event = str(data.get("event") or "").strip()
         if not event:
             return True
+
+        def scope_allows(pid: str | None) -> bool:
+            if not scope_project_id:
+                return True
+            p = str(pid or "").strip()
+            return bool(p) and p == scope_project_id
 
         if event.startswith("agent_type_"):
             return True
@@ -765,6 +794,10 @@ class ConnectionManager:
                 output = data.get("output") if isinstance(data.get("output"), dict) else {}
                 pid = str(output.get("project_id") or "").strip()
             if not pid:
+                return not scope_project_id
+            if not scope_allows(pid):
+                return False
+            if is_admin:
                 return True
             return db.user_can_access_project(pid, user.get("id"), False)
 
@@ -773,21 +806,37 @@ class ConnectionManager:
             pid = str(project.get("id") or "").strip()
             if not pid:
                 return False
+            if not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
             return db.user_can_access_project(pid, user.get("id"), False)
 
         if event == "project_deleted":
             owner_id = str(data.get("project_owner_user_id") or "").strip()
             if owner_id:
+                if scope_project_id:
+                    pid = str(data.get("project_id") or "").strip()
+                    if not scope_allows(pid):
+                        return False
                 return owner_id == str(user.get("id") or "")
             pid = str(data.get("project_id") or "").strip()
             if not pid:
                 return False
+            if not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
             return db.user_can_access_project(pid, user.get("id"), False)
 
         if event == "files_changed":
             pid = str(data.get("project_id") or "").strip()
             if not pid:
                 return False
+            if not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
             return db.user_can_access_project(pid, user.get("id"), False)
 
         if event in {"task_created", "task_updated"}:
@@ -795,6 +844,10 @@ class ConnectionManager:
             pid = str(task.get("project_id") or "").strip()
             if not pid:
                 return False
+            if not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
             return db.user_can_access_project(pid, user.get("id"), False)
 
         if event == "log_added":
@@ -802,25 +855,48 @@ class ConnectionManager:
             task_id = str(log.get("task_id") or "").strip()
             if not task_id:
                 return False
-            task = db.get_task(task_id, user_id=user.get("id"), is_admin=False)
-            return task is not None
+            task = db.get_task(task_id)
+            if not task:
+                return False
+            pid = str(task.get("project_id") or "").strip()
+            if not pid or not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
+            return db.user_can_access_project(pid, user.get("id"), False)
 
         if event == "handoff_added":
             handoff = data.get("handoff") if isinstance(data.get("handoff"), dict) else {}
             task_id = str(handoff.get("task_id") or "").strip()
             if not task_id:
                 return False
-            task = db.get_task(task_id, user_id=user.get("id"), is_admin=False)
-            return task is not None
+            task = db.get_task(task_id)
+            if not task:
+                return False
+            pid = str(task.get("project_id") or "").strip()
+            if not pid or not scope_allows(pid):
+                return False
+            if is_admin:
+                return True
+            return db.user_can_access_project(pid, user.get("id"), False)
 
         return True
 
-    async def send_init_and_subscribe(self, ws: WebSocket, user: dict, payload_builder):
+    async def send_init_and_subscribe(
+        self,
+        ws: WebSocket,
+        user: dict,
+        payload_builder,
+        project_id: str | None = None,
+    ):
         # Keep init snapshot and subscription atomic relative to broadcasts.
         async with self._broadcast_lock:
             payload = payload_builder()
             await ws.send_json(payload)
-            self.active[ws] = user
+            self.active[ws] = {
+                "user": user,
+                "project_id": str(project_id or "").strip(),
+            }
 
     def disconnect(self, ws: WebSocket):
         self.active.pop(ws, None)
@@ -831,8 +907,8 @@ class ConnectionManager:
             if not sockets:
                 return
 
-            async def _send(ws: WebSocket, user: dict):
-                if not self._can_receive(user, data):
+            async def _send(ws: WebSocket, conn: dict):
+                if not self._can_receive(conn, data):
                     return None
                 # Drop slow/broken sockets quickly so broadcasts never block
                 # agent heartbeats or task state transitions for long periods.
@@ -840,7 +916,7 @@ class ConnectionManager:
                 return True
 
             results = await asyncio.gather(
-                *(_send(ws, user) for ws, user in sockets),
+                *(_send(ws, conn) for ws, conn in sockets),
                 return_exceptions=True,
             )
             dead = {
@@ -2431,8 +2507,18 @@ async def delete_agent_type(agent_key: str, _admin: dict = Depends(require_admin
 
 # ── Agent terminal endpoints ──────────────────────────────────────────────────
 @app.get("/agents/outputs")
-async def get_agent_outputs(user: dict = Depends(require_user)):
-    return _agent_outputs_snapshot(user=user)
+async def get_agent_outputs(
+    project_id: str | None = Query(default=None),
+    user: dict = Depends(require_user),
+):
+    scope_project_id = str(project_id or "").strip() or None
+    if scope_project_id and not db.user_can_access_project(
+        scope_project_id,
+        user["id"],
+        _is_admin(user),
+    ):
+        raise HTTPException(404, "Project not found")
+    return _agent_outputs_snapshot(user=user, project_id=scope_project_id)
 
 @app.post("/agents/{agent_name}/output")
 async def agent_output(
@@ -2651,11 +2737,24 @@ async def agent_status(
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
+async def websocket_endpoint(
+    ws: WebSocket,
+    token: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+):
     user = db.get_session_user(str(token or "").strip())
     if not user:
         await ws.accept()
         await ws.close(code=4401)
+        return
+    scope_project_id = str(project_id or "").strip() or None
+    if scope_project_id and not db.user_can_access_project(
+        scope_project_id,
+        user["id"],
+        _is_admin(user),
+    ):
+        await ws.accept()
+        await ws.close(code=4403)
         return
     await manager.connect(ws)
     try:
@@ -2664,12 +2763,20 @@ async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=No
             user,
             lambda: {
                 "event": "init",
-                "tasks": db.list_tasks(user_id=user["id"], is_admin=_is_admin(user)),
+                "tasks": db.list_tasks(
+                    project_id=scope_project_id,
+                    user_id=user["id"],
+                    is_admin=_is_admin(user),
+                ),
                 "projects": db.list_projects(user_id=user["id"], is_admin=_is_admin(user)),
                 "agent_types": db.list_agent_types(),
-                "agent_outputs": _agent_outputs_snapshot(user=user),
+                "agent_outputs": _agent_outputs_snapshot(
+                    user=user,
+                    project_id=scope_project_id,
+                ),
                 "user": user,
             },
+            project_id=scope_project_id,
         )
         while True:
             await ws.receive_text()

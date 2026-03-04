@@ -871,8 +871,10 @@ let _authReadyResolver = null;
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const token = encodeURIComponent(authToken || "");
-  return `${proto}://${location.host}/ws?token=${token}`;
+  const params = new URLSearchParams();
+  params.set("token", authToken || "");
+  if (currentProjectId) params.set("project_id", currentProjectId);
+  return `${proto}://${location.host}/ws?${params.toString()}`;
 }
 
 function isAdminUser() {
@@ -1088,10 +1090,12 @@ const terminalOnlyMode = _urlParams.get("terminal_popout") === "1";
 const requestedProjectId = _urlParams.get("project") || null;
 const requestedAgentKey = _urlParams.get("agent") || "";
 let terminalAgentFilter = terminalOnlyMode ? requestedAgentKey : "";
-let currentProjectId = null;
+let currentProjectId = requestedProjectId || null;
 let currentTaskId = null;
 let ws = null;
 let wsPingTimer = null;
+let wsReconnectTimer = null;
+let wsCloseExpected = false;
 let terminalsVisible = true;
 let agentStates = {};          // key -> runtime status payload
 let agentTermLines = {};       // key -> ring buffer of terminal entries
@@ -1281,6 +1285,25 @@ function onTerminalAgentFilterChange() {
   renderTerminals();
 }
 
+function resolveRuntimeProjectId(agent) {
+  const runtimePid = String(runtimeAgents[agent]?.project_id || "").trim();
+  if (runtimePid) return runtimePid;
+  const statePid = resolveAgentStateProjectId(agentStates[agent] || {});
+  if (statePid) return statePid;
+  const lines = Array.isArray(agentTermLines[agent]) ? agentTermLines[agent] : [];
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const pid = resolveTermEntryProjectId(normalizeTermEntry(lines[i]));
+    if (pid) return pid;
+  }
+  return "";
+}
+
+function isRuntimeVisible(agent) {
+  if (!currentProjectId) return true;
+  const pid = resolveRuntimeProjectId(agent);
+  return !!pid && pid === currentProjectId;
+}
+
 function renderTerminals() {
   const grid = document.getElementById("terminal-grid");
   if (!grid) return;
@@ -1309,9 +1332,10 @@ function renderTerminals() {
   const scopedBases = new Set(rows.filter(row => row.key !== row.baseKey).map(row => row.baseKey));
   rows = rows.filter(row => !(row.key === row.baseKey && scopedBases.has(row.baseKey)));
   if (terminalAgentFilter && !agentTypes[terminalAgentFilter]) terminalAgentFilter = "";
-  const list = terminalAgentFilter
+  let list = terminalAgentFilter
     ? rows.filter(row => row.baseKey === terminalAgentFilter)
     : rows;
+  list = list.filter(row => isRuntimeVisible(row.key));
   list.sort((a, b) => {
     if (a.baseKey !== b.baseKey) return a.baseKey.localeCompare(b.baseKey);
     return a.key.localeCompare(b.key);
@@ -1548,6 +1572,7 @@ function upsertProjectOption(project) {
 
 function onProjectChange() {
   currentProjectId = document.getElementById("project-select").value || null;
+  reconnectWSForScope();
   updateProjectUI();
   refreshBoard();
   renderTerminals();
@@ -2901,10 +2926,41 @@ async function submitTask(e) {
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+function scheduleWSReconnect(delayMs = 3000) {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectWS();
+  }, Math.max(200, Number(delayMs) || 3000));
+}
+
+function reconnectWSForScope() {
+  if (!authToken) return;
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    wsCloseExpected = true;
+    ws.close();
+    return;
+  }
+  connectWS();
+}
+
 function connectWS() {
   if (!authToken) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   ws = new WebSocket(wsUrl());
   ws.onopen = () => {
+    wsCloseExpected = false;
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
     document.getElementById("ws-dot").className="ws-dot connected";
     document.getElementById("ws-label").textContent="已连接";
     if (wsPingTimer) clearInterval(wsPingTimer);
@@ -2918,8 +2974,18 @@ function connectWS() {
       wsPingTimer = null;
     }
     document.getElementById("ws-dot").className="ws-dot disconnected";
+    if (!authToken) {
+      document.getElementById("ws-label").textContent="未连接";
+      return;
+    }
+    if (wsCloseExpected) {
+      wsCloseExpected = false;
+      document.getElementById("ws-label").textContent="切换项目中...";
+      connectWS();
+      return;
+    }
     document.getElementById("ws-label").textContent="已断开 — 重连中...";
-    if (authToken) setTimeout(connectWS,3000);
+    scheduleWSReconnect(3000);
   };
   ws.onerror = ()=>ws.close();
   ws.onmessage = (e)=>{
