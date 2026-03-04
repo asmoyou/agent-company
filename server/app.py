@@ -43,6 +43,12 @@ TASK_LEASE_RENEW_MIN_SECS = int(os.getenv("TASK_LEASE_RENEW_MIN_SECS", "30"))
 TASK_LEASE_RENEW_MAX_SECS = int(os.getenv("TASK_LEASE_RENEW_MAX_SECS", "1800"))
 TASK_LEASE_RECOVERY_GRACE_SECS = int(os.getenv("TASK_LEASE_RECOVERY_GRACE_SECS", "0"))
 AGENT_API_TOKEN = str(os.getenv("AGENT_API_TOKEN", "opc-agent-internal")).strip()
+AUTO_CLEANUP_TASK_WORKSPACES = str(
+    os.getenv("AUTO_CLEANUP_TASK_WORKSPACES", "1")
+).strip().lower() in {"1", "true", "yes", "on"}
+TASK_WORKSPACE_FORCE_DELETE_UNMERGED = str(
+    os.getenv("TASK_WORKSPACE_FORCE_DELETE_UNMERGED", "0")
+).strip().lower() in {"1", "true", "yes", "on"}
 STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().lower() in {
     "1",
     "true",
@@ -106,6 +112,130 @@ def task_dev_branch(task: dict) -> str:
     base = f"agent/{task_dev_agent(task)}"
     suffix = task_scope_suffix(task)
     return f"{base}/{suffix}" if suffix else base
+
+
+_TASK_WORKSPACE_CLEANUP_INFLIGHT: set[str] = set()
+
+
+def _run_cmd(args: list[str], *, cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _cleanup_task_workspace_sync(task: dict, reason: str) -> dict:
+    task_id = str(task.get("id") or "").strip()
+    project_path = str(task.get("project_path") or "").strip()
+    status = _norm_status(task.get("status"))
+
+    if not task_id or not project_path:
+        return {"ok": False, "message": "", "reason": "missing_task_or_project"}
+    if status not in {"completed", "cancelled"}:
+        return {"ok": False, "message": "", "reason": "status_not_terminal"}
+
+    root = Path(project_path)
+    if not root.exists() or not (root / ".git").exists():
+        return {"ok": False, "message": "", "reason": "repo_missing"}
+
+    dev_key = task_dev_agent(task)
+    scope = task_scope_suffix(task)
+    if not scope:
+        return {"ok": False, "message": "", "reason": "missing_task_scope"}
+    worktree = root / ".worktrees" / dev_key / scope
+    branch = task_dev_branch(task)
+
+    actions: list[str] = []
+    warnings: list[str] = []
+
+    if worktree.exists():
+        rc, _, err = _run_cmd(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=root,
+            timeout=60,
+        )
+        if rc == 0:
+            rel = str(worktree.relative_to(root)) if worktree.is_relative_to(root) else str(worktree)
+            actions.append(f"移除工作树 {rel}")
+        else:
+            warnings.append(f"移除工作树失败: {err[:120] or 'unknown error'}")
+    _run_cmd(["git", "worktree", "prune"], cwd=root, timeout=30)
+
+    rc, out, _ = _run_cmd(["git", "branch", "--list", branch], cwd=root, timeout=20)
+    branch_exists = rc == 0 and bool(out.strip())
+    if branch_exists:
+        delete_flag = "-d"
+        if status == "cancelled":
+            delete_flag = "-D"
+        rc_del, _, err_del = _run_cmd(
+            ["git", "branch", delete_flag, branch],
+            cwd=root,
+            timeout=20,
+        )
+        if rc_del == 0:
+            actions.append(f"删除分支 {branch}")
+        elif (
+            delete_flag == "-d"
+            and TASK_WORKSPACE_FORCE_DELETE_UNMERGED
+        ):
+            rc_force, _, err_force = _run_cmd(
+                ["git", "branch", "-D", branch],
+                cwd=root,
+                timeout=20,
+            )
+            if rc_force == 0:
+                actions.append(f"强制删除分支 {branch}")
+            else:
+                warnings.append(f"删除分支失败: {err_force[:120] or 'unknown error'}")
+        else:
+            warnings.append(f"删除分支失败: {err_del[:120] or 'unknown error'}")
+
+    if not actions and not warnings:
+        return {"ok": False, "message": "", "reason": "nothing_to_cleanup"}
+
+    detail_parts = []
+    if actions:
+        detail_parts.append("；".join(actions))
+    if warnings:
+        detail_parts.append("警告: " + "；".join(warnings))
+    detail = "；".join(detail_parts)
+    message = (
+        f"[工作区清理] task={task_id} reason={reason} status={status} -> {detail}"
+    )
+    return {"ok": bool(actions), "message": message, "reason": "done"}
+
+
+def _schedule_task_workspace_cleanup(task: dict, reason: str):
+    if not AUTO_CLEANUP_TASK_WORKSPACES:
+        return
+    task_id = str(task.get("id") or "").strip()
+    if not task_id:
+        return
+    if task_id in _TASK_WORKSPACE_CLEANUP_INFLIGHT:
+        return
+    _TASK_WORKSPACE_CLEANUP_INFLIGHT.add(task_id)
+
+    async def _runner():
+        try:
+            result = await asyncio.to_thread(_cleanup_task_workspace_sync, dict(task), reason)
+            message = str(result.get("message") or "").strip()
+            if message:
+                try:
+                    log = db.add_log(task_id, "system", message)
+                    await broadcast_log(log)
+                except Exception:
+                    pass
+        finally:
+            _TASK_WORKSPACE_CLEANUP_INFLIGHT.discard(task_id)
+
+    asyncio.create_task(_runner())
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -901,6 +1031,16 @@ async def _apply_transition_and_broadcast(
             if parent:
                 await manager.broadcast({"event": "task_updated", "task": parent})
 
+    before_status = _norm_status(before.get("status"))
+    after_status = _norm_status(task.get("status"))
+    if after_status in {"completed", "cancelled"} and (
+        before_status != after_status or int(task.get("archived") or 0) == 1
+    ):
+        _schedule_task_workspace_cleanup(
+            task,
+            reason=f"status_transition:{before_status}->{after_status}",
+        )
+
     return {
         "task": task,
         "handoff": _format_handoff(handoff) if handoff else None,
@@ -1556,6 +1696,7 @@ async def cancel_task(task_id: str, body: CancelTaskRequest | None = None, user:
         log = db.add_log(t["id"], "system", message)
         await broadcast_log(log)
         await manager.broadcast({"event": "task_updated", "task": t})
+        _schedule_task_workspace_cleanup(t, reason="task_cancelled")
 
     return {
         "task": cancelled[0],

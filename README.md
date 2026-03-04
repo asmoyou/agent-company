@@ -132,6 +132,9 @@ decompose -> decomposed -> (subtasks in todo...)
 你关心的问题是对的：如果没合并到 `main`，其他 Agent 能不能看到 commit？
 
 - 在同一个 Git 仓库下的多个 `worktree`，共享同一套对象库（`.git/objects`）。
+- 当前默认采用“任务级隔离”：
+  - 分支：`agent/<agent>/<task_id>`
+  - 工作树：`.worktrees/<agent>/<task_id>`
 - 所以只要开发 Agent 已经本地 commit，Reviewer 通常可以直接按 `commit_hash` 读取和审查，不必等合并到 `main`。
 - Manager 再根据策略把该提交同步到目标分支（如 `cherry-pick` 到 `main`）。
 - 只有在“不同 clone / 不同仓库”时，才需要通过 `push/fetch` 才能看到彼此提交。
@@ -150,6 +153,9 @@ decompose -> decomposed -> (subtasks in todo...)
 | `INCLUDE_IDLE_RUNTIME_PROJECTS` | `0` | `run_all` 是否为无 open task 的项目也启动 worker |
 | `AGENT_PROJECT_IDS` | `` | 可选项目白名单（逗号分隔 project id），为空则自动发现 |
 | `HANDOFF_SYNC_STRATEGY` | `cherry-pick` | 跨 Agent 提交同步策略：`cherry-pick` / `merge` / `none` |
+| `BRANCH_SYNC_STRATEGY` | `merge` | 任务开始前同步 `main` 的策略：`merge` / `rebase` / `none` |
+| `AUTO_CLEANUP_TASK_WORKSPACES` | `1` | 任务进入 `completed`/`cancelled` 后自动清理对应 task worktree/branch |
+| `TASK_WORKSPACE_FORCE_DELETE_UNMERGED` | `0` | 对未合并分支是否允许强制删除（仅在自动清理中生效） |
 | `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 Codex 传 `--output-schema`（默认关闭，降低兼容风险） |
 
 ## 当前边界（MVP）
