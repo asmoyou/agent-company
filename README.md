@@ -5,6 +5,10 @@ Multi-Agent Terminal Orchestrator (MVP)
 一个用于本地研发协作的多 Agent 看板系统。  
 目标是让你在一个地方统一管理 `Codex`、`Claude` 等终端 Agent，让任务自动流转、自动交接、自动推进。
 
+## 项目演示（快速一览）
+
+![OPC-demo 项目演示截图](assets/demo.webp)
+
 ## 这是什么
 
 - 这是一个随手做的 MVP（最小可用原型），重点是验证流程能跑通，不追求大而全。
