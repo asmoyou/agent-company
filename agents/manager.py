@@ -257,8 +257,6 @@ class ManagerAgent(BaseAgent):
 
         try:
             await self.git("cat-file", "-e", f"{target_commit}^{{commit}}", cwd=proj_root)
-            if not await self._is_ancestor(proj_root, target_commit, dev_branch):
-                raise RuntimeError(f"commit {target_commit} 不在分支 {dev_branch} 上")
         except Exception as e:
             feedback = f"[合并前置检查失败] {e}。请 {dev_agent} 重新提交可合并 commit。"
             await self._return_to_dev_for_merge_issue(
@@ -271,7 +269,44 @@ class ManagerAgent(BaseAgent):
             )
             return
 
+        source_contains_target = await self._is_ancestor(proj_root, target_commit, dev_branch)
+        if not source_contains_target:
+            await self.add_log(
+                task_id,
+                (
+                    f"⚠ 目标提交 {target_commit[:12]} 当前不在分支 {dev_branch} HEAD 上；"
+                    "继续按 commit hash 精确合并。"
+                ),
+            )
+
         await self._ensure_on_main(proj_root)
+        parent_commit = ""
+        try:
+            parent_commit = (await self.git("rev-parse", f"{target_commit}^", cwd=proj_root)).strip()
+        except Exception:
+            parent_commit = ""
+        if parent_commit:
+            parent_on_main = await self._is_ancestor(proj_root, parent_commit, "main")
+            if not parent_on_main:
+                parent_on_main = await self._is_patch_equivalent_on_ref(
+                    proj_root, parent_commit, "main"
+                )
+            if not parent_on_main:
+                feedback = (
+                    f"[提交基线不一致] 目标 commit {target_commit[:12]} 的父提交 "
+                    f"{parent_commit[:12]} 不在 main 上（或非等价提交），该提交不是可独立合并变更。"
+                    f"请 {dev_agent} 基于 main 重新整理并提交可单独 cherry-pick 的 commit。"
+                )
+                await self._return_to_dev_for_merge_issue(
+                    task_id=task_id,
+                    dev_agent=dev_agent,
+                    target_commit=target_commit,
+                    related_history_commits=related_history_commits,
+                    feedback=feedback,
+                    dev_branch=dev_branch,
+                )
+                return
+
         head_before = (await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)).strip()
         before_contains_target = await self._is_ancestor(proj_root, target_commit, "main")
         before_contains_equivalent = (
