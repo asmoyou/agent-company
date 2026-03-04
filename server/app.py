@@ -1028,6 +1028,12 @@ class UserCreateRequest(BaseModel):
     password: str
 
 
+class UserUpdateRequest(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    role: Literal["admin", "user"] | None = None
+
+
 class TaskCreate(BaseModel):
     title: str
     description: str = ""
@@ -1449,9 +1455,17 @@ async def login(body: LoginRequest):
         raise HTTPException(422, "用户名和密码不能为空")
     if username == "admin" and not db.admin_password_is_set():
         raise HTTPException(409, "管理员尚未设置初始密码")
-    user = db.authenticate_user(username, password)
-    if not user:
+    auth_result = db.authenticate_user(username, password)
+    if not auth_result.get("ok"):
+        retry_after = int(auth_result.get("retry_after_secs") or 0)
+        if str(auth_result.get("reason") or "") == "locked":
+            retry_after = max(1, retry_after)
+            raise HTTPException(429, f"登录失败次数过多，请在 {retry_after} 秒后重试")
+        if auth_result.get("locked"):
+            retry_after = max(1, retry_after)
+            raise HTTPException(429, f"登录失败次数过多，账号已锁定 {retry_after} 秒")
         raise HTTPException(401, "用户名或密码错误")
+    user = auth_result["user"]
     session = db.create_session(user["id"])
     return {"user": user, **session}
 
@@ -1490,6 +1504,79 @@ async def create_user(body: UserCreateRequest, admin: dict = Depends(require_adm
         raise HTTPException(422, str(e))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "用户名已存在")
+
+
+@app.patch("/users/{user_id}")
+async def update_user(user_id: str, body: UserUpdateRequest, admin: dict = Depends(require_admin)):
+    target = db.get_user(user_id)
+    if not target:
+        raise HTTPException(404, "用户不存在")
+
+    username: str | None = None
+    if body.username is not None:
+        username = str(body.username or "").strip().lower()
+        if not re.match(r"^[a-z][a-z0-9._-]{2,31}$", username):
+            raise HTTPException(422, "用户名只能包含小写字母/数字/._-，长度 3-32，且以字母开头")
+        if target["username"] == "admin" and username != target["username"]:
+            raise HTTPException(422, "admin 账号用户名不可修改")
+        hit = db.get_user_by_username(username)
+        if hit and hit["id"] != user_id:
+            raise HTTPException(409, "用户名已存在")
+        if username == target["username"]:
+            username = None
+
+    password: str | None = None
+    if body.password is not None:
+        password = str(body.password or "")
+        if len(password) < 6:
+            raise HTTPException(422, "密码至少 6 位")
+
+    role: str | None = body.role if body.role is not None else None
+    if role is not None:
+        if target["username"] == "admin" and role != db.ROLE_ADMIN:
+            raise HTTPException(422, "admin 账号角色不可修改")
+        if role == target["role"]:
+            role = None
+        elif role == db.ROLE_USER and target["role"] == db.ROLE_ADMIN:
+            if target["id"] == admin["id"]:
+                raise HTTPException(422, "不能降低当前登录账号的管理员权限")
+            if db.count_users_by_role(db.ROLE_ADMIN) <= 1:
+                raise HTTPException(422, "系统至少需要保留一个管理员")
+
+    if username is None and password is None and role is None:
+        raise HTTPException(422, "没有可更新字段")
+
+    try:
+        updated = db.update_user(
+            user_id,
+            username=username,
+            password=password,
+            role=role,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "用户名已存在")
+    if not updated:
+        raise HTTPException(404, "用户不存在")
+    return updated
+
+
+@app.delete("/users/{user_id}")
+async def delete_user_api(user_id: str, admin: dict = Depends(require_admin)):
+    target = db.get_user(user_id)
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    if target["id"] == admin["id"]:
+        raise HTTPException(422, "不能删除当前登录账号")
+    if target["username"] == "admin":
+        raise HTTPException(422, "admin 账号不可删除")
+    if target["role"] == db.ROLE_ADMIN and db.count_users_by_role(db.ROLE_ADMIN) <= 1:
+        raise HTTPException(422, "系统至少需要保留一个管理员")
+    deleted = db.delete_user(user_id)
+    if not deleted:
+        raise HTTPException(404, "用户不存在")
+    return {"ok": True}
 
 
 # ── Projects ──────────────────────────────────────────────────────────────────

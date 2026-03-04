@@ -2,6 +2,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -79,6 +80,183 @@ class TaskActionsApiTest(unittest.TestCase):
             headers=self._headers,
         )
         self.assertEqual(res.status_code, 201)
+
+    def test_admin_can_edit_and_delete_user(self):
+        created = self.client.post(
+            "/users",
+            json={"username": "dev01", "password": "devpass1"},
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        user = created.json()
+
+        updated = self.client.patch(
+            f"/users/{user['id']}",
+            json={"username": "dev02", "role": "admin", "password": "newpass1"},
+            headers=self._headers,
+        )
+        self.assertEqual(updated.status_code, 200)
+        payload = updated.json()
+        self.assertEqual(payload["username"], "dev02")
+        self.assertEqual(payload["role"], "admin")
+        self.assertTrue(payload["password_set"])
+
+        relogin = self.client.post(
+            "/auth/login",
+            json={"username": "dev02", "password": "newpass1"},
+        )
+        self.assertEqual(relogin.status_code, 200)
+
+        deleted = self.client.delete(f"/users/{user['id']}", headers=self._headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json().get("ok"))
+
+        users = self.client.get("/users", headers=self._headers)
+        self.assertEqual(users.status_code, 200)
+        self.assertNotIn("dev02", {u["username"] for u in users.json()})
+
+    def test_user_management_rejects_delete_self(self):
+        me = self.client.get("/auth/me", headers=self._headers)
+        self.assertEqual(me.status_code, 200)
+        uid = me.json()["id"]
+
+        res = self.client.delete(f"/users/{uid}", headers=self._headers)
+        self.assertEqual(res.status_code, 422)
+
+    def test_user_management_rejects_demote_current_admin(self):
+        me = self.client.get("/auth/me", headers=self._headers)
+        self.assertEqual(me.status_code, 200)
+        uid = me.json()["id"]
+
+        res = self.client.patch(
+            f"/users/{uid}",
+            json={"role": "user"},
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 422)
+
+    def test_non_admin_cannot_manage_users(self):
+        created = self.client.post(
+            "/users",
+            json={"username": "dev03", "password": "devpass3"},
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        target = created.json()
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "dev03", "password": "devpass3"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        list_res = self.client.get("/users", headers=user_headers)
+        self.assertEqual(list_res.status_code, 403)
+
+        patch_res = self.client.patch(
+            f"/users/{target['id']}",
+            json={"username": "dev03x"},
+            headers=user_headers,
+        )
+        self.assertEqual(patch_res.status_code, 403)
+
+        del_res = self.client.delete(f"/users/{target['id']}", headers=user_headers)
+        self.assertEqual(del_res.status_code, 403)
+
+    def test_login_lockout_backoff_after_five_failures(self):
+        username = "admin"
+        for _ in range(4):
+            res = self.client.post(
+                "/auth/login",
+                json={"username": username, "password": "wrong-pass"},
+            )
+            self.assertEqual(res.status_code, 401)
+
+        fifth = self.client.post(
+            "/auth/login",
+            json={"username": username, "password": "wrong-pass"},
+        )
+        self.assertEqual(fifth.status_code, 429)
+        self.assertIn("登录失败次数过多", fifth.json().get("detail", ""))
+
+        conn = db.get_conn()
+        row_5 = conn.execute(
+            "SELECT failed_login_attempts, lock_until, last_failed_login_at FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row_5)
+        self.assertEqual(int(row_5["failed_login_attempts"] or 0), 5)
+        self.assertTrue(str(row_5["lock_until"] or "").strip())
+
+        locked = self.client.post(
+            "/auth/login",
+            json={"username": username, "password": "admin123"},
+        )
+        self.assertEqual(locked.status_code, 429)
+
+        conn = db.get_conn()
+        conn.execute(
+            "UPDATE users SET lock_until=? WHERE username=?",
+            ((datetime.utcnow() - timedelta(seconds=1)).isoformat(), username),
+        )
+        conn.commit()
+        conn.close()
+
+        sixth = self.client.post(
+            "/auth/login",
+            json={"username": username, "password": "wrong-pass"},
+        )
+        self.assertEqual(sixth.status_code, 429)
+
+        conn = db.get_conn()
+        row_6 = conn.execute(
+            "SELECT failed_login_attempts, lock_until, last_failed_login_at FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row_6)
+        self.assertEqual(int(row_6["failed_login_attempts"] or 0), 6)
+
+        lock_5 = datetime.fromisoformat(row_5["lock_until"])
+        fail_5 = datetime.fromisoformat(row_5["last_failed_login_at"])
+        lock_6 = datetime.fromisoformat(row_6["lock_until"])
+        fail_6 = datetime.fromisoformat(row_6["last_failed_login_at"])
+        self.assertGreater((lock_6 - fail_6).total_seconds(), (lock_5 - fail_5).total_seconds())
+
+    def test_successful_login_resets_failed_attempt_counters(self):
+        username = "admin"
+        for _ in range(2):
+            res = self.client.post(
+                "/auth/login",
+                json={"username": username, "password": "wrong-pass"},
+            )
+            self.assertEqual(res.status_code, 401)
+
+        conn = db.get_conn()
+        before = conn.execute(
+            "SELECT failed_login_attempts FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(int(before["failed_login_attempts"] or 0), 2)
+
+        ok = self.client.post(
+            "/auth/login",
+            json={"username": username, "password": "admin123"},
+        )
+        self.assertEqual(ok.status_code, 200)
+
+        conn = db.get_conn()
+        after = conn.execute(
+            "SELECT failed_login_attempts, lock_until, last_failed_login_at FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(int(after["failed_login_attempts"] or 0), 0)
+        self.assertFalse(str(after["lock_until"] or "").strip())
+        self.assertFalse(str(after["last_failed_login_at"] or "").strip())
 
     def test_patch_rejects_direct_status_change(self):
         task = self._create_task(status="todo")

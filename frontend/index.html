@@ -731,6 +731,41 @@
   </div>
 </div>
 
+<!-- User Edit Modal -->
+<div id="modal-user-edit" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+      <h3 class="font-semibold text-white">编辑用户</h3>
+      <button onclick="closeUserEditModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <form onsubmit="submitEditUser(event)" class="p-6 space-y-4">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">用户名</label>
+        <input id="edit-user-username" type="text"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">角色</label>
+        <select id="edit-user-role"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+          <option value="user">普通用户</option>
+          <option value="admin">管理员</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">新密码（可选）</label>
+        <input id="edit-user-password" type="password" placeholder="留空则不修改"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        <div class="text-[11px] text-slate-500 mt-1">填写后将重置该用户密码，至少 6 位</div>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button type="button" onclick="closeUserEditModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
+        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Create Task Modal -->
 <div id="modal-task" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
   <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
@@ -1110,6 +1145,8 @@ let terminalAutoFollow = {};   // key -> whether terminal should follow newest o
 let terminalStreamState = {};  // key -> { running:boolean, exit_code:number|null, updated_at:string }
 const TERMINAL_MAX_LINES = 2000;
 let _editingAgentKey = null;  // null = create mode
+let _usersCache = [];
+let _editingUserId = null;
 let newProjectMode = "new";    // "new" | "existing"
 let dpCurrentPath = "";
 let dpParentPath = null;
@@ -1123,6 +1160,7 @@ function openUsersModal() {
 
 function closeUsersModal() {
   document.getElementById("modal-users").classList.add("hidden");
+  closeUserEditModal();
 }
 
 async function loadUsers() {
@@ -1132,6 +1170,7 @@ async function loadUsers() {
     const res = await apiFetch(`${API}/users`);
     if (!res.ok) throw new Error(await res.text());
     const users = await res.json();
+    _usersCache = Array.isArray(users) ? users : [];
     if (!users.length) {
       listEl.innerHTML = '<div class="text-xs text-slate-500">暂无用户</div>';
       return;
@@ -1139,15 +1178,106 @@ async function loadUsers() {
     listEl.innerHTML = users.map(u => {
       const role = u.role === "admin" ? "管理员" : "普通用户";
       const pwd = u.password_set ? "已设置密码" : "未设置密码";
-      return `<div class="bg-slate-700/40 rounded-lg px-3 py-2 text-xs flex items-center justify-between">
+      const isMe = currentUser && currentUser.id === u.id;
+      const canDelete = !isMe && u.username !== "admin";
+      return `<div class="bg-slate-700/40 rounded-lg px-3 py-2 text-xs flex items-center justify-between gap-3">
         <div>
-          <div class="text-slate-200">${escHtml(u.username)}</div>
+          <div class="text-slate-200">${escHtml(u.username)}${isMe ? ' <span class="text-[10px] text-emerald-400">(当前账号)</span>' : ''}</div>
           <div class="text-slate-500">${role} · ${pwd}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="openUserEditModal('${escAttr(u.id)}')"
+            class="px-2 py-1 rounded border border-slate-600 text-slate-300 hover:text-white hover:border-slate-500">编辑</button>
+          <button type="button" onclick="deleteUser('${escAttr(u.id)}')" ${canDelete ? "" : "disabled"}
+            class="px-2 py-1 rounded border ${canDelete ? "border-red-800 text-red-300 hover:text-red-200 hover:border-red-700" : "border-slate-700 text-slate-600 cursor-not-allowed"}">删除</button>
         </div>
       </div>`;
     }).join("");
   } catch (err) {
+    _usersCache = [];
     listEl.innerHTML = `<div class="text-xs text-red-400">加载失败: ${escHtml(err.message)}</div>`;
+  }
+}
+
+function findUserById(userId) {
+  return _usersCache.find(u => u.id === userId) || null;
+}
+
+function openUserEditModal(userId) {
+  if (!isAdminUser()) return;
+  const user = findUserById(userId);
+  if (!user) return;
+  _editingUserId = user.id;
+  document.getElementById("edit-user-username").value = user.username || "";
+  document.getElementById("edit-user-role").value = user.role || "user";
+  document.getElementById("edit-user-password").value = "";
+  document.getElementById("modal-user-edit").classList.remove("hidden");
+  setTimeout(() => document.getElementById("edit-user-username").focus(), 20);
+}
+
+function closeUserEditModal() {
+  _editingUserId = null;
+  document.getElementById("modal-user-edit").classList.add("hidden");
+  const passwordInput = document.getElementById("edit-user-password");
+  if (passwordInput) passwordInput.value = "";
+}
+
+async function submitEditUser(e) {
+  e.preventDefault();
+  if (!_editingUserId) return;
+  const editingId = _editingUserId;
+  const current = findUserById(editingId);
+  if (!current) return;
+
+  const username = (document.getElementById("edit-user-username").value || "").trim().toLowerCase();
+  const role = (document.getElementById("edit-user-role").value || "").trim();
+  const password = (document.getElementById("edit-user-password").value || "").trim();
+
+  if (!username) {
+    alert("用户名不能为空");
+    return;
+  }
+
+  const payload = {};
+  if (username !== current.username) payload.username = username;
+  if (role && role !== current.role) payload.role = role;
+  if (password) payload.password = password;
+
+  if (!Object.keys(payload).length) {
+    closeUserEditModal();
+    return;
+  }
+
+  try {
+    const res = await apiFetch(`${API}/users/${encodeURIComponent(editingId)}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    closeUserEditModal();
+    await loadUsers();
+    if (currentUser && currentUser.id === editingId) {
+      const me = await apiFetch(`${API}/auth/me`);
+      if (me.ok) setAuthUser(await me.json());
+    }
+  } catch (err) {
+    alert("更新用户失败: " + err.message);
+  }
+}
+
+async function deleteUser(userId) {
+  const user = findUserById(userId);
+  if (!user) return;
+  if (!confirm(`确认删除用户 ${user.username} 吗？`)) return;
+  try {
+    const res = await apiFetch(`${API}/users/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadUsers();
+  } catch (err) {
+    alert("删除用户失败: " + err.message);
   }
 }
 
