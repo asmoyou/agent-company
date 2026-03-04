@@ -35,6 +35,10 @@ class TaskActionsApiTest(unittest.TestCase):
                 "last_failed_at": "",
             }
         )
+        app_module.AGENT_OUTPUT.clear()
+        app_module.AGENT_STATUS.clear()
+        for key in ("developer", "reviewer", "manager"):
+            app_module._ensure_agent_state(key)
         self.client = TestClient(app_module.app)
         setup = self.client.post("/auth/setup-admin", json={"password": "admin123"})
         self.assertEqual(setup.status_code, 200)
@@ -724,6 +728,84 @@ class TaskActionsApiTest(unittest.TestCase):
         entries = db.get_agent_output_entries("developer", limit=1)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["project_id"], self.project["id"])
+
+    def test_agent_outputs_endpoint_can_scope_project(self):
+        other_path = Path(self._tmp.name) / "other-project"
+        other_path.mkdir(parents=True, exist_ok=True)
+        other_project = db.create_project("other-project", str(other_path))
+        task_a = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        task_b = db.create_task(
+            title="other-task",
+            description="other project output",
+            project_id=other_project["id"],
+            status="in_progress",
+            assigned_agent="developer",
+            dev_agent="developer",
+        )
+        self.client.post(
+            "/agents/developer/output",
+            json={"line": "line-a", "event": "line", "task_id": task_a["id"]},
+            headers=self._agent_headers,
+        )
+        self.client.post(
+            "/agents/developer/output",
+            json={"line": "line-b", "event": "line", "task_id": task_b["id"]},
+            headers=self._agent_headers,
+        )
+
+        res = self.client.get(
+            f"/agents/outputs?project_id={self.project['id']}",
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("developer", data)
+        lines = data["developer"]["lines"]
+        self.assertGreaterEqual(len(lines), 1)
+        self.assertTrue(all(line["project_id"] == self.project["id"] for line in lines))
+        self.assertIn("line-a", [line["line"] for line in lines])
+        self.assertNotIn("line-b", [line["line"] for line in lines])
+
+    def test_websocket_project_scope_filters_agent_output_stream(self):
+        other_path = Path(self._tmp.name) / "other-project"
+        other_path.mkdir(parents=True, exist_ok=True)
+        other_project = db.create_project("other-project", str(other_path))
+        task_a = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        task_b = db.create_task(
+            title="other-task",
+            description="other project output",
+            project_id=other_project["id"],
+            status="in_progress",
+            assigned_agent="developer",
+            dev_agent="developer",
+        )
+        token = self._headers["Authorization"].split(" ", 1)[1]
+        with self.client.websocket_connect(f"/ws?token={token}&project_id={self.project['id']}") as ws:
+            init = ws.receive_json()
+            self.assertEqual(init["event"], "init")
+            self.assertTrue(all(t["project_id"] == self.project["id"] for t in init["tasks"]))
+
+            self.client.post(
+                "/agents/developer/output",
+                json={"line": "line-b", "event": "line", "task_id": task_b["id"]},
+                headers=self._agent_headers,
+            )
+            self.client.post(
+                "/agents/developer/output",
+                json={"line": "line-a", "event": "line", "task_id": task_a["id"]},
+                headers=self._agent_headers,
+            )
+
+            for _ in range(6):
+                msg = ws.receive_json()
+                if msg.get("event") != "agent_output":
+                    continue
+                self.assertEqual(msg.get("project_id"), self.project["id"])
+                payload = msg.get("output") if isinstance(msg.get("output"), dict) else msg
+                self.assertEqual(payload.get("line"), "line-a")
+                break
+            else:
+                self.fail("expected scoped agent_output event for current project")
 
     def test_worker_alias_status_and_output_use_agent_key(self):
         task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
