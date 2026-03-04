@@ -3138,12 +3138,30 @@ function connectWS() {
       if (ws && ws.readyState === 1) ws.send("ping");
     }, 20000);
   };
-  ws.onclose = () => {
+  ws.onclose = (evt) => {
     if (wsPingTimer) {
       clearInterval(wsPingTimer);
       wsPingTimer = null;
     }
     document.getElementById("ws-dot").className="ws-dot disconnected";
+    const closeCode = Number(evt?.code || 0);
+    if (closeCode === 4401) {
+      document.getElementById("ws-label").textContent="登录失效，请重新登录";
+      localStorage.removeItem("opc_token");
+      authToken = "";
+      setAuthUser(null);
+      showAuthModal("login", "登录已失效，请重新登录");
+      return;
+    }
+    if (closeCode === 4403) {
+      document.getElementById("ws-label").textContent="当前项目无权限，正在重置范围...";
+      currentProjectId = null;
+      const sel = document.getElementById("project-select");
+      if (sel) sel.value = "";
+      if (typeof updateProjectUI === "function") updateProjectUI();
+      scheduleWSReconnect(500);
+      return;
+    }
     if (!authToken) {
       document.getElementById("ws-label").textContent="未连接";
       return;
