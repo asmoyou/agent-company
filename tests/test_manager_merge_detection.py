@@ -133,6 +133,96 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_dev")
         self.assertIn("提交基线不一致", call.kwargs["handoff"]["summary"])
 
+    async def test_process_task_conflict_auto_merge_success(self):
+        target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
+        task = self._task(target_commit)
+        self.agent.ensure_agent_workspace = mock.AsyncMock(
+            return_value=(self.repo, self.repo / ".worktrees" / "developer" / "task-1", "agent/developer/task-1")
+        )
+        self.agent.run_cli = mock.AsyncMock(
+            return_value=(0, "CONFLICT (content): Merge conflict in index.html")
+        )
+        self.agent._attempt_auto_merge_strategies = mock.AsyncMock(
+            return_value={
+                "resolved": True,
+                "strategy": "theirs",
+                "head_after": "14a2a1a",
+                "attempts": [{"strategy": "theirs", "status": "merged", "conflicts": []}],
+            }
+        )
+        self.agent._is_ancestor = mock.AsyncMock(side_effect=[True, False, False, True])
+        self.agent._is_patch_equivalent_on_ref = mock.AsyncMock(side_effect=[False, False])
+
+        heads = iter(["ec0a922", "ec0a922"])
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args[:2] == ("cat-file", "-e"):
+                return ""
+            if args[:2] == ("rev-parse", "--short"):
+                return next(heads)
+            if args[0] == "rev-parse" and args[1].endswith("^"):
+                raise RuntimeError("no parent in test")
+            return ""
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        await self.agent.process_task(task)
+
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "pending_acceptance")
+        self.assertIn("冲突自动处理成功", call.kwargs["handoff"]["summary"])
+        self.assertEqual(call.kwargs["handoff"]["payload"]["auto_merge_strategy"], "theirs")
+
+    async def test_process_task_conflict_auto_merge_fail_returns_actionable_feedback(self):
+        target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
+        task = self._task(target_commit)
+        self.agent.ensure_agent_workspace = mock.AsyncMock(
+            return_value=(self.repo, self.repo / ".worktrees" / "developer" / "task-1", "agent/developer/task-1")
+        )
+        self.agent.run_cli = mock.AsyncMock(
+            return_value=(0, "CONFLICT (modify/delete): cooking-game.html deleted in HEAD")
+        )
+        self.agent._attempt_auto_merge_strategies = mock.AsyncMock(
+            return_value={
+                "resolved": False,
+                "strategy": "",
+                "head_after": "",
+                "attempts": [
+                    {
+                        "strategy": "theirs",
+                        "status": "failed",
+                        "error": "could not apply",
+                        "conflicts": [{"code": "DU", "path": "cooking-game.html"}],
+                    }
+                ],
+            }
+        )
+        self.agent._is_ancestor = mock.AsyncMock(side_effect=[True, False, False])
+        self.agent._is_patch_equivalent_on_ref = mock.AsyncMock(side_effect=[False, False])
+
+        heads = iter(["ec0a922", "ec0a922"])
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args[:2] == ("cat-file", "-e"):
+                return ""
+            if args[:2] == ("rev-parse", "--short"):
+                return next(heads)
+            if args[0] == "rev-parse" and args[1].endswith("^"):
+                raise RuntimeError("no parent in test")
+            return ""
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        await self.agent.process_task(task)
+
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_dev")
+        self.assertIn("修改建议", call.kwargs["fields"]["review_feedback"])
+        self.assertIn("DU cooking-game.html", call.kwargs["fields"]["review_feedback"])
+
 
 if __name__ == "__main__":
     unittest.main()

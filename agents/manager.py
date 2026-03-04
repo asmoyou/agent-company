@@ -122,6 +122,142 @@ class ManagerAgent(BaseAgent):
             return True
         return False
 
+    def _parse_unmerged_from_status(self, text: str) -> list[dict]:
+        out: list[dict] = []
+        for raw in str(text or "").splitlines():
+            line = raw.rstrip()
+            if len(line) < 3:
+                continue
+            code = line[:2]
+            if code not in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}:
+                continue
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1].strip()
+            if not path:
+                continue
+            out.append({"code": code, "path": path})
+        return out
+
+    async def _attempt_auto_merge_strategies(self, repo_root: Path, target_commit: str) -> dict:
+        """
+        Try safe, deterministic cherry-pick strategies before giving up.
+        Returns:
+          {
+            resolved: bool,
+            strategy: str,
+            head_after: str,
+            attempts: [{strategy,status,error,conflicts}],
+          }
+        """
+        attempts: list[dict] = []
+        strategies: list[tuple[str, list[str]]] = [
+            ("theirs", ["-X", "theirs"]),
+            ("ours", ["-X", "ours"]),
+        ]
+
+        for strategy_name, strategy_flags in strategies:
+            await self._cleanup_merge_state(repo_root)
+            await self._ensure_on_main(repo_root)
+            try:
+                await self.git(
+                    "cherry-pick",
+                    "-x",
+                    *strategy_flags,
+                    target_commit,
+                    cwd=repo_root,
+                )
+                head_after = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()
+                attempts.append({"strategy": strategy_name, "status": "merged", "conflicts": []})
+                return {
+                    "resolved": True,
+                    "strategy": strategy_name,
+                    "head_after": head_after,
+                    "attempts": attempts,
+                }
+            except Exception as e:
+                status_text = ""
+                conflicts: list[dict] = []
+                try:
+                    status_text = await self.git("status", "--porcelain", cwd=repo_root)
+                    conflicts = self._parse_unmerged_from_status(status_text)
+                except Exception:
+                    pass
+                attempts.append(
+                    {
+                        "strategy": strategy_name,
+                        "status": "failed",
+                        "error": str(e)[:240],
+                        "conflicts": conflicts,
+                    }
+                )
+                await self._cleanup_merge_state(repo_root)
+
+        await self._ensure_on_main(repo_root)
+        return {"resolved": False, "strategy": "", "head_after": "", "attempts": attempts}
+
+    def _build_conflict_rework_feedback(
+        self,
+        *,
+        target_commit: str,
+        dev_agent: str,
+        dev_branch: str,
+        attempts: list[dict],
+        conflicts: list[dict],
+    ) -> str:
+        short_commit = (target_commit or "")[:12]
+        lines: list[str] = [
+            (
+                f"[合并冲突] Manager 已尝试自动处理冲突但失败：commit {short_commit} "
+                "仍无法无冲突合并到 main。"
+            ),
+            "修改建议（请按顺序执行，避免重复返工）：",
+            (
+                f"1. 在 `{dev_branch}` 基于最新 `main` 重建本次改动，"
+                "确保形成可独立 cherry-pick 的新提交（不要复用旧 commit）。"
+            ),
+            (
+                "2. 仅保留与当前任务直接相关文件，移除历史任务残留改动；"
+                "提交前自检 `git show --name-status <new_commit>`。"
+            ),
+            (
+                "3. 在交接说明中逐条写明每个冲突文件如何处理（保留/删除/迁移到哪个文件），"
+                "并附上新的 commit_hash。"
+            ),
+        ]
+
+        if attempts:
+            lines.append("Manager 自动处理尝试记录：")
+            for item in attempts[:4]:
+                strategy = str(item.get("strategy") or "").strip() or "unknown"
+                status = str(item.get("status") or "").strip() or "unknown"
+                err = str(item.get("error") or "").strip()
+                if err:
+                    lines.append(f"- 策略 `{strategy}`: {status}（{err[:120]}）")
+                else:
+                    lines.append(f"- 策略 `{strategy}`: {status}")
+
+        if conflicts:
+            lines.append("冲突文件与处理指引：")
+            for item in conflicts[:8]:
+                code = str(item.get("code") or "").strip().upper()
+                path = str(item.get("path") or "").strip()
+                if not path:
+                    continue
+                tip = "先对齐 main 后手工确认该文件最终内容。"
+                if code == "DU":
+                    tip = "main 已删除、提交仍修改；请确认该文件是否应废弃或迁移。"
+                elif code == "UD":
+                    tip = "提交删除、main 仍修改；请确认是否应保留删除。"
+                elif code == "AA":
+                    tip = "双方都新增同名文件；请合并为单一版本。"
+                elif code == "UU":
+                    tip = "双方均修改同一文件；请手工合并关键差异。"
+                lines.append(f"- `{code} {path}`：{tip}")
+
+        lines.append(f"请 {dev_agent} 按上述建议提交新 commit 后重新流转审查。")
+        return "\n".join(lines)
+
     def _load_decision_file(self, path: Path) -> dict | None:
         if not path.exists():
             return None
@@ -294,8 +430,11 @@ class ManagerAgent(BaseAgent):
             if not parent_on_main:
                 feedback = (
                     f"[提交基线不一致] 目标 commit {target_commit[:12]} 的父提交 "
-                    f"{parent_commit[:12]} 不在 main 上（或非等价提交），该提交不是可独立合并变更。"
-                    f"请 {dev_agent} 基于 main 重新整理并提交可单独 cherry-pick 的 commit。"
+                    f"{parent_commit[:12]} 不在 main 上（或非等价提交），该提交不是可独立合并变更。\n"
+                    "修改建议：\n"
+                    f"1. 在 `{dev_branch}` 基于最新 `main` 重建本次改动并生成新 commit；\n"
+                    "2. 保证新 commit 仅包含本任务文件，不携带历史任务残留改动；\n"
+                    "3. 交接时附上 `git show --name-status <new_commit>` 结果摘要。"
                 )
                 await self._return_to_dev_for_merge_issue(
                     task_id=task_id,
@@ -379,10 +518,39 @@ class ManagerAgent(BaseAgent):
             else await self._is_patch_equivalent_on_ref(proj_root, target_commit, "main")
         )
         merge_effective = after_contains_target or after_contains_equivalent
+        auto_merge_info: dict | None = None
         is_conflict = (
             (decision or {}).get("decision") == "conflict"
             or self._output_has_conflict_signal(output)
         )
+
+        if is_conflict and not merge_effective:
+            await self.add_log(
+                task_id,
+                "检测到冲突，Manager 开始自动处理（策略：cherry-pick -X theirs / -X ours）。",
+            )
+            auto_merge_info = await self._attempt_auto_merge_strategies(proj_root, target_commit)
+            if auto_merge_info.get("resolved"):
+                head_after = str(auto_merge_info.get("head_after") or "").strip() or (
+                    await self.git("rev-parse", "--short", "HEAD", cwd=proj_root)
+                ).strip()
+                after_contains_target = await self._is_ancestor(proj_root, target_commit, "main")
+                after_contains_equivalent = (
+                    True
+                    if after_contains_target
+                    else await self._is_patch_equivalent_on_ref(proj_root, target_commit, "main")
+                )
+                merge_effective = after_contains_target or after_contains_equivalent
+                if merge_effective:
+                    await self.add_log(
+                        task_id,
+                        (
+                            "冲突自动处理成功："
+                            f"strategy={auto_merge_info.get('strategy')}, head={head_after}"
+                        ),
+                    )
+            else:
+                await self.add_log(task_id, "冲突自动处理失败，将携带修改建议退回开发。")
 
         if merge_effective:
             already_up_to_date = (
@@ -426,7 +594,11 @@ class ManagerAgent(BaseAgent):
                     "status_from": "approved",
                     "status_to": "pending_acceptance",
                     "title": "合并完成，交接验收",
-                    "summary": f"CLI 已将审查通过提交合并到 main：{head_after}",
+                    "summary": (
+                        f"冲突自动处理成功（{auto_merge_info.get('strategy')}），已合并到 main：{head_after}"
+                        if auto_merge_info and auto_merge_info.get("resolved")
+                        else f"CLI 已将审查通过提交合并到 main：{head_after}"
+                    ),
                     "commit_hash": head_after,
                     "conclusion": "合并完成，进入待验收",
                     "payload": {
@@ -435,6 +607,11 @@ class ManagerAgent(BaseAgent):
                         "reviewed_commit": target_commit,
                         "related_history_commits": related_history_commits,
                         "cli_exit_code": returncode,
+                        "auto_merge_strategy": (
+                            str(auto_merge_info.get("strategy") or "").strip()
+                            if auto_merge_info and auto_merge_info.get("resolved")
+                            else ""
+                        ),
                     },
                     "artifact_path": str(proj_root),
                 },
@@ -443,9 +620,27 @@ class ManagerAgent(BaseAgent):
             return
 
         if is_conflict:
-            feedback = (
-                f"[合并冲突] main 与 {dev_branch} 在合并 commit {target_commit} 时发生冲突，"
-                f"请 {dev_agent} 在其分支解决冲突后重新提交。"
+            attempts = []
+            if auto_merge_info and isinstance(auto_merge_info.get("attempts"), list):
+                attempts = auto_merge_info.get("attempts") or []
+            merged_conflicts: list[dict] = []
+            seen = set()
+            for item in attempts:
+                for c in (item.get("conflicts") or []):
+                    code = str(c.get("code") or "").strip().upper()
+                    path = str(c.get("path") or "").strip()
+                    key = (code, path)
+                    if not code or not path or key in seen:
+                        continue
+                    seen.add(key)
+                    merged_conflicts.append({"code": code, "path": path})
+
+            feedback = self._build_conflict_rework_feedback(
+                target_commit=target_commit,
+                dev_agent=dev_agent,
+                dev_branch=dev_branch,
+                attempts=attempts,
+                conflicts=merged_conflicts,
             )
             await self._return_to_dev_for_merge_issue(
                 task_id=task_id,
