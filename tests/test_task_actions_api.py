@@ -21,6 +21,20 @@ class TaskActionsApiTest(unittest.TestCase):
         self._old_db_path = db.DB_PATH
         db.DB_PATH = Path(self._tmp.name) / "tasks-api-test.db"
         db.init_db()
+        app_module._TASK_WORKSPACE_CLEANUP_INFLIGHT.clear()
+        app_module._TASK_WORKSPACE_CLEANUP_STATE.clear()
+        app_module._TASK_WORKSPACE_CLEANUP_EVENTS.clear()
+        app_module._TASK_WORKSPACE_CLEANUP_METRICS.update(
+            {
+                "scheduled": 0,
+                "executed": 0,
+                "finalized": 0,
+                "failed": 0,
+                "last_run_at": "",
+                "last_finalized_at": "",
+                "last_failed_at": "",
+            }
+        )
         self.client = TestClient(app_module.app)
         setup = self.client.post("/auth/setup-admin", json={"password": "admin123"})
         self.assertEqual(setup.status_code, 200)
@@ -519,6 +533,28 @@ class TaskActionsApiTest(unittest.TestCase):
         task_ids = {call.args[0]["id"] for call in schedule.call_args_list}
         self.assertIn(parent["id"], task_ids)
         self.assertIn(child["id"], task_ids)
+
+    def test_runtime_workspace_cleanup_endpoint_returns_metrics(self):
+        res = self.client.get("/runtime/workspace-cleanup", headers=self._headers)
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertIn("config", body)
+        self.assertIn("metrics", body)
+        self.assertIn("recent_events", body)
+        self.assertIn("inflight_task_ids", body)
+
+    def test_runtime_workspace_cleanup_sweep_schedules_terminal_tasks(self):
+        done = self._create_task(status="completed")
+        cancelled = self._create_task(status="cancelled")
+        with mock.patch.object(app_module, "_schedule_task_workspace_cleanup") as schedule:
+            res = self.client.post(
+                "/runtime/workspace-cleanup/sweep?max_tasks=20",
+                headers=self._headers,
+            )
+        self.assertEqual(res.status_code, 200)
+        ids = {call.args[0]["id"] for call in schedule.call_args_list}
+        self.assertIn(done["id"], ids)
+        self.assertIn(cancelled["id"], ids)
 
     def test_task_log_refreshes_agent_last_output_timestamp(self):
         task = self._create_task(status="in_progress")

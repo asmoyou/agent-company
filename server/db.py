@@ -1402,6 +1402,28 @@ def list_tasks(project_id: str | None = None, user_id: str | None = None, is_adm
     return [dict(r) for r in rows]
 
 
+def list_terminal_tasks_for_workspace_cleanup(limit: int = 200) -> list[dict]:
+    """
+    Return recently updated terminal tasks that may need workspace cleanup.
+    Includes joined project fields so caller can resolve project_path safely.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        _join_project(
+            f"""
+            SELECT *
+              FROM tasks
+             WHERE status IN ('completed', '{CANCELLED_STATUS}')
+             ORDER BY updated_at DESC
+             LIMIT ?
+            """
+        ),
+        (max(1, int(limit)),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     fields = dict(fields or {})
     # Control/meta fields used by API/agents but not persisted directly.
