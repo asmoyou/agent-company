@@ -39,6 +39,7 @@ AUTO_REPLY_MAX = int(os.getenv("AUTO_REPLY_MAX", "0"))
 AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
 HANDOFF_SYNC_STRATEGY = os.getenv("HANDOFF_SYNC_STRATEGY", "cherry-pick").strip().lower()
+BRANCH_SYNC_STRATEGY = os.getenv("BRANCH_SYNC_STRATEGY", "merge").strip().lower()
 CODEX_ENABLE_OUTPUT_SCHEMA = os.getenv("CODEX_ENABLE_OUTPUT_SCHEMA", "0").strip().lower() in {"1", "true", "yes", "on"}
 CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "3600"))
 CONTEXT_MAX_HANDOFFS = int(os.getenv("CONTEXT_MAX_HANDOFFS", "24"))
@@ -1242,9 +1243,19 @@ class BaseAgent:
 
     async def _sync_branch_with_main(self, root: Path, worktree: Path, branch: str) -> str:
         """
-        Try to fast-sync agent branch by merging `main` into it.
+        Try to fast-sync branch with `main`.
+        Strategy is controlled by BRANCH_SYNC_STRATEGY:
+        - merge (default): merge --no-edit main
+        - rebase: rebase main
+        - none/off/disabled: skip sync
         Returns a short status string; never raises.
         """
+        strategy = BRANCH_SYNC_STRATEGY
+        if strategy in {"none", "off", "disabled"}:
+            return "sync_disabled"
+        if strategy not in {"merge", "rebase"}:
+            strategy = "merge"
+
         if branch == "main":
             return "main"
 
@@ -1265,20 +1276,28 @@ class BaseAgent:
             return f"head_error:{e}"
 
         try:
-            await self.git("merge", "--no-edit", "main", cwd=worktree)
+            if strategy == "rebase":
+                await self.git("rebase", "main", cwd=worktree)
+            else:
+                await self.git("merge", "--no-edit", "main", cwd=worktree)
         except Exception as e:
             err = str(e)
             try:
-                await self.git("merge", "--abort", cwd=worktree)
+                if strategy == "rebase":
+                    await self.git("rebase", "--abort", cwd=worktree)
+                else:
+                    await self.git("merge", "--abort", cwd=worktree)
             except Exception:
                 pass
             return f"conflict:{err}"
 
         try:
             after = await self.git("rev-parse", "HEAD", cwd=worktree)
-            return "merged" if before != after else "up_to_date"
+            if before == after:
+                return "up_to_date"
+            return "rebased" if strategy == "rebase" else "merged"
         except Exception:
-            return "synced"
+            return "rebased" if strategy == "rebase" else "synced"
 
     async def ensure_agent_workspace(
         self, task: dict, agent_key: str | None = None, sync_with_main: bool = True
@@ -1329,6 +1348,8 @@ class BaseAgent:
             sync_result = await self._sync_branch_with_main(root, worktree, branch)
             if sync_result == "merged":
                 print(f"[{self.name}] Synced {branch} with main")
+            elif sync_result == "rebased":
+                print(f"[{self.name}] Rebased {branch} onto main")
             elif sync_result in ("dirty",) or sync_result.startswith("conflict:"):
                 print(f"[{self.name}] WARN: main sync skipped for {branch}: {sync_result}")
 

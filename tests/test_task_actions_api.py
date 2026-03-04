@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -361,6 +362,20 @@ class TaskActionsApiTest(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["task"]["status"], "completed")
 
+    def test_accept_action_schedules_workspace_cleanup(self):
+        task = self._create_task(status="pending_acceptance")
+        with mock.patch.object(app_module, "_schedule_task_workspace_cleanup") as schedule:
+            res = self.client.post(
+                f"/tasks/{task['id']}/actions",
+                json={"action": "accept"},
+                headers=self._headers,
+            )
+        self.assertEqual(res.status_code, 200)
+        schedule.assert_called_once()
+        cleaned_task = schedule.call_args.args[0]
+        self.assertEqual(cleaned_task["id"], task["id"])
+        self.assertEqual(cleaned_task["status"], "completed")
+
     def test_reject_action_routes_to_dev(self):
         task = self._create_task(status="pending_acceptance")
         res = self.client.post(
@@ -481,6 +496,29 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["branch"], f"agent/asmo-dev/{task['id']}")
+
+    def test_cancel_schedules_workspace_cleanup_for_cancelled_tasks(self):
+        parent = self._create_task(status="todo")
+        child = db.create_task(
+            title="child-task",
+            description="subtask",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            dev_agent="developer",
+            status="todo",
+        )
+        with mock.patch.object(app_module, "_schedule_task_workspace_cleanup") as schedule:
+            res = self.client.post(
+                f"/tasks/{parent['id']}/cancel",
+                json={"include_subtasks": True},
+                headers=self._headers,
+            )
+        self.assertEqual(res.status_code, 200)
+        self.assertGreaterEqual(schedule.call_count, 2)
+        task_ids = {call.args[0]["id"] for call in schedule.call_args_list}
+        self.assertIn(parent["id"], task_ids)
+        self.assertIn(child["id"], task_ids)
 
     def test_task_log_refreshes_agent_last_output_timestamp(self):
         task = self._create_task(status="in_progress")
