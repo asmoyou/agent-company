@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -9,9 +10,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Literal
 
@@ -37,6 +40,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 import db
 
 PROJECT_ROOT = Path(__file__).parent.parent
+REQUEST_LOG_FILE = Path(str(os.getenv("REQUEST_LOG_FILE", "logs/api-access.log")).strip()).expanduser()
+if not REQUEST_LOG_FILE.is_absolute():
+    REQUEST_LOG_FILE = PROJECT_ROOT / REQUEST_LOG_FILE
+REQUEST_LOG_MAX_BYTES = max(
+    1024,
+    int(str(os.getenv("REQUEST_LOG_MAX_BYTES", str(10 * 1024 * 1024))).strip() or str(10 * 1024 * 1024)),
+)
+REQUEST_LOG_BACKUP_COUNT = max(
+    1,
+    int(str(os.getenv("REQUEST_LOG_BACKUP_COUNT", "5")).strip() or "5"),
+)
 AGENT_STALE_SECS = int(os.getenv("AGENT_STALE_SECS", "150"))
 AGENT_WATCHDOG_SECS = int(os.getenv("AGENT_WATCHDOG_SECS", "15"))
 TASK_LEASE_TTL_SECS = int(os.getenv("TASK_LEASE_TTL_SECS", "180"))
@@ -63,6 +77,35 @@ STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().l
 }
 PER_PROJECT_MAX_WORKERS = int(os.getenv("PER_PROJECT_MAX_WORKERS", "0"))
 PER_AGENT_TYPE_MAX_WORKERS = int(os.getenv("PER_AGENT_TYPE_MAX_WORKERS", "0"))
+
+
+def _init_request_access_logger() -> logging.Logger:
+    logger = logging.getLogger("opc.request.access")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return logger
+    try:
+        REQUEST_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            str(REQUEST_LOG_FILE),
+            maxBytes=REQUEST_LOG_MAX_BYTES,
+            backupCount=REQUEST_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s] %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
+        logger.addHandler(handler)
+    except Exception:
+        logger.addHandler(logging.NullHandler())
+    return logger
+
+
+REQUEST_ACCESS_LOG = _init_request_access_logger()
 
 
 def normalize_agent_key(agent_key: str | None, default: str = "developer") -> str:
@@ -1001,6 +1044,39 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Multi-Agent Task Board", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def request_access_log_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    method = request.method
+    path = request.url.path
+    query = request.url.query
+    target = f"{path}?{query}" if query else path
+    client_ip = request.client.host if request.client else "-"
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        REQUEST_ACCESS_LOG.info(
+            '%s "%s" %s client=%s duration_ms=%.2f',
+            method,
+            target,
+            500,
+            client_ip,
+            elapsed_ms,
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    REQUEST_ACCESS_LOG.info(
+        '%s "%s" %s client=%s duration_ms=%.2f',
+        method,
+        target,
+        response.status_code,
+        client_ip,
+        elapsed_ms,
+    )
+    return response
 
 frontend_dir = PROJECT_ROOT / "frontend"
 if frontend_dir.exists():
@@ -2959,4 +3035,11 @@ async def websocket_endpoint(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=False)
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=False,
+        access_log=False,
+        log_level="warning",
+    )
