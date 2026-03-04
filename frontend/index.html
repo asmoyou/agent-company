@@ -282,6 +282,12 @@
       title="检测并清理已删除目录的项目">
       ↻ 同步
     </button>
+    <button onclick="deleteCurrentProject()" id="btn-delete-project"
+      class="bg-red-900/70 hover:bg-red-800 text-red-100 text-xs px-3 py-1.5 rounded-lg transition disabled:opacity-40"
+      title="删除当前项目（目录将移入回收站，并清理数据库记录）"
+      disabled>
+      删除项目
+    </button>
     <button onclick="openCreateModal()" id="btn-create-task"
       class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition disabled:opacity-40"
       disabled>
@@ -1581,6 +1587,7 @@ function onProjectChange() {
 function updateProjectUI() {
   const hasProject = !!currentProjectId;
   document.getElementById("btn-create-task").disabled = !hasProject;
+  document.getElementById("btn-delete-project").disabled = !hasProject;
   document.getElementById("no-project-hint").classList.toggle("hidden", hasProject || Object.keys(projects).length > 0);
   document.getElementById("board").classList.toggle("hidden", !hasProject);
   if (!hasProject && Object.keys(projects).length === 0) {
@@ -2842,12 +2849,45 @@ async function submitNewProject(e) {
     const sel = document.getElementById("project-select");
     sel.value = proj.id;
     currentProjectId = proj.id;
+    reconnectWSForScope();
     updateProjectUI();
     refreshBoard();
     closeNewProjectModal();
     document.getElementById("proj-name").value="";
     document.getElementById("proj-path").value="";
   } catch(err) { alert("创建失败: "+err.message); }
+}
+
+async function deleteCurrentProject() {
+  if (!currentProjectId) return;
+  const proj = projects[currentProjectId];
+  if (!proj) return;
+  const projectName = String(proj.name || currentProjectId);
+  const projectPath = String(proj.path || "");
+  const message = `确认删除项目「${projectName}」？\n\n将把项目目录移入回收站，并清理数据库中的全部任务、日志、交接与终端历史记录。\n目录: ${projectPath || "(未知)"}`;
+  if (!window.confirm(message)) return;
+
+  try {
+    const pid = currentProjectId;
+    const res = await apiFetch(`${API}/projects/${pid}?delete_files=1`, {method:"DELETE"});
+    if (!res.ok) throw new Error(await res.text());
+    // 正常会由 WebSocket project_deleted 事件更新 UI；这里做兜底。
+    if (projects[pid]) {
+      delete projects[pid];
+      const sel = document.getElementById("project-select");
+      const opt = sel.querySelector(`option[value="${pid}"]`);
+      if (opt) opt.remove();
+      currentProjectId = sel.value || null;
+      sel.value = currentProjectId || "";
+      reconnectWSForScope();
+      Object.keys(tasks).forEach(tid => { if (tasks[tid].project_id === pid) delete tasks[tid]; });
+      updateProjectUI();
+      refreshBoard();
+      renderTerminals();
+    }
+  } catch(err) {
+    alert("删除失败: " + err.message);
+  }
 }
 
 async function syncProjects() {
@@ -3039,8 +3079,10 @@ function connectWS() {
       if (currentProjectId===pid) {
         currentProjectId=sel.value||null;
         sel.value=currentProjectId||"";
+        reconnectWSForScope();
         updateProjectUI();
         refreshBoard();
+        renderTerminals();
       }
       // Remove tasks belonging to deleted project from local cache
       Object.keys(tasks).forEach(tid=>{ if(tasks[tid].project_id===pid) delete tasks[tid]; });

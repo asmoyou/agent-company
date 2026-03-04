@@ -1,4 +1,5 @@
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -866,6 +867,80 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         projects = res.json()
         self.assertTrue(any(str(p.get("id")) == self.project["id"] for p in projects))
+
+    def test_delete_project_removes_project_tasks_and_outputs(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        out = self.client.post(
+            "/agents/developer/output",
+            json={"line": "to-be-deleted", "event": "line", "task_id": task["id"]},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(out.status_code, 200)
+
+        deleted = self.client.delete(f"/projects/{self.project['id']}", headers=self._headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json().get("ok"), True)
+
+        self.assertIsNone(db.get_project(self.project["id"]))
+        self.assertIsNone(db.get_task(task["id"]))
+        outputs = db.get_agent_output_entries("developer", limit=10)
+        self.assertEqual(len(outputs), 0)
+
+    def test_delete_project_rejects_when_claimed_task_exists(self):
+        task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        db.update_task(task["id"], assignee="developer")
+
+        res = self.client.delete(f"/projects/{self.project['id']}", headers=self._headers)
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("进行中的任务", res.text)
+        self.assertIsNotNone(db.get_project(self.project["id"]))
+
+    def test_delete_project_can_delete_project_directory_when_requested(self):
+        path = Path(self._tmp.name) / "to-remove-project"
+        path.mkdir(parents=True, exist_ok=True)
+        nested = path / "README.md"
+        nested.write_text("to be removed", encoding="utf-8")
+        project = db.create_project("remove-with-files", str(path))
+        trash_dir = Path(self._tmp.name) / ".trash"
+
+        def _fake_move(src: Path) -> Path:
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            target = trash_dir / src.name
+            shutil.move(str(src), str(target))
+            return target
+
+        with mock.patch.object(app_module, "_move_path_to_trash", side_effect=_fake_move):
+            res = self.client.delete(
+                f"/projects/{project['id']}?delete_files=1",
+                headers=self._headers,
+            )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data.get("ok"), True)
+        self.assertEqual(data.get("files_deleted"), True)
+        self.assertEqual(data.get("files_mode"), "trash")
+        self.assertEqual(data.get("files_destination"), str(trash_dir / path.name))
+        self.assertIsNone(db.get_project(project["id"]))
+        self.assertFalse(path.exists())
+        self.assertTrue((trash_dir / path.name).exists())
+
+    def test_delete_project_can_permanently_delete_project_directory(self):
+        path = Path(self._tmp.name) / "to-permanent-delete-project"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "README.md").write_text("to be removed permanently", encoding="utf-8")
+        project = db.create_project("remove-permanent", str(path))
+
+        res = self.client.delete(
+            f"/projects/{project['id']}?delete_files=1&delete_permanently=1",
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data.get("ok"), True)
+        self.assertEqual(data.get("files_deleted"), True)
+        self.assertEqual(data.get("files_mode"), "permanent")
+        self.assertIsNone(db.get_project(project["id"]))
+        self.assertFalse(path.exists())
 
     def test_delete_agent_type_cleans_outputs_and_task_references(self):
         key = "asmo-dev"

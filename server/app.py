@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -387,6 +388,31 @@ def _workspace_cleanup_visible_inflight_task_ids(user: dict) -> list[str]:
         if task:
             visible.append(task_id)
     return visible
+
+
+def _default_trash_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / ".Trash"
+    if sys.platform.startswith("linux"):
+        return Path.home() / ".local" / "share" / "Trash" / "files"
+    return Path.home() / ".Trash"
+
+
+def _move_path_to_trash(path: Path) -> Path:
+    override = str(os.getenv("PROJECT_TRASH_DIR", "")).strip()
+    trash_dir = Path(override).expanduser() if override else _default_trash_dir()
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    base_name = path.name or "project"
+    candidate = trash_dir / base_name
+    if candidate.exists():
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        candidate = trash_dir / f"{base_name}.{stamp}"
+        idx = 2
+        while candidate.exists():
+            candidate = trash_dir / f"{base_name}.{stamp}.{idx}"
+            idx += 1
+    shutil.move(str(path), str(candidate))
+    return candidate
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -819,6 +845,8 @@ class ConnectionManager:
                     pid = str(data.get("project_id") or "").strip()
                     if not scope_allows(pid):
                         return False
+                if is_admin:
+                    return True
                 return owner_id == str(user.get("id") or "")
             pid = str(data.get("project_id") or "").strip()
             if not pid:
@@ -1546,6 +1574,62 @@ async def create_project(body: ProjectCreate, user: dict = Depends(require_user)
 @app.get("/projects/{project_id}")
 async def get_project(project_id: str, user: dict = Depends(require_user)):
     return require_project_access(project_id, user)
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project_api(
+    project_id: str,
+    delete_files: bool = Query(default=False),
+    delete_permanently: bool = Query(default=False),
+    user: dict = Depends(require_user),
+):
+    project = require_project_access(project_id, user)
+    if db.project_has_claimed_tasks(project_id):
+        raise HTTPException(409, "项目存在进行中的任务，无法删除")
+    files_deleted = False
+    files_mode = "none"
+    files_destination = ""
+    if delete_files:
+        proj_path = Path(str(project.get("path") or "")).expanduser()
+        try:
+            resolved = proj_path.resolve()
+        except Exception:
+            raise HTTPException(400, "Invalid project path")
+        # Guard against catastrophic paths.
+        protected_paths = {Path("/").resolve(), Path.home().resolve()}
+        if resolved in protected_paths:
+            raise HTTPException(400, "Refuse to delete protected path")
+        if resolved.exists():
+            if not resolved.is_dir():
+                raise HTTPException(400, "Project path is not a directory")
+            try:
+                if delete_permanently:
+                    shutil.rmtree(resolved)
+                    files_mode = "permanent"
+                else:
+                    moved_to = _move_path_to_trash(resolved)
+                    files_mode = "trash"
+                    files_destination = str(moved_to)
+                files_deleted = True
+            except Exception as e:
+                raise HTTPException(500, f"删除项目目录失败: {e}")
+    deleted = db.delete_project(project_id)
+    if not deleted:
+        raise HTTPException(404, "Project not found")
+    await manager.broadcast(
+        {
+            "event": "project_deleted",
+            "project_id": project_id,
+            "project_owner_user_id": project.get("created_by_user_id"),
+        }
+    )
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "files_deleted": files_deleted,
+        "files_mode": files_mode,
+        "files_destination": files_destination,
+    }
 
 
 @app.get("/fs/directories")
