@@ -749,9 +749,17 @@
         <label class="block text-xs text-slate-400 mb-1">指定执行 Agent（可选）</label>
         <select id="task-assigned-agent"
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
-          <option value="">未指定（任何可执行 Agent 可认领）</option>
+          <option value="">未指定（先进入待评估）</option>
         </select>
-        <div class="text-xs text-slate-500 mt-1">仅显示轮询 `todo` 的 Agent 类型</div>
+        <div class="text-xs text-slate-500 mt-1">未指定时进入「待评估」；指定轮询 `todo` 的 Agent 时将直接进入执行队列</div>
+      </div>
+      <div>
+        <label class="flex items-center justify-between text-xs text-slate-400 mb-1" for="task-review-enabled">
+          <span>启用 Review</span>
+          <input id="task-review-enabled" type="checkbox" checked
+            class="h-4 w-4 rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0" />
+        </label>
+        <div class="text-xs text-slate-500">默认开启。关闭后任务会跳过审查，开发完成后直达合并流程</div>
       </div>
       <div class="flex justify-end gap-3">
         <button type="button" onclick="closeCreateModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
@@ -1237,7 +1245,7 @@ function renderTaskAssigneeOptions() {
     .filter(at => parsePollStatuses(at).includes("todo"))
     .map(at => `<option value="${escHtml(at.key)}">${escHtml(at.name || at.key)} (${escHtml(at.key)})</option>`)
     .join("");
-  sel.innerHTML = `<option value="">未指定（任何可执行 Agent 可认领）</option>${options}`;
+  sel.innerHTML = `<option value="">未指定（先进入待评估）</option>${options}`;
 }
 
 function renderAgentStatusBadges() {
@@ -1648,11 +1656,22 @@ function bindColumnTooltips() {
   window.addEventListener("blur", hideColTooltip);
 }
 
+function isTaskReviewEnabled(task) {
+  const raw = task ? task.review_enabled : null;
+  if (raw === null || raw === undefined) return true;
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return raw !== 0;
+  const text = String(raw).trim().toLowerCase();
+  if (!text) return true;
+  return !["0", "false", "off", "no"].includes(text);
+}
+
 function renderCard(task) {
   const b = STATUS_BADGE[task.status]||"bg-slate-700 text-slate-400";
   const l = STATUS_LABEL[task.status]||task.status;
   const showArchived = document.getElementById("show-archived").checked;
   if (task.archived && !showArchived) return null;
+  const reviewEnabled = isTaskReviewEnabled(task);
 
   const feedbackSnippet = ((task.status === "needs_changes" || task.status === "blocked") && task.review_feedback &&
       !task.review_feedback.startsWith("(auto-approved"))
@@ -1665,6 +1684,9 @@ function renderCard(task) {
 
   const pendingBadge = task.status === "pending_acceptance"
     ? `<span class="text-[10px] text-teal-400 animate-pulse">● 待验收</span>` : "";
+  const reviewBadge = reviewEnabled
+    ? ""
+    : `<span class="text-[10px] text-amber-500">免审</span>`;
 
   // Subtask progress (for decomposed parent tasks)
   let subtaskBadge = "";
@@ -1691,7 +1713,7 @@ function renderCard(task) {
         <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
         ${task.assignee?`<span class="text-slate-500 text-[10px]">${escHtml(String(task.assignee).slice(0,10))}</span>`:""}
         ${task.commit_hash?`<span class="text-[10px] font-mono text-green-600">${escHtml(String(task.commit_hash).slice(0,7))}</span>`:""}
-        ${pendingBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}
+        ${pendingBadge}${reviewBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}
       </div>
       ${feedbackSnippet}
     </div>`;
@@ -2288,8 +2310,12 @@ async function openPanel(id) {
 
   const b=STATUS_BADGE[task.status]||"bg-slate-700 text-slate-400";
   const l=STATUS_LABEL[task.status]||task.status;
+  const reviewEnabled = isTaskReviewEnabled(task);
   document.getElementById("panel-status").innerHTML=
-    `<span class="badge px-2 py-1 rounded-full text-xs ${b}">${l}</span>`;
+    `<span class="badge px-2 py-1 rounded-full text-xs ${b}">${l}</span>
+     <span class="badge px-2 py-1 rounded-full text-xs ${reviewEnabled ? "bg-slate-700 text-slate-300" : "bg-amber-900/40 text-amber-300"}">
+       ${reviewEnabled ? "需审查" : "免审查"}
+     </span>`;
 
   // Acceptance
   const acc = document.getElementById("panel-acceptance");
@@ -2842,6 +2868,8 @@ function openCreateModal() {
   const proj = projects[currentProjectId];
   document.getElementById("modal-task-project").textContent = proj?`@ ${proj.name}`:"";
   renderTaskAssigneeOptions();
+  const reviewToggle = document.getElementById("task-review-enabled");
+  if (reviewToggle) reviewToggle.checked = true;
   document.getElementById("modal-task").classList.remove("hidden");
 }
 function closeCreateModal() { document.getElementById("modal-task").classList.add("hidden"); }
@@ -2850,6 +2878,7 @@ async function submitTask(e) {
   const title=document.getElementById("task-title").value.trim();
   const desc =document.getElementById("task-desc").value.trim();
   const assignedAgent = document.getElementById("task-assigned-agent").value || null;
+  const reviewEnabled = document.getElementById("task-review-enabled").checked !== false;
   if (!title) return;
   try {
     const res=await apiFetch(`${API}/tasks`,{
@@ -2859,12 +2888,14 @@ async function submitTask(e) {
         description:desc,
         project_id:currentProjectId,
         assigned_agent: assignedAgent,
+        review_enabled: reviewEnabled,
       }),
     });
     if (!res.ok) throw new Error(await res.text());
     document.getElementById("task-title").value="";
     document.getElementById("task-desc").value="";
     document.getElementById("task-assigned-agent").value="";
+    document.getElementById("task-review-enabled").checked = true;
     closeCreateModal();
   } catch(err){alert("创建失败: "+err.message);}
 }

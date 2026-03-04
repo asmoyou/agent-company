@@ -1,6 +1,6 @@
 import asyncio
 
-from base import BaseAgent, parse_status_list
+from base import BaseAgent, is_review_enabled, parse_status_list
 
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
@@ -162,6 +162,22 @@ class DeveloperAgent(BaseAgent):
             if diff_stat:
                 handoff_payload["has_uncommitted_changes"] = True
                 handoff_payload["uncommitted_diff_stat"] = diff_stat[:1200]
+            review_enabled = is_review_enabled(task)
+            target_status = "in_review" if review_enabled else "approved"
+            target_stage = "dev_to_review" if review_enabled else "dev_to_approved"
+            target_agent = "reviewer" if review_enabled else "manager"
+            target_title = "开发交接审查" if review_enabled else "开发直达合并"
+            target_summary = (
+                f"CLI 已提交 commit {commit_short}，等待审查"
+                if review_enabled
+                else f"CLI 已提交 commit {commit_short}，跳过审查，交由 Manager 合并"
+            )
+            target_conclusion = (
+                "开发完成，等待审查结论"
+                if review_enabled
+                else "开发完成，已跳过审查并转交 Manager 合并"
+            )
+            handoff_payload["review_enabled"] = review_enabled
 
             # Commit is done by CLI. If state update fails transiently, retry
             # transition+handoff sync atomically.
@@ -171,21 +187,21 @@ class DeveloperAgent(BaseAgent):
                     result = await self.transition_task(
                         task_id,
                         fields={
-                            "status": "in_review",
+                            "status": target_status,
                             "assignee": None,
-                            "assigned_agent": self.name,
+                            "assigned_agent": self.name if review_enabled else "manager",
                             "dev_agent": self.name,
                             "commit_hash": commit_hash,
                         },
                         handoff={
-                            "stage": "dev_to_review",
-                            "to_agent": "reviewer",
+                            "stage": target_stage,
+                            "to_agent": target_agent,
                             "status_from": prev_status,
-                            "status_to": "in_review",
-                            "title": "开发交接审查",
-                            "summary": f"CLI 已提交 commit {commit_short}，等待审查",
+                            "status_to": target_status,
+                            "title": target_title,
+                            "summary": target_summary,
                             "commit_hash": commit_hash,
-                            "conclusion": "开发完成，等待审查结论",
+                            "conclusion": target_conclusion,
                             "payload": handoff_payload,
                             "artifact_path": str(worktree_dev),
                         },
@@ -207,7 +223,7 @@ class DeveloperAgent(BaseAgent):
                 await self.add_log(
                     task_id,
                     (
-                        f"⚠ CLI 已提交 {commit_short}，但无法把任务推进到 in_review：{update_error}。"
+                        f"⚠ CLI 已提交 {commit_short}，但无法把任务推进到 {target_status}：{update_error}。"
                         "保持当前状态，等待后续重试/人工处理。"
                     ),
                 )
