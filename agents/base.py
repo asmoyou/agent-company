@@ -83,8 +83,18 @@ def get_task_dev_agent(task: dict, fallback: str = "developer") -> str:
     return normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or fallback)
 
 
-def get_agent_branch(agent_key: str) -> str:
-    return f"agent/{normalize_agent_key(agent_key)}"
+def _task_scope_suffix(task: dict | None) -> str:
+    task_id = str((task or {}).get("id") or "").strip().lower()
+    if not task_id:
+        return ""
+    safe = re.sub(r"[^a-z0-9_-]+", "-", task_id).strip("-_")
+    return safe
+
+
+def get_agent_branch(agent_key: str, task: dict | None = None) -> str:
+    base = f"agent/{normalize_agent_key(agent_key)}"
+    suffix = _task_scope_suffix(task)
+    return f"{base}/{suffix}" if suffix else base
 
 
 def get_project_dirs(task: dict, agent_key: str | None = None) -> tuple[Path, Path]:
@@ -96,6 +106,9 @@ def get_project_dirs(task: dict, agent_key: str | None = None) -> tuple[Path, Pa
         root = PROJECT_ROOT / ".worktrees" / "scratch"
         root.mkdir(parents=True, exist_ok=True)
     key = normalize_agent_key(agent_key or get_task_dev_agent(task))
+    scoped = _task_scope_suffix(task)
+    if scoped:
+        return root, root / ".worktrees" / key / scoped
     return root, root / ".worktrees" / key
 
 
@@ -1272,11 +1285,11 @@ class BaseAgent:
     ) -> tuple[Path, Path, str]:
         """
         Ensure git branch+worktree for a given agent key.
-        Branch: agent/{key}
-        Worktree: .worktrees/{key}
+        Branch: agent/{key}/{task_id}
+        Worktree: .worktrees/{key}/{task_id}
         """
         key = normalize_agent_key(agent_key or get_task_dev_agent(task))
-        branch = get_agent_branch(key)
+        branch = get_agent_branch(key, task=task)
         root, worktree = get_project_dirs(task, agent_key=key)
         root.mkdir(parents=True, exist_ok=True)
 

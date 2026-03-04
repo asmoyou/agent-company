@@ -95,8 +95,17 @@ def task_dev_agent(task: dict) -> str:
     return normalize_agent_key(candidate or "developer")
 
 
+def task_scope_suffix(task: dict) -> str:
+    task_id = str(task.get("id") or "").strip().lower()
+    if not task_id:
+        return ""
+    return re.sub(r"[^a-z0-9_-]+", "-", task_id).strip("-_")
+
+
 def task_dev_branch(task: dict) -> str:
-    return f"agent/{task_dev_agent(task)}"
+    base = f"agent/{task_dev_agent(task)}"
+    suffix = task_scope_suffix(task)
+    return f"{base}/{suffix}" if suffix else base
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -1689,7 +1698,12 @@ async def get_task_files(task_id: str, user: dict = Depends(require_user)):
 
     proj_root   = Path(project_path)
     dev_key = task_dev_agent(task)
-    worktree_dev = proj_root / ".worktrees" / dev_key
+    scope = task_scope_suffix(task)
+    worktree_dev = (
+        proj_root / ".worktrees" / dev_key / scope
+        if scope
+        else proj_root / ".worktrees" / dev_key
+    )
     status       = task.get("status", "")
     commit_hash  = task.get("commit_hash", "")
 
@@ -1700,7 +1714,7 @@ async def get_task_files(task_id: str, user: dict = Depends(require_user)):
     else:
         inspect_dir = worktree_dev
         branch      = task_dev_branch(task)
-        rel_base    = f".worktrees/{dev_key}/"
+        rel_base    = f".worktrees/{dev_key}/{scope}/" if scope else f".worktrees/{dev_key}/"
 
     files = []
     has_real_commit = False

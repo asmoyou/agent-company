@@ -480,7 +480,7 @@ class TaskActionsApiTest(unittest.TestCase):
         res = self.client.get(f"/tasks/{task['id']}/files", headers=self._headers)
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertEqual(data["branch"], "agent/asmo-dev")
+        self.assertEqual(data["branch"], f"agent/asmo-dev/{task['id']}")
 
     def test_task_log_refreshes_agent_last_output_timestamp(self):
         task = self._create_task(status="in_progress")

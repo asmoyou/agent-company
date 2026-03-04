@@ -103,6 +103,36 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_acceptance")
         self.assertEqual(call.kwargs["handoff"]["title"], "合并完成，交接验收")
 
+    async def test_process_task_returns_to_dev_when_commit_parent_not_on_main(self):
+        target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
+        parent_commit = "7f9c2ba4e88f827d616045507605853ed73b809c"
+        task = self._task(target_commit)
+        self.agent.ensure_agent_workspace = mock.AsyncMock(
+            return_value=(self.repo, self.repo / ".worktrees" / "developer" / "task-1", "agent/developer/task-1")
+        )
+        self.agent.run_cli = mock.AsyncMock(return_value=(0, "should not run"))
+        self.agent._is_ancestor = mock.AsyncMock(side_effect=[True, False])
+        self.agent._is_patch_equivalent_on_ref = mock.AsyncMock(return_value=False)
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args[:2] == ("cat-file", "-e"):
+                return ""
+            if args == ("rev-parse", f"{target_commit}^"):
+                return parent_commit
+            return "ec0a922"
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        await self.agent.process_task(task)
+
+        self.agent.run_cli.assert_not_awaited()
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.args[0], task["id"])
+        self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_dev")
+        self.assertIn("提交基线不一致", call.kwargs["handoff"]["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()
