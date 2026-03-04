@@ -8,6 +8,7 @@ mkdir -p logs
 
 SERVER_LOG_FILE="logs/server.log"
 AGENTS_LOG_FILE="logs/agents.log"
+SERVER_LOG_LEVEL="${SERVER_LOG_LEVEL:-info}"
 
 now_ts() {
   date "+%Y-%m-%d %H:%M:%S"
@@ -25,6 +26,12 @@ log_done() {
   printf '[%s] [DONE] %s\n' "$(now_ts)" "$*"
 }
 
+prefix_logs() {
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '[%s] %s\n' "$(now_ts)" "$line"
+  done
+}
+
 print_quick_guide() {
   log_info "╔════════════════════════════════════════════════════════════╗"
   log_info "║ Multi-Agent Task Board 已启动                              ║"
@@ -40,6 +47,7 @@ print_quick_guide() {
   log_info "  - 接口日志: logs/api-access.log"
   log_info "  - 服务日志: ${SERVER_LOG_FILE}"
   log_info "  - Agent 日志: ${AGENTS_LOG_FILE}"
+  log_info "  - 服务日志级别: ${SERVER_LOG_LEVEL} (可通过 SERVER_LOG_LEVEL 覆盖)"
   log_info "  - 实时查看: tail -f ${SERVER_LOG_FILE} ${AGENTS_LOG_FILE}"
   log_info "  - 停止服务: 按 Ctrl+C"
 }
@@ -82,7 +90,9 @@ log_info "📦 Installing dependencies..."
 
 # ── Start server ──────────────────────────────────────────────────────────────
 log_info "🚀 Starting FastAPI server on http://localhost:8080 ..."
-.venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 8080 --no-access-log --log-level warning >>"$SERVER_LOG_FILE" 2>&1 &
+.venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 8080 --no-access-log --log-level "$SERVER_LOG_LEVEL" \
+  > >(prefix_logs >>"$SERVER_LOG_FILE") \
+  2> >(prefix_logs >>"$SERVER_LOG_FILE") &
 SERVER_PID=$!
 echo "$SERVER_PID" > .pids/server.pid
 
@@ -107,7 +117,9 @@ fi
 
 # ── Start agents ──────────────────────────────────────────────────────────────
 log_info "🤖 Starting agents..."
-(cd agents && ../.venv/bin/python run_all.py) >>"$AGENTS_LOG_FILE" 2>&1 &
+(cd agents && PYTHONUNBUFFERED=1 ../.venv/bin/python -u run_all.py) \
+  > >(prefix_logs >>"$AGENTS_LOG_FILE") \
+  2> >(prefix_logs >>"$AGENTS_LOG_FILE") &
 AGENTS_PID=$!
 echo "$AGENTS_PID" > .pids/agents.pid
 
