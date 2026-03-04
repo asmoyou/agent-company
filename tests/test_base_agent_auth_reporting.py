@@ -113,7 +113,9 @@ class BaseAgentAuthReportingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_agent_status_busy_uses_active_context_and_idle_clears_fields(self):
         agent = self._new_agent("developer")
+        agent.project_id_scope = "project-scope"
         agent._active_task_id = "task-1"
+        agent._active_project_id = "project-1"
         agent._active_run_id = "run-1"
         agent._active_lease_token = "lease-1"
         agent._active_phase = "cli_running"
@@ -124,6 +126,8 @@ class BaseAgentAuthReportingTest(unittest.IsolatedAsyncioTestCase):
         await agent.set_agent_status("idle", "")
 
         busy_payload = agent.http.post.await_args_list[0].kwargs["json"]
+        self.assertEqual(busy_payload["agent_key"], "developer")
+        self.assertEqual(busy_payload["project_id"], "project-1")
         self.assertEqual(busy_payload["task_id"], "task-1")
         self.assertEqual(busy_payload["run_id"], "run-1")
         self.assertEqual(busy_payload["lease_token"], "lease-1")
@@ -131,6 +135,7 @@ class BaseAgentAuthReportingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(busy_payload["pid"], 321)
 
         idle_payload = agent.http.post.await_args_list[1].kwargs["json"]
+        self.assertEqual(idle_payload["project_id"], "project-scope")
         self.assertEqual(idle_payload["task_id"], "")
         self.assertEqual(idle_payload["run_id"], "")
         self.assertEqual(idle_payload["lease_token"], "")
