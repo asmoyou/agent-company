@@ -84,6 +84,20 @@ def get_task_dev_agent(task: dict, fallback: str = "developer") -> str:
     return normalize_agent_key(task.get("dev_agent") or task.get("assigned_agent") or fallback)
 
 
+def is_review_enabled(task: dict | None) -> bool:
+    raw = (task or {}).get("review_enabled")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return int(raw) != 0
+    text = str(raw).strip().lower()
+    if not text:
+        return True
+    return text not in {"0", "false", "off", "no"}
+
+
 def _task_scope_suffix(task: dict | None) -> str:
     task_id = str((task or {}).get("id") or "").strip().lower()
     if not task_id:

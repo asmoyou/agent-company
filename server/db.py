@@ -146,6 +146,7 @@ def init_db():
             claim_run_id    TEXT,
             lease_token     TEXT,
             lease_expires_at TEXT,
+            review_enabled  INTEGER NOT NULL DEFAULT 1,
             review_feedback TEXT,
             review_feedback_history TEXT NOT NULL DEFAULT '[]',
             commit_hash     TEXT,
@@ -239,6 +240,7 @@ def init_db():
         ("claim_run_id", "TEXT"),
         ("lease_token", "TEXT"),
         ("lease_expires_at", "TEXT"),
+        ("review_enabled", "INTEGER NOT NULL DEFAULT 1"),
         ("review_feedback", "TEXT"),
         ("review_feedback_history", "TEXT NOT NULL DEFAULT '[]'"),
         ("commit_hash", "TEXT"),
@@ -1240,20 +1242,43 @@ def create_task(title: str, description: str, project_id: str | None = None,
                 assigned_agent: str | None = None,
                 dev_agent: str | None = None,
                 status: str = "triage",
-                subtask_order: int | None = None) -> dict:
+                subtask_order: int | None = None,
+                review_enabled: bool = True) -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
     now = _now()
+    normalized_status = str(status or "").strip() or "triage"
+    normalized_assigned = str(assigned_agent or "").strip() or None
+    normalized_dev_agent = str(dev_agent or "").strip() or None
     normalized_subtask_order = int(subtask_order or 0)
     if normalized_subtask_order < 0:
         normalized_subtask_order = 0
+    normalized_review_enabled = 1 if bool(review_enabled) else 0
+    if normalized_status == "todo":
+        todo_pollers = _todo_pollers(conn)
+        if normalized_assigned and normalized_assigned not in todo_pollers:
+            normalized_assigned = (
+                normalized_dev_agent if normalized_dev_agent in todo_pollers else None
+            )
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, description, status,
-            parent_task_id, subtask_order, assigned_agent, dev_agent, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (tid, project_id, title, description, status,
-         parent_task_id, normalized_subtask_order, assigned_agent, dev_agent, now, now),
+            parent_task_id, subtask_order, assigned_agent, dev_agent, review_enabled, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            tid,
+            project_id,
+            title,
+            description,
+            normalized_status,
+            parent_task_id,
+            normalized_subtask_order,
+            normalized_assigned,
+            normalized_dev_agent,
+            normalized_review_enabled,
+            now,
+            now,
+        ),
     )
     conn.commit()
     row = conn.execute(

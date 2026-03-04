@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from base import BaseAgent
+from base import BaseAgent, is_review_enabled
 
 
 class GenericAgent(BaseAgent):
@@ -136,36 +136,43 @@ class GenericAgent(BaseAgent):
                 )
             if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
                 return
+            effective_next_status = self.next_status
+            if effective_next_status == "in_review" and not is_review_enabled(task):
+                effective_next_status = "approved"
             update_fields = {
-                "status": self.next_status,
+                "status": effective_next_status,
                 "assignee": None,
                 "commit_hash": commit_hash,
             }
-            if self.next_status == "in_review":
+            if effective_next_status == "in_review":
                 update_fields["assigned_agent"] = self.name
+                update_fields["dev_agent"] = self.name
+            elif effective_next_status == "approved":
+                update_fields["assigned_agent"] = "manager"
                 update_fields["dev_agent"] = self.name
             await self.transition_task(
                 task_id,
                 fields=update_fields,
                 handoff={
                     "stage": f"{self.name}_handoff",
-                    "to_agent": (update_fields.get("assigned_agent") or self.next_status),
+                    "to_agent": (update_fields.get("assigned_agent") or effective_next_status),
                     "status_from": prev_status,
-                    "status_to": self.next_status,
+                    "status_to": effective_next_status,
                     "title": f"{self._display_name} 交接",
-                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {self.next_status}",
+                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {effective_next_status}",
                     "commit_hash": commit_hash,
-                    "conclusion": f"{self._display_name} 完成，推进到 {self.next_status}",
+                    "conclusion": f"{self._display_name} 完成，推进到 {effective_next_status}",
                     "payload": {
                         "commit_hash": commit_hash,
                         "source_branch": branch,
                         "committed_by_cli": True,
+                        "review_enabled": is_review_enabled(task),
                         "has_uncommitted_changes": bool(diff_stat),
                         "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
                     },
                     "artifact_path": str(worktree_dev),
                 },
-                log_message=f"检测到 CLI 已生成提交，推进至 {self.next_status}",
+                log_message=f"检测到 CLI 已生成提交，推进至 {effective_next_status}",
             )
             return
 

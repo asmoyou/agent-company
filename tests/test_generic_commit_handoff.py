@@ -98,6 +98,49 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["has_uncommitted_changes"])
         self.assertIn("main.js", payload["uncommitted_diff_stat"])
 
+    async def test_cli_commit_with_review_disabled_skips_to_approved(self):
+        head_before = "a" * 40
+        head_after = "d" * 40
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return head_before if _fake_git.rev_parse_calls == 0 else head_after
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            if args == ("rev-parse", "--short", "HEAD"):
+                return head_after[:7]
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        _fake_git.rev_parse_calls = 0
+
+        async def _git_side_effect(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                val = await _fake_git(*args, cwd=cwd, task_id=task_id)
+                _fake_git.rev_parse_calls += 1
+                return val
+            return await _fake_git(*args, cwd=cwd, task_id=task_id)
+
+        self.agent.git = mock.AsyncMock(side_effect=_git_side_effect)
+
+        task = {
+            "id": "task-2",
+            "title": "custom task no review",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+            "review_enabled": 0,
+        }
+
+        await self.agent.process_task(task)
+
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "approved")
+        self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
+        self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

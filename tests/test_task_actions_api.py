@@ -179,6 +179,55 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(created["project_id"], self.project["id"])
         self.assertEqual(created["status"], "todo")
 
+    def test_user_created_task_without_assignee_enters_triage(self):
+        res = self.client.post(
+            "/tasks",
+            json={
+                "title": "user-created-task",
+                "description": "no assignee",
+                "project_id": self.project["id"],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        created = res.json()
+        self.assertEqual(created["status"], "triage")
+        self.assertIsNone(created.get("assigned_agent"))
+
+    def test_user_created_task_with_todo_assignee_skips_triage(self):
+        res = self.client.post(
+            "/tasks",
+            json={
+                "title": "fast lane",
+                "description": "assigned to developer",
+                "project_id": self.project["id"],
+                "assigned_agent": "developer",
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        created = res.json()
+        self.assertEqual(created["status"], "todo")
+        self.assertEqual(created["assigned_agent"], "developer")
+        self.assertEqual(created["dev_agent"], "developer")
+
+    def test_user_created_task_can_disable_review(self):
+        res = self.client.post(
+            "/tasks",
+            json={
+                "title": "no review task",
+                "description": "skip reviewer",
+                "project_id": self.project["id"],
+                "assigned_agent": "developer",
+                "review_enabled": False,
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        created = res.json()
+        self.assertEqual(created["status"], "todo")
+        self.assertIn(created.get("review_enabled"), [0, False])
+
     def test_claim_rejects_bad_agent_token(self):
         self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
         res = self.client.post(

@@ -932,6 +932,7 @@ class TaskCreate(BaseModel):
     subtask_order: int | None = None
     assigned_agent: str | None = None
     dev_agent: str | None = None
+    review_enabled: bool = True
     status: str = "triage"   # default: all new tasks enter triage first
 
 class TaskUpdate(BaseModel):
@@ -940,6 +941,7 @@ class TaskUpdate(BaseModel):
     assignee: str | None = None
     assigned_agent: str | None = None
     dev_agent: str | None = None
+    review_enabled: bool | None = None
     review_feedback: str | None = None
     commit_hash: str | None = None
     archived: int | None = None
@@ -1064,6 +1066,7 @@ class TaskActionRequest(BaseModel):
 
 COMMIT_REQUIRED_STAGES = {
     "dev_to_review",
+    "dev_to_approved",
     "review_to_manager",
     "review_to_dev",
     "merge_to_acceptance",
@@ -1077,7 +1080,7 @@ STATUS_FLOW: dict[str, set[str]] = {
     "triaging": {"triaging", "triage", "decompose", "decomposed", "todo", "blocked", "cancelled"},
     "decompose": {"decompose", "triaging", "decomposed", "blocked", "triage", "cancelled"},
     "todo": {"todo", "in_progress", "decompose", "blocked", "cancelled"},
-    "in_progress": {"in_progress", "in_review", "todo", "needs_changes", "blocked", "cancelled"},
+    "in_progress": {"in_progress", "in_review", "approved", "todo", "needs_changes", "blocked", "cancelled"},
     "in_review": {"in_review", "reviewing", "needs_changes", "approved", "blocked", "cancelled"},
     "reviewing": {"reviewing", "in_review", "needs_changes", "approved", "blocked", "cancelled"},
     "needs_changes": {"needs_changes", "in_progress", "blocked", "cancelled"},
@@ -1106,6 +1109,17 @@ def _parse_poll_statuses(raw) -> list[str]:
         except Exception:
             return []
     return []
+
+
+def _agent_polls_status(agent_key: str | None, status: str) -> bool:
+    key = normalize_agent_key(agent_key, default="")
+    wanted = _norm_status(status)
+    if not key or not wanted:
+        return False
+    at = db.get_agent_type(key)
+    if not at:
+        return False
+    return wanted in {_norm_status(x) for x in _parse_poll_statuses(at.get("poll_statuses"))}
 
 
 def _validate_status_transition(before: dict, fields: dict):
@@ -1573,9 +1587,39 @@ async def create_task(body: TaskCreate, principal: dict = Depends(require_agent_
         _is_admin(principal),
     ):
         raise HTTPException(404, "Project not found")
-    task = db.create_task(body.title, body.description, body.project_id,
-                          body.parent_task_id, body.assigned_agent, body.dev_agent, body.status,
-                          body.subtask_order)
+
+    assigned_agent = (
+        normalize_agent_key(body.assigned_agent, default="")
+        if str(body.assigned_agent or "").strip()
+        else None
+    )
+    dev_agent = (
+        normalize_agent_key(body.dev_agent, default="")
+        if str(body.dev_agent or "").strip()
+        else None
+    )
+    effective_status = _norm_status(body.status) or "triage"
+
+    # User-created root tasks:
+    # - no assigned agent: always enter triage
+    # - assigned to a todo-polling agent: skip triage and go directly to todo
+    if is_user and not str(body.parent_task_id or "").strip():
+        direct_todo = bool(assigned_agent and _agent_polls_status(assigned_agent, "todo"))
+        effective_status = "todo" if direct_todo else "triage"
+        if direct_todo and not dev_agent:
+            dev_agent = assigned_agent
+
+    task = db.create_task(
+        title=body.title,
+        description=body.description,
+        project_id=body.project_id,
+        parent_task_id=body.parent_task_id,
+        assigned_agent=assigned_agent,
+        dev_agent=dev_agent,
+        status=effective_status,
+        subtask_order=body.subtask_order,
+        review_enabled=bool(body.review_enabled),
+    )
     await manager.broadcast({"event": "task_created", "task": task})
     return task
 
