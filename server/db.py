@@ -1,6 +1,7 @@
 import json
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import sqlite3
@@ -15,6 +16,12 @@ FEEDBACK_RESOLVE_STATUSES = {"approved", "pending_acceptance", "completed", CANC
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 SESSION_TTL_DAYS = 30
+LOGIN_MAX_ATTEMPTS = max(1, int(str(os.getenv("LOGIN_MAX_ATTEMPTS", "5")).strip() or "5"))
+LOGIN_LOCK_BASE_SECS = max(1, int(str(os.getenv("LOGIN_LOCK_BASE_SECS", "60")).strip() or "60"))
+LOGIN_LOCK_MAX_SECS = max(
+    LOGIN_LOCK_BASE_SECS,
+    int(str(os.getenv("LOGIN_LOCK_MAX_SECS", "86400")).strip() or "86400"),
+)
 
 
 class LeaseConflictError(RuntimeError):
@@ -123,6 +130,9 @@ def init_db():
             username      TEXT NOT NULL UNIQUE,
             password_hash TEXT,
             role          TEXT NOT NULL DEFAULT 'user',
+            failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+            lock_until    TEXT,
+            last_failed_login_at TEXT,
             created_by    TEXT,
             created_at    TEXT NOT NULL
         );
@@ -222,6 +232,9 @@ def init_db():
         ("username", "TEXT NOT NULL DEFAULT ''"),
         ("password_hash", "TEXT"),
         ("role", "TEXT NOT NULL DEFAULT 'user'"),
+        ("failed_login_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("lock_until", "TEXT"),
+        ("last_failed_login_at", "TEXT"),
         ("created_by", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
@@ -680,6 +693,42 @@ def _now():
     return datetime.utcnow().isoformat()
 
 
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    with_errors = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(with_errors)
+        if dt.tzinfo is not None:
+            offset = dt.utcoffset() or timedelta(0)
+            dt = (dt - offset).replace(tzinfo=None)  # normalize to UTC naive
+        return dt
+    except Exception:
+        return None
+
+
+def _remaining_lock_seconds(lock_until: str | None) -> int:
+    lock_dt = _parse_iso_datetime(lock_until)
+    if not lock_dt:
+        return 0
+    remain = int((lock_dt - _utcnow()).total_seconds())
+    return remain if remain > 0 else 0
+
+
+def _compute_lock_seconds(failed_attempts: int) -> int:
+    attempts = max(0, int(failed_attempts or 0))
+    if attempts < LOGIN_MAX_ATTEMPTS:
+        return 0
+    level = attempts - LOGIN_MAX_ATTEMPTS
+    wait = LOGIN_LOCK_BASE_SECS * (2 ** level)
+    return min(LOGIN_LOCK_MAX_SECS, wait)
+
+
 def _normalize_username(username: str) -> str:
     return str(username or "").strip().lower()
 
@@ -771,18 +820,62 @@ def get_user_by_username(username: str) -> dict | None:
     return _public_user(row) if row else None
 
 
-def authenticate_user(username: str, password: str) -> dict | None:
+def authenticate_user(username: str, password: str) -> dict:
     uname = _normalize_username(username)
     if not uname:
-        return None
+        return {"ok": False, "reason": "invalid_credentials"}
     conn = get_conn()
     try:
         row = conn.execute("SELECT * FROM users WHERE username=?", (uname,)).fetchone()
         if not row:
-            return None
-        if not _verify_password(password, row["password_hash"]):
-            return None
-        return _public_user(row)
+            return {"ok": False, "reason": "invalid_credentials"}
+
+        locked_secs = _remaining_lock_seconds(row["lock_until"])
+        if locked_secs > 0:
+            return {
+                "ok": False,
+                "reason": "locked",
+                "retry_after_secs": locked_secs,
+                "failed_attempts": int(row["failed_login_attempts"] or 0),
+            }
+
+        if _verify_password(password, row["password_hash"]):
+            conn.execute(
+                """
+                UPDATE users
+                   SET failed_login_attempts=0,
+                       lock_until=NULL,
+                       last_failed_login_at=NULL
+                 WHERE id=?
+                """,
+                (row["id"],),
+            )
+            conn.commit()
+            refreshed = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+            return {"ok": True, "user": _public_user(refreshed or row)}
+
+        failed_attempts = int(row["failed_login_attempts"] or 0) + 1
+        lock_secs = _compute_lock_seconds(failed_attempts)
+        now = _utcnow()
+        lock_until = (now + timedelta(seconds=lock_secs)).isoformat() if lock_secs > 0 else None
+        conn.execute(
+            """
+            UPDATE users
+               SET failed_login_attempts=?,
+                   lock_until=?,
+                   last_failed_login_at=?
+             WHERE id=?
+            """,
+            (failed_attempts, lock_until, now.isoformat(), row["id"]),
+        )
+        conn.commit()
+        return {
+            "ok": False,
+            "reason": "invalid_credentials",
+            "retry_after_secs": lock_secs,
+            "failed_attempts": failed_attempts,
+            "locked": lock_secs > 0,
+        }
     finally:
         conn.close()
 
@@ -820,6 +913,85 @@ def list_users() -> list[dict]:
     ).fetchall()
     conn.close()
     return [_public_user(r) for r in rows]
+
+
+def count_users_by_role(role: str) -> int:
+    r = str(role or "").strip().lower()
+    if r not in {ROLE_ADMIN, ROLE_USER}:
+        return 0
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(1) AS cnt FROM users WHERE role=?",
+            (r,),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def update_user(
+    user_id: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    role: str | None = None,
+) -> dict | None:
+    fields: list[str] = []
+    params: list[str] = []
+    revoke_sessions = False
+
+    if username is not None:
+        uname = _normalize_username(username)
+        if not uname:
+            raise ValueError("username 不能为空")
+        fields.append("username=?")
+        params.append(uname)
+
+    if password is not None:
+        pwd = str(password or "")
+        if not pwd:
+            raise ValueError("password 不能为空")
+        fields.append("password_hash=?")
+        params.append(_password_hash(pwd))
+        fields.append("failed_login_attempts=0")
+        fields.append("lock_until=NULL")
+        fields.append("last_failed_login_at=NULL")
+        revoke_sessions = True
+
+    if role is not None:
+        normalized_role = str(role or "").strip().lower()
+        if normalized_role not in {ROLE_ADMIN, ROLE_USER}:
+            raise ValueError("role 不合法")
+        fields.append("role=?")
+        params.append(normalized_role)
+
+    if not fields:
+        raise ValueError("至少提供一个可更新字段")
+
+    conn = get_conn()
+    try:
+        exists = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+        if not exists:
+            return None
+        conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", (*params, user_id))
+        if revoke_sessions:
+            conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return _public_user(row) if row else None
+    finally:
+        conn.close()
+
+
+def delete_user(user_id: str) -> bool:
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def create_session(user_id: str, ttl_days: int = SESSION_TTL_DAYS) -> dict:
