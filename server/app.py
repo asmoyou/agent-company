@@ -49,6 +49,11 @@ AUTO_CLEANUP_TASK_WORKSPACES = str(
 TASK_WORKSPACE_FORCE_DELETE_UNMERGED = str(
     os.getenv("TASK_WORKSPACE_FORCE_DELETE_UNMERGED", "0")
 ).strip().lower() in {"1", "true", "yes", "on"}
+TASK_WORKSPACE_SWEEP_SECS = int(os.getenv("TASK_WORKSPACE_SWEEP_SECS", "180"))
+TASK_WORKSPACE_SWEEP_BATCH_SIZE = int(os.getenv("TASK_WORKSPACE_SWEEP_BATCH_SIZE", "200"))
+TASK_WORKSPACE_CLEANUP_HISTORY_LIMIT = int(
+    os.getenv("TASK_WORKSPACE_CLEANUP_HISTORY_LIMIT", "300")
+)
 STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().lower() in {
     "1",
     "true",
@@ -115,6 +120,17 @@ def task_dev_branch(task: dict) -> str:
 
 
 _TASK_WORKSPACE_CLEANUP_INFLIGHT: set[str] = set()
+_TASK_WORKSPACE_CLEANUP_STATE: dict[str, dict] = {}
+_TASK_WORKSPACE_CLEANUP_EVENTS: deque = deque(maxlen=max(10, TASK_WORKSPACE_CLEANUP_HISTORY_LIMIT))
+_TASK_WORKSPACE_CLEANUP_METRICS: dict[str, int | str] = {
+    "scheduled": 0,
+    "executed": 0,
+    "finalized": 0,
+    "failed": 0,
+    "last_run_at": "",
+    "last_finalized_at": "",
+    "last_failed_at": "",
+}
 
 
 def _run_cmd(args: list[str], *, cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
@@ -135,20 +151,39 @@ def _cleanup_task_workspace_sync(task: dict, reason: str) -> dict:
     task_id = str(task.get("id") or "").strip()
     project_path = str(task.get("project_path") or "").strip()
     status = _norm_status(task.get("status"))
+    updated_at = str(task.get("updated_at") or "").strip()
 
+    base = {
+        "ok": False,
+        "finalized": False,
+        "message": "",
+        "reason": "",
+        "actions": [],
+        "warnings": [],
+        "status": status,
+        "updated_at": updated_at,
+    }
     if not task_id or not project_path:
-        return {"ok": False, "message": "", "reason": "missing_task_or_project"}
+        base["finalized"] = True
+        base["reason"] = "missing_task_or_project"
+        return base
     if status not in {"completed", "cancelled"}:
-        return {"ok": False, "message": "", "reason": "status_not_terminal"}
+        base["finalized"] = True
+        base["reason"] = "status_not_terminal"
+        return base
 
     root = Path(project_path)
     if not root.exists() or not (root / ".git").exists():
-        return {"ok": False, "message": "", "reason": "repo_missing"}
+        base["finalized"] = True
+        base["reason"] = "repo_missing"
+        return base
 
     dev_key = task_dev_agent(task)
     scope = task_scope_suffix(task)
     if not scope:
-        return {"ok": False, "message": "", "reason": "missing_task_scope"}
+        base["finalized"] = True
+        base["reason"] = "missing_task_scope"
+        return base
     worktree = root / ".worktrees" / dev_key / scope
     branch = task_dev_branch(task)
 
@@ -181,10 +216,7 @@ def _cleanup_task_workspace_sync(task: dict, reason: str) -> dict:
         )
         if rc_del == 0:
             actions.append(f"删除分支 {branch}")
-        elif (
-            delete_flag == "-d"
-            and TASK_WORKSPACE_FORCE_DELETE_UNMERGED
-        ):
+        elif delete_flag == "-d" and TASK_WORKSPACE_FORCE_DELETE_UNMERGED:
             rc_force, _, err_force = _run_cmd(
                 ["git", "branch", "-D", branch],
                 cwd=root,
@@ -197,19 +229,79 @@ def _cleanup_task_workspace_sync(task: dict, reason: str) -> dict:
         else:
             warnings.append(f"删除分支失败: {err_del[:120] or 'unknown error'}")
 
-    if not actions and not warnings:
-        return {"ok": False, "message": "", "reason": "nothing_to_cleanup"}
+    rc_after, out_after, _ = _run_cmd(["git", "branch", "--list", branch], cwd=root, timeout=20)
+    branch_remaining = rc_after == 0 and bool(out_after.strip())
+    worktree_remaining = worktree.exists()
+    cleanup_done = (not branch_remaining) and (not worktree_remaining)
+
+    if cleanup_done and not actions and not warnings:
+        base["ok"] = True
+        base["finalized"] = True
+        base["reason"] = "nothing_to_cleanup"
+        return base
 
     detail_parts = []
     if actions:
         detail_parts.append("；".join(actions))
     if warnings:
         detail_parts.append("警告: " + "；".join(warnings))
+    if worktree_remaining or branch_remaining:
+        remain = []
+        if worktree_remaining:
+            remain.append("worktree仍存在")
+        if branch_remaining:
+            remain.append("branch仍存在")
+        detail_parts.append("剩余: " + "、".join(remain))
     detail = "；".join(detail_parts)
-    message = (
-        f"[工作区清理] task={task_id} reason={reason} status={status} -> {detail}"
-    )
-    return {"ok": bool(actions), "message": message, "reason": "done"}
+    base["message"] = f"[工作区清理] task={task_id} reason={reason} status={status} -> {detail}"
+    base["actions"] = actions
+    base["warnings"] = warnings
+    if cleanup_done:
+        base["ok"] = True
+        base["finalized"] = True
+        base["reason"] = "done"
+        return base
+
+    base["reason"] = "cleanup_incomplete"
+    return base
+
+
+def _record_workspace_cleanup_event(task: dict, trigger: str, result: dict):
+    now = datetime.utcnow().isoformat()
+    task_id = str(task.get("id") or "").strip()
+    project_id = str(task.get("project_id") or "").strip()
+    status = _norm_status(task.get("status"))
+    event = {
+        "at": now,
+        "task_id": task_id,
+        "project_id": project_id,
+        "status": status,
+        "trigger": trigger,
+        "ok": bool(result.get("ok")),
+        "finalized": bool(result.get("finalized")),
+        "reason": str(result.get("reason") or ""),
+        "actions": list(result.get("actions") or []),
+        "warnings": list(result.get("warnings") or []),
+        "message": str(result.get("message") or ""),
+    }
+    _TASK_WORKSPACE_CLEANUP_EVENTS.appendleft(event)
+    _TASK_WORKSPACE_CLEANUP_METRICS["last_run_at"] = now
+    _TASK_WORKSPACE_CLEANUP_METRICS["executed"] = int(_TASK_WORKSPACE_CLEANUP_METRICS["executed"]) + 1
+    if bool(result.get("finalized")):
+        _TASK_WORKSPACE_CLEANUP_METRICS["finalized"] = int(_TASK_WORKSPACE_CLEANUP_METRICS["finalized"]) + 1
+        _TASK_WORKSPACE_CLEANUP_METRICS["last_finalized_at"] = now
+    else:
+        _TASK_WORKSPACE_CLEANUP_METRICS["failed"] = int(_TASK_WORKSPACE_CLEANUP_METRICS["failed"]) + 1
+        _TASK_WORKSPACE_CLEANUP_METRICS["last_failed_at"] = now
+    if task_id:
+        _TASK_WORKSPACE_CLEANUP_STATE[task_id] = {
+            "status": status,
+            "updated_at": str(task.get("updated_at") or ""),
+            "ok": bool(result.get("ok")),
+            "finalized": bool(result.get("finalized")),
+            "reason": str(result.get("reason") or ""),
+            "at": now,
+        }
 
 
 def _schedule_task_workspace_cleanup(task: dict, reason: str):
@@ -221,10 +313,12 @@ def _schedule_task_workspace_cleanup(task: dict, reason: str):
     if task_id in _TASK_WORKSPACE_CLEANUP_INFLIGHT:
         return
     _TASK_WORKSPACE_CLEANUP_INFLIGHT.add(task_id)
+    _TASK_WORKSPACE_CLEANUP_METRICS["scheduled"] = int(_TASK_WORKSPACE_CLEANUP_METRICS["scheduled"]) + 1
 
     async def _runner():
         try:
             result = await asyncio.to_thread(_cleanup_task_workspace_sync, dict(task), reason)
+            _record_workspace_cleanup_event(task, reason, result)
             message = str(result.get("message") or "").strip()
             if message:
                 try:
@@ -236,6 +330,63 @@ def _schedule_task_workspace_cleanup(task: dict, reason: str):
             _TASK_WORKSPACE_CLEANUP_INFLIGHT.discard(task_id)
 
     asyncio.create_task(_runner())
+
+
+def _sweep_terminal_task_workspaces(max_tasks: int | None = None, reason: str = "periodic_sweep") -> dict:
+    if not AUTO_CLEANUP_TASK_WORKSPACES:
+        return {"scheduled": 0, "scanned": 0, "reason": "disabled"}
+
+    limit = max_tasks if max_tasks is not None else TASK_WORKSPACE_SWEEP_BATCH_SIZE
+    rows = db.list_terminal_tasks_for_workspace_cleanup(limit=max(1, int(limit)))
+    scheduled = 0
+    scanned = 0
+    for task in rows:
+        scanned += 1
+        task_id = str(task.get("id") or "").strip()
+        status = _norm_status(task.get("status"))
+        updated = str(task.get("updated_at") or "")
+        if not task_id or status not in {"completed", "cancelled"}:
+            continue
+        state = _TASK_WORKSPACE_CLEANUP_STATE.get(task_id)
+        if state:
+            same_snapshot = (
+                str(state.get("status") or "") == status
+                and str(state.get("updated_at") or "") == updated
+            )
+            if same_snapshot and bool(state.get("finalized")):
+                continue
+        if task_id in _TASK_WORKSPACE_CLEANUP_INFLIGHT:
+            continue
+        _schedule_task_workspace_cleanup(task, reason=reason)
+        scheduled += 1
+    return {"scheduled": scheduled, "scanned": scanned, "reason": reason}
+
+
+def _workspace_cleanup_visible_events(user: dict, limit: int = 50) -> list[dict]:
+    is_admin = _is_admin(user)
+    user_id = str(user.get("id") or "").strip()
+    out: list[dict] = []
+    max_items = max(1, min(int(limit), 200))
+    for event in list(_TASK_WORKSPACE_CLEANUP_EVENTS):
+        if len(out) >= max_items:
+            break
+        pid = str(event.get("project_id") or "").strip()
+        if is_admin or not pid or db.user_can_access_project(pid, user_id, False):
+            out.append(dict(event))
+    return out
+
+
+def _workspace_cleanup_visible_inflight_task_ids(user: dict) -> list[str]:
+    is_admin = _is_admin(user)
+    if is_admin:
+        return sorted(_TASK_WORKSPACE_CLEANUP_INFLIGHT)
+    user_id = str(user.get("id") or "").strip()
+    visible: list[str] = []
+    for task_id in sorted(_TASK_WORKSPACE_CLEANUP_INFLIGHT):
+        task = db.get_task(task_id, user_id=user_id, is_admin=False)
+        if task:
+            visible.append(task_id)
+    return visible
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -570,6 +721,19 @@ async def _agent_health_watchdog():
                 )
 
 
+async def _task_workspace_cleanup_watchdog():
+    if not AUTO_CLEANUP_TASK_WORKSPACES:
+        return
+    interval = max(10, int(TASK_WORKSPACE_SWEEP_SECS))
+    while True:
+        await asyncio.sleep(interval)
+        with contextlib.suppress(Exception):
+            _sweep_terminal_task_workspaces(
+                max_tasks=TASK_WORKSPACE_SWEEP_BATCH_SIZE,
+                reason="periodic_sweep",
+            )
+
+
 # Pre-populate built-ins so they appear on init
 for _k in ("developer", "reviewer", "manager"):
     _ensure_agent_state(_k)
@@ -712,13 +876,23 @@ async def lifespan(app: FastAPI):
         AGENT_OUTPUT[agent_name].clear()
         for entry in db.get_agent_output_entries(agent_name, limit=1000):
             AGENT_OUTPUT[agent_name].append(_normalize_agent_output_entry(entry))
+    if AUTO_CLEANUP_TASK_WORKSPACES:
+        with contextlib.suppress(Exception):
+            _sweep_terminal_task_workspaces(
+                max_tasks=TASK_WORKSPACE_SWEEP_BATCH_SIZE,
+                reason="startup_sweep",
+            )
     watchdog = asyncio.create_task(_agent_health_watchdog())
+    cleanup_watchdog = asyncio.create_task(_task_workspace_cleanup_watchdog())
     try:
         yield
     finally:
         watchdog.cancel()
+        cleanup_watchdog.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await watchdog
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_watchdog
 
 
 app = FastAPI(title="Multi-Agent Task Board", lifespan=lifespan)
@@ -1219,6 +1393,47 @@ async def list_runtime_projects(
         user_id=principal["id"],
         is_admin=_is_admin(principal),
     )
+
+
+@app.get("/runtime/workspace-cleanup")
+async def workspace_cleanup_runtime(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: dict = Depends(require_user),
+):
+    events = _workspace_cleanup_visible_events(user, limit=limit)
+    inflight = _workspace_cleanup_visible_inflight_task_ids(user)
+    metrics = dict(_TASK_WORKSPACE_CLEANUP_METRICS)
+    metrics["inflight"] = len(_TASK_WORKSPACE_CLEANUP_INFLIGHT)
+    metrics["history_size"] = len(_TASK_WORKSPACE_CLEANUP_EVENTS)
+    if not _is_admin(user):
+        metrics["visible_inflight"] = len(inflight)
+        metrics["visible_recent_events"] = len(events)
+        metrics["scope"] = "filtered"
+    return {
+        "config": {
+            "auto_cleanup": AUTO_CLEANUP_TASK_WORKSPACES,
+            "sweep_secs": TASK_WORKSPACE_SWEEP_SECS,
+            "sweep_batch_size": TASK_WORKSPACE_SWEEP_BATCH_SIZE,
+            "force_delete_unmerged": TASK_WORKSPACE_FORCE_DELETE_UNMERGED,
+        },
+        "metrics": metrics,
+        "inflight_task_ids": inflight,
+        "recent_events": events,
+    }
+
+
+@app.post("/runtime/workspace-cleanup/sweep")
+async def workspace_cleanup_sweep(
+    max_tasks: int = Query(default=100, ge=1, le=500),
+    _admin: dict = Depends(require_admin),
+):
+    result = _sweep_terminal_task_workspaces(max_tasks=max_tasks, reason="manual_sweep")
+    return {
+        "ok": True,
+        "scheduled": int(result.get("scheduled") or 0),
+        "scanned": int(result.get("scanned") or 0),
+        "reason": result.get("reason") or "manual_sweep",
+    }
 
 
 @app.post("/projects", status_code=201)

@@ -156,7 +156,15 @@ decompose -> decomposed -> (subtasks in todo...)
 | `BRANCH_SYNC_STRATEGY` | `merge` | 任务开始前同步 `main` 的策略：`merge` / `rebase` / `none` |
 | `AUTO_CLEANUP_TASK_WORKSPACES` | `1` | 任务进入 `completed`/`cancelled` 后自动清理对应 task worktree/branch |
 | `TASK_WORKSPACE_FORCE_DELETE_UNMERGED` | `0` | 对未合并分支是否允许强制删除（仅在自动清理中生效） |
+| `TASK_WORKSPACE_SWEEP_SECS` | `180` | 周期性扫描终态任务并触发清理的间隔（秒） |
+| `TASK_WORKSPACE_SWEEP_BATCH_SIZE` | `200` | 每次周期扫描最多处理的终态任务数量 |
+| `TASK_WORKSPACE_CLEANUP_HISTORY_LIMIT` | `300` | 内存中保留的清理事件历史条数（用于运维观测） |
 | `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 Codex 传 `--output-schema`（默认关闭，降低兼容风险） |
+
+### 清理运维接口
+
+- `GET /runtime/workspace-cleanup`：查看清理配置、计数指标、最近清理事件、当前 in-flight 任务
+- `POST /runtime/workspace-cleanup/sweep?max_tasks=100`：管理员手动触发一次终态任务清理扫描
 
 ## 当前边界（MVP）
 
