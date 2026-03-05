@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 
-from base import BaseAgent, get_project_dirs, parse_status_list
+from base import BaseAgent, get_project_dirs, normalize_agent_key, parse_status_list
 
 TRIAGE_PROMPT_DEFAULT = (
     "你是项目主管，负责先完善任务需求，再评估是否需要分解与分派执行。请处理以下任务：\n\n"
@@ -16,7 +16,7 @@ TRIAGE_PROMPT_DEFAULT = (
     "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
     "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
     "如果是简单任务：\n"
-    '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
+    '{"action": "simple", "reason": "一句话说明为何不需要分解", "assignee": "执行该任务的 agent key（如 art_designer）"}\n\n'
     "如果是复杂任务：\n"
     '{"action": "decompose", "subtasks": [\n'
     '  {"title": "子任务标题", "objective":"子任务目标", "parent_refs":["R1"], "deliverables":["交付物1"], "acceptance_criteria":["验收1","验收2"], "agent": "developer"}\n'
@@ -105,6 +105,7 @@ LEADER_TRIAGE_SCHEMA = {
         "refined_description": {"type": "string"},
         "action": {"type": "string", "enum": ["simple", "decompose"]},
         "reason": {"type": "string"},
+        "assignee": {"type": "string"},
         "subtasks": {
             "type": "array",
             "items": LEADER_SUBTASK_SCHEMA,
@@ -259,6 +260,14 @@ class LeaderAgent(BaseAgent):
             out.append(s[:200])
         return out
 
+    def _simple_assignee_from_reason(self, reason: str) -> str:
+        text = str(reason or "")
+        if not text:
+            return ""
+        if re.search(r"(美术|视觉设计|设计师)", text, re.IGNORECASE):
+            return "art_designer"
+        return ""
+
     def _is_complex_task(self, task: dict) -> bool:
         text = f"{task.get('title') or ''}\n{task.get('description') or ''}"
         score = 0
@@ -401,10 +410,12 @@ class LeaderAgent(BaseAgent):
         action = str(raw_decision.get("action") or "").strip().lower()
         if action == "simple":
             reason = str(raw_decision.get("reason") or "").strip() or "判定为简单任务"
+            assignee = normalize_agent_key(str(raw_decision.get("assignee") or "").strip(), default="")
             return {
                 "action": "simple",
                 "reason": reason[:500],
                 "refined_description": refined_description,
+                "assignee": assignee,
             }, []
         if action == "decompose":
             subtasks, issues = self._normalize_subtasks(
@@ -639,7 +650,7 @@ class LeaderAgent(BaseAgent):
             "\n\n## 结构化交付（必须）\n"
             f"请把最终评估写入 JSON 文件：{decision_file}\n"
             "仅允许以下二选一格式：\n"
-            '{"refined_description":"...","action":"simple","reason":"..."}\n'
+            '{"refined_description":"...","action":"simple","reason":"...","assignee":"art_designer"}\n'
             '{"refined_description":"...","action":"decompose","subtasks":[{"title":"...","objective":"...","implementation_scope":["..."],'
             '"parent_refs":["R1"],"todo_steps":["步骤1","步骤2"],"deliverables":["..."],"acceptance_criteria":["...","..."],"agent":"developer"}]}\n'
             "同时在回复最后一行输出同一个 JSON 对象。"
@@ -768,14 +779,26 @@ class LeaderAgent(BaseAgent):
 
         # Simple task — push to todo
         reason = decision.get("reason", "判定为简单任务")
-        todo_agent = self._todo_assigned_agent(task) or "developer"
+        decision_assignee = normalize_agent_key(str(decision.get("assignee") or "").strip(), default="")
+        reason_inferred_assignee = self._simple_assignee_from_reason(reason)
+        todo_agent = (
+            decision_assignee
+            or reason_inferred_assignee
+            or self._todo_assigned_agent(task)
+            or "developer"
+        )
+        if decision_assignee:
+            await self.add_log(task_id, f"简单任务指定执行 Agent: {todo_agent}")
+        elif reason_inferred_assignee:
+            await self.add_log(task_id, f"简单任务从结论语义推断执行 Agent: {todo_agent}")
         await self.transition_task(
             task_id,
             fields={
                 "description": refined_description,
                 "status": "todo",
                 "assignee": None,
-                "assigned_agent": self._todo_assigned_agent(task),
+                "assigned_agent": todo_agent,
+                "dev_agent": todo_agent,
             },
             handoff={
                 "stage": "leader_to_todo",

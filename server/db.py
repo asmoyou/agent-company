@@ -112,7 +112,7 @@ LEADER_PROMPT_DEFAULT = (
     "4. acceptance_criteria 至少 2 条，必须可验证。\n\n"
     "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
     "如果是简单任务：\n"
-    '{"action": "simple", "reason": "一句话说明为何不需要分解"}\n\n'
+    '{"action": "simple", "reason": "一句话说明为何不需要分解", "assignee": "执行该任务的 agent key（如 art_designer）"}\n\n'
     "如果是复杂任务：\n"
     '{"action": "decompose", "subtasks": [\n'
     '  {"title":"子任务标题","objective":"子任务目标","todo_steps":["步骤1","步骤2"],"deliverables":["交付物1"],"acceptance_criteria":["验收1","验收2"],"agent":"developer"}\n'
@@ -881,6 +881,15 @@ def _seed_builtin_agents(conn):
            SET prompt=?
            WHERE key='leader' AND is_builtin=1
              AND INSTR(prompt, '项目评估与分解专家') > 0""",
+        (BUILTIN_PROMPTS["leader"],),
+    )
+    # Migrate leader prompt that lacks simple-task assignee field.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='leader' AND is_builtin=1
+             AND INSTR(prompt, '"action": "simple"') > 0
+             AND INSTR(prompt, '"assignee"') = 0""",
         (BUILTIN_PROMPTS["leader"],),
     )
     # Migrate outdated built-in developer prompt that lacked branch/handoff constraints.
