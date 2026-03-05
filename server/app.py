@@ -1077,6 +1077,7 @@ for _k in (
     "risk_compliance_officer",
     "admin_specialist",
     "marketing_specialist",
+    "art_designer",
     "hr_specialist",
     "operations_specialist",
     "customer_service_specialist",

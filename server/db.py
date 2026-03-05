@@ -247,6 +247,22 @@ MARKETING_SPECIALIST_PROMPT_DEFAULT = (
     "直接开始执行，不需要解释计划。"
 )
 
+ART_DESIGNER_PROMPT_DEFAULT = (
+    "你是一名美术设计师，负责以下任务的视觉创意与设计交付（图片、海报、宣传物料、宣传页等）。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出完整视觉方案：设计目标、受众、风格关键词、主视觉构图与配色规范\n"
+    "2. 至少提供 2 套可对比方案，并说明各自适用场景与取舍理由\n"
+    "3. 尽量产出可直接落地的设计文件（如 `.svg` / `.html` / `.css` / `.md` 资产说明）\n"
+    "4. 若任务涉及海报/宣传图，请明确尺寸、比例、文案层级与导出建议\n"
+    "5. 所有成果必须写入文件并提交到当前工作分支；提交后交由 reviewer/manager 流转\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
 HR_SPECIALIST_PROMPT_DEFAULT = (
     "你是一名人力资源专员，负责以下任务的招聘、培训、绩效与组织制度文档输出。\n\n"
     "## 任务信息\n\n"
@@ -324,6 +340,7 @@ BUILTIN_PROMPTS = {
     "risk_compliance_officer": RISK_COMPLIANCE_PROMPT_DEFAULT,
     "admin_specialist": ADMIN_SPECIALIST_PROMPT_DEFAULT,
     "marketing_specialist": MARKETING_SPECIALIST_PROMPT_DEFAULT,
+    "art_designer": ART_DESIGNER_PROMPT_DEFAULT,
     "hr_specialist": HR_SPECIALIST_PROMPT_DEFAULT,
     "operations_specialist": OPERATIONS_SPECIALIST_PROMPT_DEFAULT,
     "customer_service_specialist": CUSTOMER_SERVICE_SPECIALIST_PROMPT_DEFAULT,
@@ -736,6 +753,15 @@ def _seed_builtin_agents(conn):
             "name": "市场专员",
             "description": "负责市场调研、品牌传播、活动策划与推广复盘",
             "prompt": BUILTIN_PROMPTS["marketing_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "art_designer",
+            "name": "美术设计师",
+            "description": "负责图片、海报、宣传物料与视觉风格设计产出",
+            "prompt": BUILTIN_PROMPTS["art_designer"],
             "poll_statuses": '["todo","needs_changes"]',
             "next_status": "in_review",
             "working_status": "in_progress",

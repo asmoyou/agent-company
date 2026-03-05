@@ -26,7 +26,7 @@ LinX协作平台简易演示网络版 用结构化任务流和结构化交接材
 ## 核心能力
 
 - 一个看板统一管理多种 CLI Agent。
-- 内置 `leader(主管)`、`developer`、`reviewer`、`manager`、`product_manager`、`finance_officer`、`legal_counsel`、`business_manager`、`bid_writer`、`risk_compliance_officer`、`admin_specialist`、`marketing_specialist`、`hr_specialist`、`operations_specialist`、`customer_service_specialist`、`procurement_specialist`，支持扩展自定义 Agent。
+- 内置 `leader(主管)`、`developer`、`reviewer`、`manager`、`product_manager`、`finance_officer`、`legal_counsel`、`business_manager`、`bid_writer`、`risk_compliance_officer`、`admin_specialist`、`marketing_specialist`、`art_designer`、`hr_specialist`、`operations_specialist`、`customer_service_specialist`、`procurement_specialist`，支持扩展自定义 Agent。
 - 支持配置 Codex / Claude 等终端 CLI。
 - 任务状态机 + 阻塞态恢复，减少“无限重试”和假进度。
 - 结构化 handoff（可审计、可回放、可追责）。
