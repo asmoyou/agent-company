@@ -37,7 +37,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 22px;
+      padding: 22px 22px 56px;
     }
 
     .shell {
@@ -136,6 +136,22 @@
       background: #38bdf8;
       box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
       flex: 0 0 auto;
+    }
+
+    .hero-note {
+      margin-top: 20px;
+      padding: 12px 14px;
+      border: 1px solid rgba(100, 116, 139, 0.34);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.42);
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .hero-note strong {
+      color: #e2e8f0;
+      font-weight: 600;
     }
 
     .panel {
@@ -270,12 +286,18 @@
       line-height: 1.45;
     }
 
-    .copyright {
-      margin: 6px 0 0;
-      color: #475569;
-      font-size: 11px;
+    .page-copyright {
+      position: fixed;
+      left: 50%;
+      bottom: 12px;
+      transform: translateX(-50%);
+      margin: 0;
+      color: #64748b;
+      font-size: 12px;
       line-height: 1.4;
       letter-spacing: 0.02em;
+      text-align: center;
+      pointer-events: none;
     }
 
     @media (max-width: 900px) {
@@ -303,14 +325,17 @@
       </div>
       <h1 class="title">LinX协作平台简易演示网络版</h1>
       <p class="subtitle">
-        多 Agent 协作任务看板，面向本地研发工作流的轻量化演示版本。
-        支持任务流转、角色分工、交接记录与实时状态查看。
+        这是一个独立运行的多 Agent 演示系统，不依赖或接入外部 ERP 等业务系统。
+        立即体验最先进 Agent 协作体验，聚焦开发执行、文书处理与任务流程跟进。
       </p>
       <ul class="list">
-        <li>统一管理 developer / reviewer / manager 角色</li>
-        <li>基于任务状态机推进开发与审查链路</li>
-        <li>兼容本地 Git Worktree 的并行协作模式</li>
+        <li>开发协作：需求拆解、代码实现、审查回合与交接记录</li>
+        <li>文书处理：方案、申请文件、汇报材料与制度文档编写修订</li>
+        <li>辅助支持：行政/财务报告、市场调研调用与财务审查清单整理</li>
       </ul>
+      <div class="hero-note">
+        如有更多需求，可提供技能开发与本地部署支持。若需纯私有化，可提供正式企业级平台：支持本地推理与任务闭环执行，可安装多种技能，包含知识库、记忆管理等核心功能。<strong>企业平台授权请咨询服务商。</strong>
+      </div>
     </section>
 
     <section class="panel">
@@ -324,7 +349,7 @@
       <form id="auth-form">
         <div class="field" id="username-row">
           <label for="username">用户名</label>
-          <input id="username" type="text" autocomplete="username" placeholder="admin" value="admin" />
+          <input id="username" type="text" autocomplete="username" placeholder="请输入用户名" />
         </div>
         <div class="field">
           <label for="password">密码</label>
@@ -335,9 +360,9 @@
       </form>
 
       <p class="footer">首次启动若未设置管理员密码，将自动进入初始化模式。</p>
-      <p class="copyright">2026版权所有 小白客asmo</p>
     </section>
   </div>
+  <p class="page-copyright">2026版权所有@小白客asmo</p>
 
   <script>
     const API = `${location.protocol}//${location.host}`;
@@ -381,14 +406,13 @@
         hintEl.textContent = hint || "首次启动需要先设置 admin 初始密码";
         note.style.display = "block";
         usernameRow.style.display = "none";
-        username.value = "admin";
+        username.value = "";
       } else {
         eyebrow.textContent = "Sign In";
         title.textContent = "账号登录";
         hintEl.textContent = hint || "请使用管理员创建的账号登录";
         note.style.display = "none";
         usernameRow.style.display = "grid";
-        if (!username.value.trim()) username.value = "admin";
       }
 
       setSubmitting(false);
