@@ -191,6 +191,115 @@ def _run_cmd(args: list[str], *, cwd: Path, timeout: int = 30) -> tuple[int, str
         return 1, "", str(e)
 
 
+def _relative_git_path(root: Path, target: Path) -> str | None:
+    try:
+        rel = target.resolve().relative_to(root.resolve())
+    except Exception:
+        return None
+    rel_posix = rel.as_posix().strip()
+    if not rel_posix or rel_posix in {".", ".git"} or rel_posix.startswith(".git/"):
+        return None
+    return rel_posix
+
+
+def _auto_commit_project_paths_to_main(
+    project_root: Path,
+    *,
+    changed_paths: list[Path],
+    action: str,
+) -> dict:
+    root = project_root.resolve()
+    if not changed_paths:
+        return {"status": "skipped", "reason": "empty_paths"}
+    if not (root / ".git").exists():
+        return {"status": "skipped", "reason": "repo_missing"}
+
+    rel_paths: list[str] = []
+    seen: set[str] = set()
+    for p in changed_paths:
+        rel = _relative_git_path(root, p)
+        if rel and rel not in seen:
+            seen.add(rel)
+            rel_paths.append(rel)
+    if not rel_paths:
+        return {"status": "skipped", "reason": "no_git_paths"}
+
+    rc_main, out_main, err_main = _run_cmd(["git", "branch", "--list", "main"], cwd=root, timeout=20)
+    if rc_main != 0 or not out_main.strip():
+        return {
+            "status": "skipped",
+            "reason": "main_missing",
+            "error": (err_main or out_main)[:200],
+        }
+
+    rc_cur, out_cur, err_cur = _run_cmd(["git", "branch", "--show-current"], cwd=root, timeout=20)
+    if rc_cur != 0:
+        return {"status": "error", "reason": "read_branch_failed", "error": err_cur[:200]}
+    previous_branch = out_cur.strip()
+    switched = False
+    restore_warning = ""
+
+    try:
+        if previous_branch != "main":
+            rc_ck, _, err_ck = _run_cmd(["git", "checkout", "main"], cwd=root, timeout=40)
+            if rc_ck != 0:
+                return {
+                    "status": "error",
+                    "reason": "checkout_main_failed",
+                    "error": err_ck[:200],
+                    "branch": previous_branch,
+                }
+            switched = True
+
+        rc_add, _, err_add = _run_cmd(
+            ["git", "add", "-A", "--", *rel_paths],
+            cwd=root,
+            timeout=40,
+        )
+        if rc_add != 0:
+            return {"status": "error", "reason": "git_add_failed", "error": err_add[:200]}
+
+        rc_diff, out_diff, err_diff = _run_cmd(
+            ["git", "diff", "--cached", "--name-only", "--", *rel_paths],
+            cwd=root,
+            timeout=30,
+        )
+        if rc_diff != 0:
+            return {"status": "error", "reason": "git_diff_failed", "error": err_diff[:200]}
+        staged = [line.strip() for line in out_diff.splitlines() if line.strip()]
+        if not staged:
+            return {"status": "skipped", "reason": "no_changes"}
+
+        commit_msg = f"chore(files): {action} {len(staged)} path(s)"
+        rc_commit, _, err_commit = _run_cmd(
+            ["git", "commit", "--only", "-m", commit_msg, "--", *rel_paths],
+            cwd=root,
+            timeout=60,
+        )
+        if rc_commit != 0:
+            if "nothing to commit" in err_commit.lower():
+                return {"status": "skipped", "reason": "no_changes"}
+            return {"status": "error", "reason": "git_commit_failed", "error": err_commit[:200]}
+
+        rc_head, out_head, err_head = _run_cmd(["git", "rev-parse", "--short", "HEAD"], cwd=root, timeout=20)
+        if rc_head != 0:
+            return {
+                "status": "committed",
+                "branch": "main",
+                "paths": staged,
+                "commit": "",
+                "warning": err_head[:200],
+            }
+        return {"status": "committed", "branch": "main", "paths": staged, "commit": out_head.strip()}
+    finally:
+        if switched and previous_branch:
+            rc_back, _, err_back = _run_cmd(["git", "checkout", previous_branch], cwd=root, timeout=40)
+            if rc_back != 0:
+                restore_warning = err_back[:200]
+        if restore_warning:
+            print(f"[files] WARN: failed to restore branch after auto-commit: {restore_warning}")
+
+
 def _cleanup_task_workspace_sync(task: dict, reason: str) -> dict:
     task_id = str(task.get("id") or "").strip()
     project_path = str(task.get("project_path") or "").strip()
@@ -2615,6 +2724,7 @@ async def upload_project_files(
         raise HTTPException(404, "Directory not found")
 
     uploaded = []
+    touched_paths: list[Path] = []
     for f in files:
         # Sanitize filename — strip path components
         safe_name = Path(f.filename).name if f.filename else "untitled"
@@ -2622,9 +2732,16 @@ async def upload_project_files(
         with open(dest, "wb") as out:
             shutil.copyfileobj(f.file, out)
         uploaded.append(safe_name)
+        touched_paths.append(dest)
+
+    git_result = _auto_commit_project_paths_to_main(
+        Path(p["path"]),
+        changed_paths=touched_paths,
+        action="upload",
+    )
 
     await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": path})
-    return {"uploaded": uploaded}
+    return {"uploaded": uploaded, "git": git_result}
 
 
 @app.delete("/projects/{project_id}/files")
@@ -2639,9 +2756,14 @@ async def delete_project_file(project_id: str, path: str, user: dict = Depends(r
         shutil.rmtree(target)
     else:
         target.unlink()
+    git_result = _auto_commit_project_paths_to_main(
+        Path(p["path"]),
+        changed_paths=[target],
+        action="delete",
+    )
     parent_rel = str(Path(path).parent) if str(Path(path).parent) != "." else ""
     await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": parent_rel})
-    return {"ok": True}
+    return {"ok": True, "git": git_result}
 
 
 @app.post("/projects/{project_id}/files/mkdir")
