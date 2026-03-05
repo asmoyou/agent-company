@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-python-dotenv
-openai
-python-multipart
-aiofiles
-opencv-python
