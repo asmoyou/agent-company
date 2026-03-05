@@ -135,6 +135,26 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 422)
 
+    def test_onboarding_complete_marks_user_once(self):
+        me_before = self.client.get("/auth/me", headers=self._headers)
+        self.assertEqual(me_before.status_code, 200)
+        self.assertFalse(me_before.json().get("onboarding_completed_at"))
+
+        first = self.client.post("/auth/onboarding-complete", headers=self._headers)
+        self.assertEqual(first.status_code, 200)
+        first_payload = first.json()
+        self.assertTrue(first_payload.get("ok"))
+        stamped = str(first_payload["user"].get("onboarding_completed_at") or "").strip()
+        self.assertTrue(stamped)
+
+        me_after = self.client.get("/auth/me", headers=self._headers)
+        self.assertEqual(me_after.status_code, 200)
+        self.assertEqual(me_after.json().get("onboarding_completed_at"), stamped)
+
+        second = self.client.post("/auth/onboarding-complete", headers=self._headers)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["user"].get("onboarding_completed_at"), stamped)
+
     def test_non_admin_cannot_manage_users(self):
         created = self.client.post(
             "/users",
