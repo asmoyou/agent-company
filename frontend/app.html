@@ -647,6 +647,105 @@
     body.terminal-only #terminal-popout-btn { display:none!important; }
     body.terminal-only #terminal-chevron { display:none!important; }
     body.terminal-only #agent-terminal-shell > div { cursor:default!important; }
+
+    body.onboarding-active {
+      overflow: hidden;
+    }
+    #onboarding-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #onboarding-overlay.hidden {
+      display: none;
+    }
+    .onboarding-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.72);
+      backdrop-filter: blur(2px);
+    }
+    .onboarding-focus {
+      position: absolute;
+      border: 1px solid rgba(129, 140, 248, 0.82);
+      box-shadow: 0 0 0 9999px rgba(2, 6, 23, 0.32), 0 0 0 6px rgba(99, 102, 241, 0.24);
+      border-radius: 14px;
+      pointer-events: none;
+      transition: all .2s var(--ease-smooth);
+    }
+    .onboarding-focus.hidden {
+      opacity: 0;
+    }
+    .onboarding-card {
+      position: fixed;
+      width: min(380px, calc(100vw - 32px));
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.97), rgba(15, 23, 42, 0.94));
+      box-shadow: 0 22px 44px rgba(2, 6, 23, 0.52);
+      padding: 14px 14px 12px;
+      z-index: 1;
+    }
+    .onboarding-step {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: #93c5fd;
+      margin: 0 0 6px;
+    }
+    .onboarding-title {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.35;
+      color: #f1f5f9;
+      font-weight: 600;
+    }
+    .onboarding-desc {
+      margin: 9px 0 0;
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      white-space: pre-line;
+    }
+    .onboarding-actions {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .onboarding-btn {
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .onboarding-btn:hover {
+      border-color: #64748b;
+      color: #f8fafc;
+    }
+    .onboarding-btn.primary {
+      border-color: rgba(99, 102, 241, 0.7);
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(79, 70, 229, 0.34);
+    }
+    .onboarding-btn.primary:hover {
+      border-color: rgba(129, 140, 248, 0.88);
+    }
+    .onboarding-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
   </style>
 </head>
 <body class="min-h-screen font-sans flex flex-col">
@@ -711,6 +810,11 @@
       title="管理 Agent 类型">
       🤖 Agents
     </button>
+    <button id="btn-onboarding" onclick="startOnboarding(true)"
+      class="header-btn text-xs px-3 py-1.5 rounded-lg transition"
+      title="查看新手引导">
+      🧭 引导
+    </button>
     <button id="btn-user-admin" onclick="openUsersModal()"
       class="hidden header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="管理用户">
@@ -739,6 +843,22 @@
     <div class="msg-dialog-actions">
       <button id="msg-dialog-cancel" type="button" class="msg-btn">取消</button>
       <button id="msg-dialog-ok" type="button" class="msg-btn primary">确定</button>
+    </div>
+  </div>
+</div>
+<div id="onboarding-overlay" class="hidden" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="onboarding-mask"></div>
+  <div id="onboarding-focus" class="onboarding-focus hidden"></div>
+  <div id="onboarding-card" class="onboarding-card">
+    <p id="onboarding-step-label" class="onboarding-step">步骤 1 / 1</p>
+    <h3 id="onboarding-title" class="onboarding-title">欢迎使用</h3>
+    <p id="onboarding-desc" class="onboarding-desc"></p>
+    <div class="onboarding-actions">
+      <button id="onboarding-skip" type="button" class="onboarding-btn">跳过</button>
+      <div class="onboarding-nav">
+        <button id="onboarding-prev" type="button" class="onboarding-btn">上一步</button>
+        <button id="onboarding-next" type="button" class="onboarding-btn primary">下一步</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1285,6 +1405,54 @@ const API = `${location.protocol}//${location.host}`;
 let authToken = localStorage.getItem("opc_token") || "";
 let currentUser = null;
 let redirectingToLogin = false;
+const ONBOARDING_STORAGE_PREFIX = "opc_onboarding_done_";
+const ONBOARDING_STEPS = [
+  {
+    title: "欢迎来到任务看板",
+    description: "这里是多 Agent 协作中枢。\n你可以按“项目 -> 任务 -> 自动流转”方式推进工作。",
+    placement: "center",
+  },
+  {
+    title: "先选择或新建项目",
+    description: "先在这里选择项目；如果没有项目，点“新建项目”。\n系统会按项目隔离任务、仓库和权限。",
+    selector: "#project-select",
+    placement: "bottom",
+  },
+  {
+    title: "任务从这里创建",
+    description: "点击“+ 创建任务”，填写标题、描述、优先级和可选依赖。\n创建后任务会进入“待评估”并开始自动流转。",
+    selector: "#btn-create-task",
+    placement: "bottom",
+  },
+  {
+    title: "看板展示全流程状态",
+    description: "看板会展示任务从评估、开发、审查到完成的全过程。\n你可以点开任务卡查看日志、交接和审查结果。",
+    target: () => {
+      const board = document.getElementById("board");
+      if (board && !board.classList.contains("hidden")) return board;
+      return document.getElementById("no-project-hint");
+    },
+    placement: "top",
+  },
+  {
+    title: "底部可实时查看 Agent 终端",
+    description: "这里显示各个 Agent 的执行日志，支持切换筛选与放大查看，适合定位执行问题。",
+    selector: "#agent-terminal-shell",
+    placement: "top",
+  },
+  {
+    title: "项目办公区与工具入口",
+    description: "“办公区”可以上传/预览/管理项目文件；\n“Agents”“引导”等按钮用于配置与快速上手。",
+    selector: "#btn-open-workspace",
+    placement: "bottom",
+  },
+];
+const onboardingState = {
+  active: false,
+  index: 0,
+  autoAttempted: false,
+  uiBound: false,
+};
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -1343,6 +1511,231 @@ function setAuthUser(user) {
   btnAdmin.classList.toggle("hidden", !isAdminUser());
   if (!isAdminUser()) closeUsersModal();
   if (typeof updateProjectModeAvailability === "function") updateProjectModeAvailability();
+}
+
+function onboardingStorageKey(user = currentUser) {
+  const uid = String(user?.id || "").trim();
+  return uid ? `${ONBOARDING_STORAGE_PREFIX}${uid}` : "";
+}
+
+function persistOnboardingCompletionLocally(user = currentUser) {
+  const key = onboardingStorageKey(user);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, "1");
+  } catch {}
+}
+
+function isOnboardingCompletedForUser(user = currentUser) {
+  if (!user) return true;
+  if (String(user.onboarding_completed_at || "").trim()) return true;
+  const key = onboardingStorageKey(user);
+  if (!key) return false;
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function getOnboardingStepTarget(step) {
+  if (!step || typeof step !== "object") return null;
+  if (typeof step.target === "function") return step.target() || null;
+  if (step.selector) return document.querySelector(step.selector);
+  return null;
+}
+
+function isOnboardingTargetVisible(target) {
+  if (!target) return false;
+  const rect = target.getBoundingClientRect();
+  if (!rect || rect.width < 6 || rect.height < 6) return false;
+  if (rect.right <= 0 || rect.bottom <= 0) return false;
+  if (rect.left >= window.innerWidth || rect.top >= window.innerHeight) return false;
+  return true;
+}
+
+function positionOnboardingCard(targetRect, placement = "bottom") {
+  const card = document.getElementById("onboarding-card");
+  if (!card) return;
+  const gap = 14;
+  const pad = 12;
+  const cardRect = card.getBoundingClientRect();
+  let x = (window.innerWidth - cardRect.width) / 2;
+  let y = (window.innerHeight - cardRect.height) / 2;
+
+  if (targetRect) {
+    const pref = String(placement || "bottom");
+    const centerX = targetRect.left + (targetRect.width - cardRect.width) / 2;
+    const centerY = targetRect.top + (targetRect.height - cardRect.height) / 2;
+    if (pref === "top") {
+      x = centerX;
+      y = targetRect.top - cardRect.height - gap;
+      if (y < pad) y = targetRect.bottom + gap;
+    } else if (pref === "left") {
+      x = targetRect.left - cardRect.width - gap;
+      y = centerY;
+      if (x < pad) x = targetRect.right + gap;
+    } else if (pref === "right") {
+      x = targetRect.right + gap;
+      y = centerY;
+      if (x + cardRect.width > window.innerWidth - pad) x = targetRect.left - cardRect.width - gap;
+    } else if (pref === "center") {
+      x = centerX;
+      y = centerY;
+    } else {
+      x = centerX;
+      y = targetRect.bottom + gap;
+      if (y + cardRect.height > window.innerHeight - pad) y = targetRect.top - cardRect.height - gap;
+    }
+  }
+
+  x = Math.max(pad, Math.min(x, window.innerWidth - cardRect.width - pad));
+  y = Math.max(pad, Math.min(y, window.innerHeight - cardRect.height - pad));
+  card.style.left = `${Math.round(x)}px`;
+  card.style.top = `${Math.round(y)}px`;
+}
+
+function renderOnboardingStep() {
+  if (!onboardingState.active) return;
+  const step = ONBOARDING_STEPS[onboardingState.index] || ONBOARDING_STEPS[0];
+  const labelEl = document.getElementById("onboarding-step-label");
+  const titleEl = document.getElementById("onboarding-title");
+  const descEl = document.getElementById("onboarding-desc");
+  const prevBtn = document.getElementById("onboarding-prev");
+  const nextBtn = document.getElementById("onboarding-next");
+  const focus = document.getElementById("onboarding-focus");
+  if (!labelEl || !titleEl || !descEl || !prevBtn || !nextBtn || !focus) return;
+
+  labelEl.textContent = `步骤 ${onboardingState.index + 1} / ${ONBOARDING_STEPS.length}`;
+  titleEl.textContent = step.title || "引导";
+  descEl.textContent = step.description || "";
+  prevBtn.style.visibility = onboardingState.index <= 0 ? "hidden" : "visible";
+  nextBtn.textContent = onboardingState.index >= ONBOARDING_STEPS.length - 1 ? "完成" : "下一步";
+
+  const target = getOnboardingStepTarget(step);
+  let targetRect = null;
+  if (target && isOnboardingTargetVisible(target)) {
+    const firstRect = target.getBoundingClientRect();
+    const nearEdge = firstRect.top < 72 || firstRect.bottom > window.innerHeight - 72;
+    if (nearEdge && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({block: "center", inline: "center"});
+    }
+    targetRect = target.getBoundingClientRect();
+    const pad = 8;
+    const left = Math.max(8, targetRect.left - pad);
+    const top = Math.max(8, targetRect.top - pad);
+    const width = Math.max(16, Math.min(window.innerWidth - left - 8, targetRect.width + pad * 2));
+    const height = Math.max(16, Math.min(window.innerHeight - top - 8, targetRect.height + pad * 2));
+    focus.style.left = `${Math.round(left)}px`;
+    focus.style.top = `${Math.round(top)}px`;
+    focus.style.width = `${Math.round(width)}px`;
+    focus.style.height = `${Math.round(height)}px`;
+    focus.classList.remove("hidden");
+  } else {
+    focus.classList.add("hidden");
+  }
+  positionOnboardingCard(targetRect, step.placement || "bottom");
+}
+
+async function markOnboardingCompleted() {
+  const user = currentUser;
+  if (!user || isOnboardingCompletedForUser(user)) return;
+  persistOnboardingCompletionLocally(user);
+  try {
+    const res = await apiFetch(`${API}/auth/onboarding-complete`, {method: "POST"});
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    if (payload?.user) setAuthUser(payload.user);
+  } catch {}
+}
+
+function closeOnboarding() {
+  onboardingState.active = false;
+  const overlay = document.getElementById("onboarding-overlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  document.body.classList.remove("onboarding-active");
+}
+
+async function finishOnboarding() {
+  closeOnboarding();
+  await markOnboardingCompleted();
+}
+
+function prevOnboardingStep() {
+  if (!onboardingState.active) return;
+  onboardingState.index = Math.max(0, onboardingState.index - 1);
+  renderOnboardingStep();
+}
+
+async function nextOnboardingStep() {
+  if (!onboardingState.active) return;
+  if (onboardingState.index >= ONBOARDING_STEPS.length - 1) {
+    await finishOnboarding();
+    return;
+  }
+  onboardingState.index += 1;
+  renderOnboardingStep();
+}
+
+async function skipOnboarding() {
+  await finishOnboarding();
+}
+
+function bindOnboardingUI() {
+  if (onboardingState.uiBound) return;
+  onboardingState.uiBound = true;
+  const skipBtn = document.getElementById("onboarding-skip");
+  const prevBtn = document.getElementById("onboarding-prev");
+  const nextBtn = document.getElementById("onboarding-next");
+  const mask = document.querySelector("#onboarding-overlay .onboarding-mask");
+  if (skipBtn) skipBtn.addEventListener("click", skipOnboarding);
+  if (prevBtn) prevBtn.addEventListener("click", prevOnboardingStep);
+  if (nextBtn) nextBtn.addEventListener("click", nextOnboardingStep);
+  if (mask) mask.addEventListener("click", skipOnboarding);
+  window.addEventListener("resize", () => {
+    if (onboardingState.active) renderOnboardingStep();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (!onboardingState.active) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      skipOnboarding();
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      prevOnboardingStep();
+      return;
+    }
+    if (event.key === "ArrowRight" || event.key === "Enter") {
+      event.preventDefault();
+      nextOnboardingStep();
+    }
+  });
+}
+
+function startOnboarding(force = false) {
+  bindOnboardingUI();
+  if (!force && isOnboardingCompletedForUser()) return;
+  onboardingState.active = true;
+  onboardingState.index = 0;
+  const overlay = document.getElementById("onboarding-overlay");
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    overlay.setAttribute("aria-hidden", "false");
+  }
+  document.body.classList.add("onboarding-active");
+  renderOnboardingStep();
+}
+
+function maybeStartOnboarding() {
+  if (onboardingState.autoAttempted) return;
+  onboardingState.autoAttempted = true;
+  if (isOnboardingCompletedForUser()) return;
+  setTimeout(() => startOnboarding(false), 160);
 }
 
 async function ensureAuthenticated() {
@@ -4234,6 +4627,7 @@ function connectWS() {
       refreshBoard();
       initAgentOutputs(msg.agent_outputs);
       autoSyncProjects();
+      maybeStartOnboarding();
     } else if (msg.event==="agent_type_created") {
       agentTypes[msg.agent_type.key] = msg.agent_type;
       renderAgentStatusBadges();

@@ -360,7 +360,8 @@ def init_db():
             lock_until    TEXT,
             last_failed_login_at TEXT,
             created_by    TEXT,
-            created_at    TEXT NOT NULL
+            created_at    TEXT NOT NULL,
+            onboarding_completed_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -479,6 +480,7 @@ def init_db():
         ("last_failed_login_at", "TEXT"),
         ("created_by", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("onboarding_completed_at", "TEXT"),
     ])
     _ensure_columns(conn, "sessions", [
         ("user_id", "TEXT NOT NULL DEFAULT ''"),
@@ -1242,6 +1244,7 @@ def _public_user(row) -> dict:
         "max_tasks": int(max_tasks) if max_tasks is not None else None,
         "created_by": data.get("created_by"),
         "created_at": data.get("created_at"),
+        "onboarding_completed_at": data.get("onboarding_completed_at"),
         "password_set": bool(str(data.get("password_hash") or "").strip()),
     }
 
@@ -1282,6 +1285,27 @@ def get_user(user_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     conn.close()
     return _public_user(row) if row else None
+
+
+def mark_user_onboarding_completed(user_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        exists = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+        if not exists:
+            return None
+        conn.execute(
+            """
+            UPDATE users
+               SET onboarding_completed_at=COALESCE(onboarding_completed_at, ?)
+             WHERE id=?
+            """,
+            (_now(), user_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return _public_user(row) if row else None
+    finally:
+        conn.close()
 
 
 def get_user_by_username(username: str) -> dict | None:

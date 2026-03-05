@@ -1752,6 +1752,14 @@ async def get_me(user: dict = Depends(require_user)):
     return user
 
 
+@app.post("/auth/onboarding-complete")
+async def mark_onboarding_complete(user: dict = Depends(require_user)):
+    updated = db.mark_user_onboarding_completed(user["id"])
+    if not updated:
+        raise HTTPException(404, "用户不存在")
+    return {"ok": True, "user": updated}
+
+
 @app.get("/users")
 async def list_users(_admin: dict = Depends(require_admin)):
     return db.list_users()
