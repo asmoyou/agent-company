@@ -20,7 +20,18 @@ from reviewer import ReviewerAgent
 
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8080")
 AGENT_API_TOKEN = str(os.getenv("AGENT_API_TOKEN", "opc-agent-internal")).strip()
-BUILTIN_KEYS = {"developer", "reviewer", "manager", "leader"}
+BUILTIN_KEYS = {
+    "developer",
+    "reviewer",
+    "manager",
+    "leader",
+    "product_manager",
+    "finance_officer",
+    "legal_counsel",
+    "business_manager",
+    "bid_writer",
+    "risk_compliance_officer",
+}
 RELOAD_INTERVAL_SECS = 3
 PROJECT_WORKERS_PER_AGENT = max(1, int(os.getenv("PROJECT_WORKERS_PER_AGENT", "1")))
 PER_AGENT_TYPE_MAX_WORKERS = int(os.getenv("PER_AGENT_TYPE_MAX_WORKERS", "0"))
@@ -131,7 +142,18 @@ def create_agent_instance(key: str, config: dict | None, shutdown_token: Shutdow
         return ManagerAgent(shutdown_token, config)
     if key == "leader":
         return LeaderAgent(shutdown_token, config)
-    return GenericAgent(config or {"key": key}, shutdown_token)
+    cfg = config or {
+        "key": key,
+        "name": key,
+        "description": "",
+        "prompt": "",
+        "poll_statuses": '["todo"]',
+        "next_status": "in_review",
+        "working_status": "in_progress",
+        "cli": "codex",
+        "is_builtin": 1,
+    }
+    return GenericAgent(cfg, shutdown_token)
 
 
 def _normalize_runtime_piece(value: str, fallback: str = "worker") -> str:

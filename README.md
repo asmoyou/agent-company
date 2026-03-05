@@ -26,7 +26,7 @@ OPC-demo 用结构化任务流和结构化交接材料来解决这些问题。
 ## 核心能力
 
 - 一个看板统一管理多种 CLI Agent。
-- 内置 `leader`、`developer`、`reviewer`、`manager`，支持扩展自定义 Agent。
+- 内置 `leader`、`developer`、`reviewer`、`manager`、`product_manager`、`finance_officer`、`legal_counsel`、`business_manager`、`bid_writer`、`risk_compliance_officer`，支持扩展自定义 Agent。
 - 支持配置 Codex / Claude 等终端 CLI。
 - 任务状态机 + 阻塞态恢复，减少“无限重试”和假进度。
 - 结构化 handoff（可审计、可回放、可追责）。
@@ -85,7 +85,7 @@ python3 -c "from server import db; db.init_db(); print(f'initialized: {db.DB_PAT
 ```text
 OPC-demo/
 ├── server/       # FastAPI + SQLite
-├── agents/       # leader / developer / reviewer / manager / generic
+├── agents/       # 内置专用 + generic（自定义角色复用）
 ├── frontend/     # 看板 UI（WebSocket 实时更新）
 └── start.sh
 
