@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>多智能体任务看板</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlightjs-line-numbers.js@2.9.0/dist/highlightjs-line-numbers.min.js"></script>
   <style>
     body { background: #0f172a; color: #e2e8f0; }
     .card { transition: transform 0.15s, box-shadow 0.15s; }
@@ -139,16 +144,57 @@
     ::-webkit-scrollbar-track{background:#1e293b;}
     ::-webkit-scrollbar-thumb{background:#475569;border-radius:3px;}
     .archived-card{opacity:0.45;}
-    /* File browser */
-    #file-panel{transition:transform 0.25s ease;transform:translateX(-100%);}
+    /* Project workspace */
+    #file-panel{transition:transform 0.25s ease;transform:translateX(-100%);width:min(95vw,980px);max-width:100vw;}
     #file-panel.open{transform:translateX(0);}
     #file-overlay{transition:opacity 0.2s;opacity:0;pointer-events:none;}
     #file-overlay.open{opacity:1;pointer-events:auto;}
-    .fb-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;cursor:pointer;transition:background 0.12s;}
-    .fb-item:hover{background:#1e293b;}
-    .fb-item .fb-actions{opacity:0;display:flex;gap:4px;margin-left:auto;}
-    .fb-item:hover .fb-actions{opacity:1;}
+    .fb-shell{display:flex;flex:1 1 auto;min-height:0;}
+    .fb-nav{width:44%;min-width:320px;display:flex;flex-direction:column;border-right:1px solid #334155;min-height:0;}
+    .fb-preview{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0;}
+    .fb-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:7px;cursor:pointer;transition:background 0.12s,border-color 0.12s;border:1px solid transparent;}
+    .fb-item:hover{background:#1e293b;border-color:#334155;}
+    .fb-item-active{background:#1e293b;border-color:#475569;}
+    .fb-item-main{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;}
+    .fb-item-name{color:#e2e8f0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .fb-item-meta{font-size:11px;color:#64748b;white-space:nowrap;}
+    .fb-item-time{font-size:10px;color:#475569;white-space:nowrap;}
+    .fb-item .fb-actions{display:flex;gap:4px;margin-left:8px;flex-shrink:0;opacity:1;}
+    .fb-action-btn{font-size:11px;color:#94a3b8;background:#0b1220;border:1px solid #334155;border-radius:4px;padding:2px 6px;line-height:1.4;transition:all 0.12s;}
+    .fb-action-btn:hover{color:#e2e8f0;border-color:#475569;background:#111827;}
+    .fb-action-btn.danger:hover{color:#fecaca;border-color:#7f1d1d;background:#450a0a;}
+    .fb-preview-body{flex:1;min-height:0;overflow:auto;padding:12px;background:#020617;}
+    .fb-preview-placeholder{height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:12px;text-align:center;padding:12px;}
+    .fb-preview-pre{margin:0;white-space:pre;font-family:'SF Mono','Monaco','Menlo',monospace;font-size:12px;line-height:1.6;color:#d1d5db;}
+    .fb-preview-pre code{display:block;min-height:100%;}
+    .fb-preview-pre .hljs{padding:0;background:transparent;}
+    .fb-preview-pre .hljs-ln{border-collapse:collapse;width:100%;}
+    .fb-preview-pre .hljs-ln-numbers{
+      text-align:right;color:#64748b;border-right:1px solid #1e293b;
+      vertical-align:top;padding-right:10px;padding-left:4px;user-select:none;
+      min-width:42px;
+    }
+    .fb-preview-pre .hljs-ln-code{padding-left:12px;white-space:pre;}
+    .fb-preview-image-wrap{height:100%;display:flex;align-items:center;justify-content:center;padding:8px;}
+    .fb-preview-image{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;box-shadow:0 12px 32px rgba(2,6,23,.55);}
+    .fb-preview-pdf{width:100%;height:100%;border:0;}
+    .fb-preview-media{width:100%;max-height:100%;outline:none;}
+    .fb-markdown{max-width:none;color:#cbd5e1;font-size:13px;line-height:1.65;}
+    .fb-markdown h1,.fb-markdown h2,.fb-markdown h3,.fb-markdown h4{color:#f8fafc;font-weight:700;line-height:1.35;}
+    .fb-markdown h1{font-size:1.5em;}
+    .fb-markdown h2{font-size:1.3em;}
+    .fb-markdown h3{font-size:1.16em;}
+    .fb-markdown table{width:100%;border-collapse:collapse;display:block;overflow:auto;}
+    .fb-markdown th,.fb-markdown td{border:1px solid #334155;padding:4px 8px;}
+    .fb-markdown blockquote{border-left-color:#64748b;color:#cbd5e1;background:rgba(15,23,42,.5);padding:4px 10px;border-radius:0 6px 6px 0;}
+    .fb-markdown pre{background:#0b1220;border-color:#334155;}
     .fb-drop-active{border:2px dashed #6366f1!important;background:rgba(99,102,241,0.08)!important;}
+    @media (max-width:1024px){
+      #file-panel{width:100vw!important;}
+      .fb-shell{flex-direction:column;}
+      .fb-nav{width:100%;min-width:0;max-height:52vh;border-right:0;border-bottom:1px solid #334155;}
+      .fb-preview{min-height:38vh;}
+    }
     .toast-wrap{
       position:fixed;right:14px;top:66px;z-index:60;display:flex;flex-direction:column;gap:8px;
       pointer-events:none;max-width:min(460px,calc(100vw - 28px));
@@ -393,8 +439,8 @@
   <div class="ml-auto flex items-center gap-2 shrink-0">
     <!-- Project path indicator -->
     <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs shrink-0">
-      <span class="text-slate-500 shrink-0">项目目录</span>
-      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-300 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:240px" id="project-path-text" title="点击打开文件浏览器"></button>
+      <span class="text-slate-500 shrink-0">项目办公区</span>
+      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-300 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:240px" id="project-path-text" title="点击打开项目办公区"></button>
       <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制路径">📋</button>
       <span class="text-slate-700">|</span>
     </div>
@@ -559,13 +605,14 @@
   </div>
 </div>
 
-<!-- File Browser Drawer -->
+<!-- Project Workspace Drawer -->
 <div id="file-overlay" onclick="closeFileBrowser()" class="fixed inset-0 bg-black/40 z-10"></div>
-<div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl" style="width:380px;">
+<div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl">
   <!-- Header -->
   <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700 shrink-0">
-    <span class="font-semibold text-white text-sm">📁 文件浏览器</span>
+    <span class="font-semibold text-white text-sm">📁 项目办公区</span>
     <div class="flex items-center gap-1.5">
+      <button onclick="fbDownloadCurrentPath()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="打包下载当前目录">⬇ 当前目录</button>
       <button onclick="fbCreateFolder()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="新建文件夹">+📁</button>
       <label class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition cursor-pointer" title="上传文件">
         ↑ 上传
@@ -574,21 +621,42 @@
       <button onclick="closeFileBrowser()" class="text-slate-400 hover:text-white text-xl ml-1">&times;</button>
     </div>
   </div>
-  <!-- Breadcrumb -->
-  <div class="px-4 py-2 border-b border-slate-700/50 shrink-0 flex items-center gap-1 text-xs text-slate-400 overflow-x-auto" id="fb-breadcrumb" style="white-space:nowrap;">
-    <span class="cursor-pointer hover:text-white" onclick="fbNavigate('')">🏠 root</span>
-  </div>
-  <!-- File list (drop zone) -->
-  <div id="fb-list" class="flex-1 overflow-y-auto p-2"
-    ondragover="event.preventDefault();this.classList.add('fb-drop-active')"
-    ondragleave="this.classList.remove('fb-drop-active')"
-    ondrop="fbDrop(event)">
-    <div class="text-sm text-slate-500 text-center py-8">选择项目后点击 📁 打开</div>
-  </div>
-  <!-- Status bar -->
-  <div class="px-4 py-2 border-t border-slate-700 text-xs text-slate-500 shrink-0 flex justify-between" id="fb-statusbar">
-    <span id="fb-stats"></span>
-    <span id="fb-current-path" class="font-mono text-slate-600">/</span>
+  <div class="fb-shell">
+    <div class="fb-nav">
+      <!-- Breadcrumb -->
+      <div class="px-4 py-2 border-b border-slate-700/50 shrink-0 flex items-center gap-1 text-xs text-slate-400 overflow-x-auto" id="fb-breadcrumb" style="white-space:nowrap;">
+        <span class="cursor-pointer hover:text-white" onclick="fbNavigate('')">🏠 root</span>
+      </div>
+      <!-- File list (drop zone) -->
+      <div id="fb-list" class="flex-1 overflow-y-auto p-2"
+        ondragover="event.preventDefault();this.classList.add('fb-drop-active')"
+        ondragleave="this.classList.remove('fb-drop-active')"
+        ondrop="fbDrop(event)">
+        <div class="text-sm text-slate-500 text-center py-8">选择项目后即可浏览项目办公区</div>
+      </div>
+      <!-- Status bar -->
+      <div class="px-4 py-2 border-t border-slate-700 text-xs text-slate-500 shrink-0 flex justify-between" id="fb-statusbar">
+        <span id="fb-stats"></span>
+        <span id="fb-current-path" class="font-mono text-slate-600">/</span>
+      </div>
+    </div>
+    <div class="fb-preview">
+      <div class="px-3 py-2 border-b border-slate-700 shrink-0 flex items-center justify-between gap-2">
+        <div class="min-w-0">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wide">文件预览</div>
+          <div id="fb-preview-title" class="text-xs text-slate-200 truncate">未选择文件</div>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button id="fb-preview-mode-btn" onclick="fbTogglePreviewMode()" class="fb-action-btn disabled:opacity-40" disabled>源码</button>
+          <button id="fb-preview-download-btn" onclick="fbDownloadPreviewFile()" class="fb-action-btn disabled:opacity-40" disabled>下载</button>
+          <button onclick="fbClearPreview(true)" class="fb-action-btn">清空</button>
+        </div>
+      </div>
+      <div id="fb-preview-meta" class="px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/50 shrink-0">选择文件后可预览</div>
+      <div id="fb-preview-body" class="fb-preview-body">
+        <div class="fb-preview-placeholder">选择文件后可在这里预览内容，支持文本、图片、PDF、音视频。</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -684,7 +752,17 @@
 
     <!-- 交付文件 -->
     <div id="panel-files-wrap">
-      <div class="text-xs text-slate-400 mb-1">交付文件</div>
+      <div class="text-xs text-slate-400 mb-1 flex items-center justify-between gap-2">
+        <span>交付文件</span>
+        <div class="flex items-center gap-1.5">
+          <button id="panel-open-workspace-btn" onclick="openPanelWorkspace()" class="text-[11px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 transition">
+            打开项目办公区
+          </button>
+          <button id="panel-open-artifacts-btn" onclick="openPanelArtifactDirectory()" class="hidden text-[11px] px-2 py-1 rounded bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300 transition">
+            定位交付目录
+          </button>
+        </div>
+      </div>
       <div id="panel-files-location" class="text-xs font-mono rounded px-3 py-2 mb-2 break-all"></div>
       <div id="panel-files-list" class="space-y-1 text-xs"></div>
     </div>
@@ -1788,6 +1866,10 @@ function onProjectChange() {
   updateProjectUI();
   refreshBoard();
   renderTerminals();
+  if (document.getElementById("file-panel").classList.contains("open")) {
+    fbClearPreview(true);
+    fbNavigate("");
+  }
 }
 
 function updateProjectUI() {
@@ -1980,9 +2062,15 @@ function renderCard(task) {
     : "";
 
   return `
-    <div class="card bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
+    <div class="card relative bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
          onclick="openPanel('${task.id}')">
-      <div class="text-[11px] font-medium text-white mb-1 leading-snug"
+      <button type="button"
+        onclick="openTaskWorkspace(event, '${escAttr(task.id)}')"
+        class="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 border border-slate-600 text-slate-300 hover:text-indigo-300 hover:border-indigo-500 transition"
+        title="打开项目办公区">
+        办公区
+      </button>
+      <div class="text-[11px] font-medium text-white mb-1 leading-snug pr-14"
            style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${escHtml(task.title)}</div>
       <div class="flex items-center gap-1 flex-wrap">
         ${priorityBadge}
@@ -2841,6 +2929,43 @@ function initAgentOutputs(data) {
 }
 
 // ── Task Panel ────────────────────────────────────────────────────────────────
+function openTaskWorkspace(event, taskId) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const task = tasks[String(taskId || "")];
+  if (!task) return;
+  const targetProjectId = String(task.project_id || currentProjectId || "");
+  if (!targetProjectId) return;
+  if (targetProjectId !== currentProjectId) {
+    const sel = document.getElementById("project-select");
+    if (sel) {
+      sel.value = targetProjectId;
+      onProjectChange();
+    } else {
+      currentProjectId = targetProjectId;
+      reconnectWSForScope();
+      updateProjectUI();
+      refreshBoard();
+      renderTerminals();
+    }
+  }
+  openFileBrowser("");
+}
+
+function openPanelWorkspace() {
+  const btn = document.getElementById("panel-open-workspace-btn");
+  const path = String(btn?.dataset.path || "").trim();
+  openFileBrowser(path);
+}
+
+function openPanelArtifactDirectory() {
+  const btn = document.getElementById("panel-open-artifacts-btn");
+  const path = String(btn?.dataset.path || "").trim();
+  openFileBrowser(path);
+}
+
 async function openPanel(id) {
   currentTaskId = id;
   const task = tasks[id];
@@ -2988,9 +3113,42 @@ function renderFeedbackHistory(task) {
   wrap.classList.remove("hidden");
 }
 
+function fbCommonPathPrefix(paths) {
+  const cleaned = (paths || [])
+    .map(p => String(p || "").trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean);
+  if (!cleaned.length) return "";
+  let parts = cleaned[0].split("/");
+  for (let i = 1; i < cleaned.length; i++) {
+    const segs = cleaned[i].split("/");
+    let j = 0;
+    while (j < parts.length && j < segs.length && parts[j] === segs[j]) j++;
+    parts = parts.slice(0, j);
+    if (!parts.length) break;
+  }
+  return parts.join("/");
+}
+
+function inferArtifactDirectory(paths) {
+  const dirs = (paths || [])
+    .map(p => String(p || "").trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .map(p => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const nonEmpty = dirs.filter(Boolean);
+  if (!nonEmpty.length) return "";
+  return fbCommonPathPrefix(nonEmpty);
+}
+
 async function loadTaskFiles(taskId, status) {
   const locEl  = document.getElementById("panel-files-location");
   const listEl = document.getElementById("panel-files-list");
+  const workspaceBtn = document.getElementById("panel-open-workspace-btn");
+  const artifactBtn = document.getElementById("panel-open-artifacts-btn");
+  if (workspaceBtn) workspaceBtn.dataset.path = "";
+  if (artifactBtn) {
+    artifactBtn.dataset.path = "";
+    artifactBtn.classList.add("hidden");
+  }
 
   if (status==="todo") {
     locEl.className="text-xs font-mono text-slate-600 bg-slate-900/50 rounded px-3 py-2 mb-2";
@@ -3007,12 +3165,25 @@ async function loadTaskFiles(taskId, status) {
       ? `✅ 已合并到主分支 [${data.branch}]  →  ${data.location}`
       : `📁 ${data.location}  [${data.branch}]`;
 
+    const artifactDir = inferArtifactDirectory(data.files || []);
+    if (artifactBtn && artifactDir) {
+      artifactBtn.dataset.path = artifactDir;
+      artifactBtn.classList.remove("hidden");
+    }
+
     if (data.files?.length) {
-      listEl.innerHTML = data.files.map(f=>
-        `<div class="font-mono flex items-center gap-1.5 py-0.5">
+      listEl.innerHTML = data.files.map(raw => {
+        const filePath = String(raw || "");
+        const parentDir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
+        return `<div class="font-mono flex items-center gap-1.5 py-0.5">
            <span class="text-green-500">+</span>
-           <span class="text-slate-300">${escHtml(f)}</span>
-         </div>`).join("");
+           <span class="text-slate-300 break-all">${escHtml(filePath)}</span>
+           <button type="button" onclick="openFileBrowser('${escAttr(parentDir)}')"
+             class="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition">
+             打开
+           </button>
+         </div>`;
+      }).join("");
     } else {
       listEl.innerHTML="<div class='text-slate-600 text-xs'>暂未检测到文件记录</div>";
     }
@@ -3859,19 +4030,301 @@ function connectWS() {
   };
 }
 
-// ── File Browser ──────────────────────────────────────────────────────────────
+// ── Project Workspace ─────────────────────────────────────────────────────────
 let fbCurrentPath = "";
+let fbPreviewPath = "";
+let fbPreviewBlobUrl = "";
+let fbPreviewRequestToken = 0;
+let fbPreviewMode = "render";
+let fbPreviewTextState = null;
 
-function openFileBrowser() {
+const FB_PREVIEW_TEXT_EXT = new Set([
+  "txt", "md", "markdown", "json", "js", "ts", "jsx", "tsx",
+  "py", "java", "go", "rs", "cpp", "c", "h", "css", "scss",
+  "html", "xml", "yml", "yaml", "toml", "ini", "cfg", "log",
+  "sh", "bash", "zsh", "sql", "csv", "mdx", "vue", "svelte",
+]);
+const FB_PREVIEW_MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
+const FB_PREVIEW_CODE_EXT = new Set([
+  "js", "ts", "jsx", "tsx", "py", "java", "go", "rs", "cpp", "c", "h",
+  "css", "scss", "html", "xml", "yml", "yaml", "toml", "ini", "cfg",
+  "sh", "bash", "zsh", "sql", "json", "vue", "svelte",
+]);
+const FB_PREVIEW_IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]);
+const FB_PREVIEW_AUDIO_EXT = new Set(["mp3", "wav", "ogg", "m4a", "flac"]);
+const FB_PREVIEW_VIDEO_EXT = new Set(["mp4", "webm", "mov", "m4v", "avi", "mkv"]);
+
+function fbFileExt(path) {
+  const name = String(path || "").split("/").pop() || "";
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function openFileBrowser(path = "") {
   if (!currentProjectId) return;
-  document.getElementById("file-panel").classList.add("open");
+  const panel = document.getElementById("file-panel");
+  const wasOpen = panel.classList.contains("open");
+  panel.classList.add("open");
   document.getElementById("file-overlay").classList.add("open");
-  fbNavigate("");
+  if (!wasOpen) fbClearPreview(true);
+  fbNavigate(String(path || "").trim());
 }
 
 function closeFileBrowser() {
   document.getElementById("file-panel").classList.remove("open");
   document.getElementById("file-overlay").classList.remove("open");
+  fbClearPreview(true);
+}
+
+function fbRevokePreviewBlob() {
+  if (!fbPreviewBlobUrl) return;
+  URL.revokeObjectURL(fbPreviewBlobUrl);
+  fbPreviewBlobUrl = "";
+}
+
+function fbClearPreview(resetSelection = false) {
+  fbPreviewRequestToken++;
+  fbRevokePreviewBlob();
+  if (resetSelection) fbPreviewPath = "";
+  fbPreviewMode = "render";
+  fbPreviewTextState = null;
+  const titleEl = document.getElementById("fb-preview-title");
+  const metaEl = document.getElementById("fb-preview-meta");
+  const bodyEl = document.getElementById("fb-preview-body");
+  const downloadBtn = document.getElementById("fb-preview-download-btn");
+  const modeBtn = document.getElementById("fb-preview-mode-btn");
+  if (titleEl) titleEl.textContent = "未选择文件";
+  if (metaEl) metaEl.textContent = "选择文件后可预览";
+  if (bodyEl) bodyEl.innerHTML = '<div class="fb-preview-placeholder">选择文件后可在这里预览内容，支持文本、图片、PDF、音视频。</div>';
+  if (downloadBtn) downloadBtn.disabled = !fbPreviewPath;
+  if (modeBtn) {
+    modeBtn.disabled = true;
+    modeBtn.textContent = "源码";
+  }
+  fbHighlightPreviewedItem();
+}
+
+function fbSetPreviewModeButton(canToggle) {
+  const modeBtn = document.getElementById("fb-preview-mode-btn");
+  if (!modeBtn) return;
+  modeBtn.disabled = !canToggle;
+  modeBtn.textContent = fbPreviewMode === "render" ? "源码" : "渲染";
+}
+
+function fbRenderTextPreview(state, bodyEl, metaEl) {
+  if (!state || !bodyEl || !metaEl) return;
+  const isMd = fbIsMarkdownFile(state.path);
+  const isCode = FB_PREVIEW_CODE_EXT.has(fbFileExt(state.path));
+  if (fbPreviewMode === "source") {
+    fbRenderCodePreview(state.content, state.path, bodyEl, "plaintext");
+    metaEl.textContent = `${state.baseMeta} · 源码模式`;
+  } else if (isMd) {
+    fbRenderMarkdownPreview(state.content, bodyEl);
+    metaEl.textContent = `${state.baseMeta} · Markdown 渲染`;
+  } else if (isCode) {
+    fbRenderCodePreview(state.content, state.path, bodyEl);
+    metaEl.textContent = `${state.baseMeta} · 代码高亮`;
+  } else {
+    fbRenderCodePreview(state.content, state.path, bodyEl, "plaintext");
+    metaEl.textContent = `${state.baseMeta} · 文本预览`;
+  }
+  if (state.truncated) metaEl.textContent = `${metaEl.textContent} · 已截断`;
+}
+
+function fbTogglePreviewMode() {
+  if (!fbPreviewTextState || !fbPreviewPath) return;
+  fbPreviewMode = fbPreviewMode === "render" ? "source" : "render";
+  fbSetPreviewModeButton(true);
+  const bodyEl = document.getElementById("fb-preview-body");
+  const metaEl = document.getElementById("fb-preview-meta");
+  fbRenderTextPreview(fbPreviewTextState, bodyEl, metaEl);
+}
+
+function fbHighlightPreviewedItem() {
+  const rows = document.querySelectorAll("#fb-list .fb-item[data-path]");
+  rows.forEach(row => {
+    row.classList.toggle("fb-item-active", row.dataset.path === fbPreviewPath);
+  });
+}
+
+function fbPreviewKind(path, contentType = "") {
+  const ext = fbFileExt(path);
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.startsWith("image/") || FB_PREVIEW_IMAGE_EXT.has(ext)) return "image";
+  if (ct.includes("pdf") || ext === "pdf") return "pdf";
+  if (ct.startsWith("audio/") || FB_PREVIEW_AUDIO_EXT.has(ext)) return "audio";
+  if (ct.startsWith("video/") || FB_PREVIEW_VIDEO_EXT.has(ext)) return "video";
+  if (ct.startsWith("text/") || ct.includes("json") || ct.includes("javascript") || ct.includes("xml") || FB_PREVIEW_TEXT_EXT.has(ext)) return "text";
+  return "unsupported";
+}
+
+function fbIsMarkdownFile(path) {
+  return FB_PREVIEW_MARKDOWN_EXT.has(fbFileExt(path));
+}
+
+function fbGuessCodeLanguage(path) {
+  const ext = fbFileExt(path);
+  const map = {
+    js: "javascript",
+    ts: "typescript",
+    jsx: "jsx",
+    tsx: "tsx",
+    py: "python",
+    java: "java",
+    go: "go",
+    rs: "rust",
+    cpp: "cpp",
+    c: "c",
+    h: "c",
+    css: "css",
+    scss: "scss",
+    html: "html",
+    xml: "xml",
+    yml: "yaml",
+    yaml: "yaml",
+    toml: "toml",
+    ini: "ini",
+    cfg: "ini",
+    sh: "bash",
+    bash: "bash",
+    zsh: "bash",
+    sql: "sql",
+    json: "json",
+    md: "markdown",
+    markdown: "markdown",
+    mdx: "mdx",
+    vue: "vue",
+    svelte: "svelte",
+  };
+  return map[ext] || "";
+}
+
+function fbApplySyntaxHighlight(rootEl) {
+  if (!rootEl || !window.hljs || typeof window.hljs.highlightElement !== "function") return;
+  rootEl.querySelectorAll("pre code").forEach((node) => {
+    try {
+      if (!node.classList.contains("hljs")) {
+        window.hljs.highlightElement(node);
+      }
+      if (typeof window.hljs.lineNumbersBlock === "function") {
+        window.hljs.lineNumbersBlock(node, { singleLine: true });
+      }
+    } catch (_) {}
+  });
+}
+
+function fbRenderCodePreview(content, path, bodyEl, forceLang = "") {
+  const guess = forceLang || fbGuessCodeLanguage(path) || "";
+  const canUseLang = !!(window.hljs && guess && typeof window.hljs.getLanguage === "function" && window.hljs.getLanguage(guess));
+  const languageClass = canUseLang ? `language-${guess}` : (forceLang === "plaintext" ? "language-plaintext" : "");
+  bodyEl.innerHTML = `<pre class="fb-preview-pre"><code class="${languageClass}">${escHtml(content)}</code></pre>`;
+  fbApplySyntaxHighlight(bodyEl);
+}
+
+function fbRenderMarkdownPreview(content, bodyEl) {
+  if (!window.marked || typeof window.marked.parse !== "function") {
+    fbRenderCodePreview(content, "README.md", bodyEl);
+    return;
+  }
+  let html = "";
+  try {
+    html = window.marked.parse(content, { gfm: true, breaks: false });
+  } catch {
+    fbRenderCodePreview(content, "README.md", bodyEl);
+    return;
+  }
+  if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
+    html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  }
+  bodyEl.innerHTML = `<article class="msg-rich fb-markdown">${html}</article>`;
+  fbApplySyntaxHighlight(bodyEl);
+}
+
+async function fbPreview(path) {
+  if (!currentProjectId || !path) return;
+  const previewPath = String(path);
+  const token = ++fbPreviewRequestToken;
+  fbRevokePreviewBlob();
+  fbPreviewPath = previewPath;
+  fbPreviewMode = "render";
+  fbPreviewTextState = null;
+  fbHighlightPreviewedItem();
+
+  const titleEl = document.getElementById("fb-preview-title");
+  const metaEl = document.getElementById("fb-preview-meta");
+  const bodyEl = document.getElementById("fb-preview-body");
+  const downloadBtn = document.getElementById("fb-preview-download-btn");
+  const fallbackName = previewPath.split("/").pop() || "未命名文件";
+  if (titleEl) titleEl.textContent = fallbackName;
+  if (metaEl) metaEl.textContent = "加载预览中...";
+  if (bodyEl) bodyEl.innerHTML = '<div class="fb-preview-placeholder">正在加载文件内容...</div>';
+  if (downloadBtn) downloadBtn.disabled = false;
+  fbSetPreviewModeButton(false);
+
+  try {
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(previewPath)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    if (token !== fbPreviewRequestToken || fbPreviewPath !== previewPath) return;
+
+    const contentType = res.headers.get("Content-Type") || "";
+    const kind = fbPreviewKind(previewPath, contentType);
+    const sizePart = fbFormatSize(blob.size || 0);
+    const baseMeta = contentType ? `${sizePart} · ${contentType}` : sizePart;
+    if (metaEl) metaEl.textContent = baseMeta;
+    if (downloadBtn) downloadBtn.disabled = false;
+
+    if (kind === "image") {
+      fbPreviewBlobUrl = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<div class="fb-preview-image-wrap"><img src="${fbPreviewBlobUrl}" alt="${escHtmlAttr(fallbackName)}" class="fb-preview-image" /></div>`;
+      if (metaEl) metaEl.textContent = `${baseMeta} · 图片`;
+      return;
+    }
+    if (kind === "pdf") {
+      fbPreviewBlobUrl = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<iframe class="fb-preview-pdf" src="${fbPreviewBlobUrl}" title="${escHtmlAttr(fallbackName)}"></iframe>`;
+      if (metaEl) metaEl.textContent = `${baseMeta} · PDF`;
+      return;
+    }
+    if (kind === "audio") {
+      fbPreviewBlobUrl = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<div class="h-full flex items-center justify-center px-4"><audio class="fb-preview-media" controls src="${fbPreviewBlobUrl}"></audio></div>`;
+      if (metaEl) metaEl.textContent = `${baseMeta} · 音频`;
+      return;
+    }
+    if (kind === "video") {
+      fbPreviewBlobUrl = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<div class="h-full flex items-center justify-center px-2"><video class="fb-preview-media" controls src="${fbPreviewBlobUrl}"></video></div>`;
+      if (metaEl) metaEl.textContent = `${baseMeta} · 视频`;
+      return;
+    }
+    if (kind === "text") {
+      const raw = await blob.text();
+      if (token !== fbPreviewRequestToken || fbPreviewPath !== previewPath) return;
+      const limit = 320000;
+      const truncated = raw.length > limit;
+      const view = truncated ? (raw.slice(0, limit) + "\n\n... 文件较大，预览已截断 ...") : raw;
+      fbPreviewTextState = {
+        path: previewPath,
+        content: view,
+        baseMeta,
+        truncated,
+      };
+      fbSetPreviewModeButton(true);
+      fbRenderTextPreview(fbPreviewTextState, bodyEl, metaEl);
+      return;
+    }
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">该文件类型暂不支持内嵌预览，请点击右上角下载查看。</div>';
+    if (metaEl) metaEl.textContent = `${baseMeta} · 暂不支持`;
+  } catch (err) {
+    if (token !== fbPreviewRequestToken || fbPreviewPath !== previewPath) return;
+    if (metaEl) metaEl.textContent = "预览失败";
+    if (downloadBtn) downloadBtn.disabled = true;
+    fbSetPreviewModeButton(false);
+    if (bodyEl) {
+      bodyEl.innerHTML = `<div class="fb-preview-placeholder text-red-400">预览失败：${escHtml(err.message || "未知错误")}</div>`;
+    }
+  }
 }
 
 async function fbLoadDirectory(path) {
@@ -3885,27 +4338,43 @@ async function fbLoadDirectory(path) {
 
     if (items.length === 0) {
       listEl.innerHTML = '<div class="text-sm text-slate-500 text-center py-8">空目录</div>';
+      document.getElementById("fb-stats").textContent = "0 个文件夹, 0 个文件";
     } else {
       let dirs = 0, files = 0;
       listEl.innerHTML = items.map(item => {
         if (item.is_dir) dirs++; else files++;
         const icon = item.is_dir ? "📁" : fbFileIcon(item.name);
-        const sizeStr = item.is_dir ? "" : fbFormatSize(item.size);
-        return `<div class="fb-item" onclick="${item.is_dir ? `fbNavigate('${escAttr(item.path)}')` : ''}">
-          <span>${icon}</span>
-          <span class="text-sm text-slate-200 truncate" title="${escAttr(item.name)}">${escHtml(item.name)}</span>
-          <span class="text-xs text-slate-600 ml-auto mr-1">${sizeStr}</span>
+        const sizeStr = item.is_dir ? "目录" : fbFormatSize(item.size);
+        const modifiedStr = fbFormatModified(item.modified);
+        const clickAction = item.is_dir
+          ? `fbNavigate('${escAttr(item.path)}')`
+          : `fbPreview('${escAttr(item.path)}')`;
+        return `<div class="fb-item" data-path="${escHtmlAttr(item.path)}" onclick="${clickAction}">
+          <div class="fb-item-main">
+            <span>${icon}</span>
+            <span class="fb-item-name" title="${escHtmlAttr(item.name)}">${escHtml(item.name)}</span>
+          </div>
+          <span class="fb-item-meta">${sizeStr}</span>
+          <span class="fb-item-time">${modifiedStr}</span>
           <div class="fb-actions">
-            ${!item.is_dir ? `<button onclick="event.stopPropagation();fbDownload('${escAttr(item.path)}')" class="text-xs text-slate-400 hover:text-blue-400" title="下载">⬇</button>` : ''}
-            <button onclick="event.stopPropagation();fbDelete('${escAttr(item.path)}','${item.is_dir}')" class="text-xs text-slate-400 hover:text-red-400" title="删除">🗑</button>
+            ${item.is_dir
+              ? `<button type="button" onclick="event.stopPropagation();fbDownload('${escAttr(item.path)}','true')" class="fb-action-btn" title="打包下载该目录">打包</button>`
+              : `<button type="button" onclick="event.stopPropagation();fbPreview('${escAttr(item.path)}')" class="fb-action-btn" title="预览">预览</button>
+                 <button type="button" onclick="event.stopPropagation();fbDownload('${escAttr(item.path)}','false')" class="fb-action-btn" title="下载">下载</button>`}
+            <button type="button" onclick="event.stopPropagation();fbDelete('${escAttr(item.path)}','${item.is_dir}')" class="fb-action-btn danger" title="删除">删除</button>
           </div>
         </div>`;
       }).join("");
       document.getElementById("fb-stats").textContent = `${dirs} 个文件夹, ${files} 个文件`;
     }
     document.getElementById("fb-current-path").textContent = "/" + (path || "");
+    if (fbPreviewPath && !items.some(item => String(item.path) === fbPreviewPath)) {
+      fbClearPreview(true);
+    }
+    fbHighlightPreviewedItem();
   } catch (err) {
     listEl.innerHTML = `<div class="text-sm text-red-400 text-center py-8">加载失败: ${escHtml(err.message)}</div>`;
+    document.getElementById("fb-stats").textContent = "";
   }
 }
 
@@ -3934,14 +4403,36 @@ function fbFilenameFromDisposition(disposition) {
   return plain && plain[1] ? plain[1] : "";
 }
 
-async function fbDownload(path) {
+function fbDownloadPreviewFile() {
+  if (!fbPreviewPath) return;
+  fbDownload(fbPreviewPath, "false");
+}
+
+function fbDownloadCurrentPath() {
+  fbDownload(fbCurrentPath || "", "true");
+}
+
+async function fbDownload(path, isDir = "false") {
   if (!currentProjectId) return;
+  const targetPath = String(path || "");
+  const isDirectory = isDir === "true" || !targetPath;
+  if (isDirectory) {
+    const name = targetPath ? (targetPath.split("/").pop() || targetPath) : "项目根目录";
+    const ok = await uiConfirm(
+      `将打包目录 "${name}" 并下载为 zip，是否继续？`,
+      "打包下载",
+      {okText: "开始下载"}
+    );
+    if (!ok) return;
+  }
   try {
-    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(path)}`);
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(targetPath)}`);
     if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
     const headerName = fbFilenameFromDisposition(res.headers.get("Content-Disposition") || "");
-    const fallbackName = String(path || "").split("/").pop() || "download";
+    const fallbackName = isDirectory
+      ? ((targetPath.split("/").pop() || "workspace") + ".zip")
+      : (targetPath.split("/").pop() || "download");
     const a = document.createElement("a");
     const blobUrl = URL.createObjectURL(blob);
     a.href = blobUrl;
@@ -3950,6 +4441,7 @@ async function fbDownload(path) {
     a.click();
     a.remove();
     URL.revokeObjectURL(blobUrl);
+    showToast("下载已开始", `文件：${a.download}`, "info");
   } catch (err) {
     await uiAlert("下载失败: " + err.message, "操作失败", "error");
   }
@@ -3965,6 +4457,7 @@ async function fbHandleUpload(event) {
       method: "POST", body: fd
     });
     if (!res.ok) throw new Error(await res.text());
+    showToast("上传成功", `已上传 ${fileList.length} 个文件`, "info");
     fbLoadDirectory(fbCurrentPath);
   } catch (err) { await uiAlert("上传失败: " + err.message, "操作失败", "error"); }
   event.target.value = "";
@@ -3981,17 +4474,26 @@ function fbDrop(event) {
     method: "POST", body: fd
   }).then(res => {
     if (!res.ok) throw new Error("Upload failed");
+    showToast("上传成功", `已上传 ${files.length} 个文件`, "info");
     fbLoadDirectory(fbCurrentPath);
   }).catch(err => uiAlert("上传失败: " + err.message, "操作失败", "error"));
 }
 
 async function fbDelete(path, isDir) {
-  const name = path.split("/").pop();
-  const typeStr = isDir === "true" ? "文件夹" : "文件";
-  if (!await uiConfirm(`确定删除${typeStr} "${name}" 吗？`, "删除确认", {okText: "删除"})) return;
+  const targetPath = String(path || "");
+  const name = targetPath.split("/").pop() || targetPath;
+  const isDirectory = isDir === "true";
+  const message = isDirectory
+    ? `确定删除文件夹 "${name}" 吗？\n\n将递归删除其下全部文件，操作不可恢复。`
+    : `确定删除文件 "${name}" 吗？\n\n删除后将无法在项目办公区中查看。`;
+  if (!await uiConfirm(message, "删除确认", {okText: "确认删除"})) return;
   try {
-    const res = await apiFetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`, {method:"DELETE"});
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(targetPath)}`, {method:"DELETE"});
     if (!res.ok) throw new Error(await res.text());
+    if (fbPreviewPath === targetPath || (isDirectory && fbPreviewPath.startsWith(targetPath + "/"))) {
+      fbClearPreview(true);
+    }
+    showToast("删除成功", `${isDirectory ? "文件夹" : "文件"} ${name} 已删除`, "info");
     fbLoadDirectory(fbCurrentPath);
   } catch (err) { await uiAlert("删除失败: " + err.message, "操作失败", "error"); }
 }
@@ -3999,7 +4501,9 @@ async function fbDelete(path, isDir) {
 async function fbCreateFolder() {
   const name = await uiPrompt("输入文件夹名称:", "", "新建文件夹", {okText: "创建", cancelText: "取消", placeholder: "例如 docs"});
   if (!name || !currentProjectId) return;
-  const newPath = fbCurrentPath ? fbCurrentPath + "/" + name : name;
+  const trimmed = String(name).trim();
+  if (!trimmed) return;
+  const newPath = fbCurrentPath ? fbCurrentPath + "/" + trimmed : trimmed;
   try {
     const res = await apiFetch(`${API}/projects/${currentProjectId}/files/mkdir`, {
       method: "POST", headers: {"Content-Type":"application/json"},
@@ -4011,7 +4515,9 @@ async function fbCreateFolder() {
 }
 
 function fbFileIcon(name) {
-  const ext = name.split(".").pop().toLowerCase();
+  const raw = String(name || "");
+  const dot = raw.lastIndexOf(".");
+  const ext = dot >= 0 ? raw.slice(dot + 1).toLowerCase() : "";
   const map = {
     py:"🐍", js:"📜", ts:"📜", jsx:"⚛", tsx:"⚛",
     html:"🌐", css:"🎨", json:"📋", md:"📝", txt:"📄",
@@ -4025,9 +4531,19 @@ function fbFileIcon(name) {
 }
 
 function fbFormatSize(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + " KB";
-  return (bytes/1024/1024).toFixed(1) + " MB";
+  const b = Number(bytes || 0);
+  if (b < 1024) return b + " B";
+  if (b < 1024*1024) return (b/1024).toFixed(1) + " KB";
+  if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + " MB";
+  return (b/1024/1024/1024).toFixed(2) + " GB";
+}
+
+function fbFormatModified(ts) {
+  if (!ts) return "-";
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return "-";
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function escAttr(s) {
@@ -4042,7 +4558,7 @@ function updateProjectPath() {
   if (proj) {
     indicator.classList.remove("hidden");
     textEl.textContent = "📁 " + proj.path;
-    textEl.title = proj.path + " — 点击打开文件浏览器";
+    textEl.title = proj.path + " — 点击打开项目办公区";
   } else {
     indicator.classList.add("hidden");
   }
