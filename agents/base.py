@@ -44,6 +44,7 @@ CODEX_ENABLE_OUTPUT_SCHEMA = os.getenv("CODEX_ENABLE_OUTPUT_SCHEMA", "0").strip(
 CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "3600"))
 CONTEXT_MAX_HANDOFFS = int(os.getenv("CONTEXT_MAX_HANDOFFS", "24"))
 CONTEXT_MAX_UNRESOLVED_FEEDBACK = int(os.getenv("CONTEXT_MAX_UNRESOLVED_FEEDBACK", "12"))
+CONTEXT_MAX_FEEDBACK_TIMELINE = int(os.getenv("CONTEXT_MAX_FEEDBACK_TIMELINE", "18"))
 INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter(?:\s+to\s+continue)?|hit\s+enter(?:\s+to\s+continue)?|"
     r"请按回车(?:继续)?|按下回车键|按回车继续|回车继续)"
@@ -384,9 +385,13 @@ class BaseAgent:
                     "id": str(item.get("id") or "").strip(),
                     "created_at": str(item.get("created_at") or "").strip(),
                     "source": str(item.get("source") or "").strip() or "system",
+                    "status_at": str(item.get("status_at") or "").strip(),
+                    "stage": str(item.get("stage") or "").strip(),
+                    "actor": str(item.get("actor") or "").strip(),
                     "feedback": feedback[:1200],
                     "resolved": bool(item.get("resolved")) or bool(resolved_at),
                     "resolved_at": resolved_at,
+                    "resolved_reason": str(item.get("resolved_reason") or "").strip(),
                 }
             )
         return out
@@ -407,6 +412,22 @@ class BaseAgent:
             used += add
         return kept
 
+    def _fmt_context_time(self, raw) -> str:
+        return str(raw or "").strip().replace("T", " ")[:19]
+
+    def _feedback_meta_line(self, item: dict) -> str:
+        fid = str(item.get("id") or "").strip() or "FB????"
+        stage = str(item.get("stage") or "").strip() or "-"
+        actor = str(item.get("actor") or "").strip() or str(item.get("source") or "").strip() or "-"
+        status_at = str(item.get("status_at") or "").strip()
+        created = self._fmt_context_time(item.get("created_at"))
+        parts = [fid, stage, actor]
+        if status_at:
+            parts.append(f"status={status_at}")
+        if created:
+            parts.append(created)
+        return " | ".join(parts)
+
     def _build_unresolved_feedback_lines(self, task: dict | None) -> list[str]:
         if not task:
             return []
@@ -423,6 +444,9 @@ class BaseAgent:
                     {
                         "id": "FB0000",
                         "source": "legacy",
+                        "stage": "legacy_feedback",
+                        "actor": "legacy",
+                        "status_at": status,
                         "created_at": str(task.get("updated_at") or "").strip(),
                         "feedback": fallback_feedback[:1200],
                     }
@@ -430,17 +454,64 @@ class BaseAgent:
         if not unresolved:
             return []
 
-        lines = ["## 未解决修改意见（必须全部处理）"]
-        for item in unresolved:
-            fid = str(item.get("id") or "").strip() or "FB????"
-            source = str(item.get("source") or "").strip() or "system"
-            created = str(item.get("created_at") or "").strip().replace("T", " ")[:19]
+        latest = unresolved[-1]
+        older = list(reversed(unresolved[:-1]))
+        lines = [
+            "## 本次打回原因（仅处理未解决意见）",
+            "- 只处理下面标记“未解决”的意见；已解决/已替代意见不要重复修改。",
+        ]
+        latest_feedback = str(latest.get("feedback") or "").strip()
+        lines.append(
+            f"- [未解决 | 本次打回 | {self._feedback_meta_line(latest)}] {latest_feedback[:360]}"
+        )
+        for item in older:
             feedback = str(item.get("feedback") or "").strip()
-            meta = f"{fid} | {source}"
-            if created:
-                meta += f" | {created}"
-            lines.append(f"- [{meta}] {feedback[:320]}")
+            if not feedback:
+                continue
+            lines.append(f"- [未解决 | 历史遗留 | {self._feedback_meta_line(item)}] {feedback[:280]}")
         return lines
+
+    def _build_feedback_timeline_lines(self, task: dict | None) -> list[str]:
+        if not task:
+            return []
+        history = self._parse_feedback_history(task.get("review_feedback_history"))
+        if not history:
+            status = str(task.get("status") or "").strip().lower()
+            fallback_feedback = str(task.get("review_feedback") or "").strip()
+            if fallback_feedback and status in {"needs_changes", "blocked"}:
+                history = [
+                    {
+                        "id": "FB0000",
+                        "source": "legacy",
+                        "stage": "legacy_feedback",
+                        "actor": "legacy",
+                        "status_at": status,
+                        "created_at": str(task.get("updated_at") or "").strip(),
+                        "feedback": fallback_feedback[:1200],
+                        "resolved": False,
+                        "resolved_at": "",
+                        "resolved_reason": "",
+                    }
+                ]
+        if not history:
+            return []
+
+        recent = history[-max(1, CONTEXT_MAX_FEEDBACK_TIMELINE) :]
+        lines = ["## 反馈时间线（最近记录）", "- 用于说明历次评审意见与解决情况。"]
+        for item in reversed(recent):
+            feedback = str(item.get("feedback") or "").strip()
+            if not feedback:
+                continue
+            state = "未解决"
+            if bool(item.get("resolved")):
+                reason = str(item.get("resolved_reason") or "").strip()
+                state = f"已解决:{reason or 'done'}"
+            meta = self._feedback_meta_line(item)
+            resolved_at = self._fmt_context_time(item.get("resolved_at"))
+            if resolved_at:
+                meta += f" | resolved={resolved_at}"
+            lines.append(f"- [{state} | {meta}] {feedback[:220]}")
+        return lines if len(lines) > 2 else []
 
     async def build_handoff_context(self, task_id: str, limit: int = 6) -> str:
         budget = max(1200, CONTEXT_MAX_CHARS)
@@ -454,16 +525,47 @@ class BaseAgent:
 
         unresolved_lines = self._build_unresolved_feedback_lines(task)
         if unresolved_lines:
-            unresolved_budget = max(400, int(budget * 0.45))
-            kept = self._fit_recent_lines(list(reversed(unresolved_lines[1:])), unresolved_budget - 40)
-            kept.reverse()
+            used = sum(len(s) + 2 for s in sections)
+            unresolved_budget = min(
+                max(420, int(budget * 0.35)),
+                max(220, budget - used - 40),
+            )
+            unresolved_head = unresolved_lines[:2]
+            unresolved_body = unresolved_lines[2:]
+            body_budget = max(
+                120,
+                unresolved_budget - sum(len(x) + 1 for x in unresolved_head) - 10,
+            )
+            kept = self._fit_recent_lines(unresolved_body, body_budget)
             if kept:
-                sections.append("\n".join([unresolved_lines[0], *kept]))
+                sections.append("\n".join([*unresolved_head, *kept]))
+            elif unresolved_head:
+                sections.append("\n".join(unresolved_head))
+
+        timeline_lines = self._build_feedback_timeline_lines(task)
+        if timeline_lines:
+            used = sum(len(s) + 2 for s in sections)
+            timeline_budget = min(
+                max(360, int(budget * 0.30)),
+                max(220, budget - used - 40),
+            )
+            timeline_head = timeline_lines[:2]
+            timeline_body = timeline_lines[2:]
+            body_budget = max(
+                120,
+                timeline_budget - sum(len(x) + 1 for x in timeline_head) - 10,
+            )
+            kept = self._fit_recent_lines(timeline_body, body_budget)
+            if kept:
+                sections.append("\n".join([*timeline_head, *kept]))
+            elif timeline_head:
+                sections.append("\n".join(timeline_head))
 
         handoffs = await self.get_handoffs(task_id)
         if handoffs:
             newest = []
             for h in reversed(handoffs[-max_handoffs:]):
+                created = self._fmt_context_time(h.get("created_at"))
                 stage = str(h.get("stage") or "").strip() or "-"
                 from_agent = str(h.get("from_agent") or "").strip() or "-"
                 to_agent = str(h.get("to_agent") or "").strip() or "-"
@@ -471,7 +573,7 @@ class BaseAgent:
                 commit_hash = str(h.get("commit_hash") or "").strip()
                 conclusion = str(h.get("conclusion") or "").strip()
                 info = conclusion or summary
-                line = f"- {from_agent} -> {to_agent} [{stage}]"
+                line = f"- {(created or '-')} | {from_agent} -> {to_agent} [{stage}]"
                 if commit_hash:
                     line += f" commit={commit_hash}"
                 if info:
@@ -484,7 +586,7 @@ class BaseAgent:
             kept.reverse()
             if kept:
                 omitted = max(0, len(newest) - len(kept))
-                lines = ["## 历史交接记录（预算内）", *kept]
+                lines = ["## 历史交接记录（仅供时间线参考，非当前待办）", *kept]
                 if omitted:
                     lines.append(f"- ... 已省略更早 {omitted} 条交接")
                 sections.append("\n".join(lines))
