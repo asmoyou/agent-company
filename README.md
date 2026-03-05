@@ -1,4 +1,4 @@
-# OPC-demo
+# LinX协作平台简易演示网络版
 
 Multi-Agent Terminal Orchestrator (MVP)
 
@@ -7,7 +7,7 @@ Multi-Agent Terminal Orchestrator (MVP)
 
 ## 项目演示（快速一览）
 
-![OPC-demo 项目演示截图](assets/demo.webp)
+![LinX协作平台简易演示网络版 项目演示截图](assets/demo.webp)
 
 ## 这是什么
 
@@ -21,7 +21,7 @@ Multi-Agent Terminal Orchestrator (MVP)
 - 开发、审查、合并之间缺少统一状态机，容易“卡住”或重复执行。
 - 跨 worktree 协作时，谁改了什么、基于哪个 commit，很难追踪。
 
-OPC-demo 用结构化任务流和结构化交接材料来解决这些问题。
+LinX协作平台简易演示网络版 用结构化任务流和结构化交接材料来解决这些问题。
 
 ## 核心能力
 
@@ -83,7 +83,7 @@ python3 -c "from server import db; db.init_db(); print(f'initialized: {db.DB_PAT
 ## 项目结构
 
 ```text
-OPC-demo/
+LinX协作平台简易演示网络版/
 ├── server/       # FastAPI + SQLite
 ├── agents/       # 内置专用 + generic（自定义角色复用）
 ├── frontend/     # 看板 UI（WebSocket 实时更新）
@@ -170,11 +170,19 @@ decompose -> decomposed -> (subtasks in todo...)
 | `TASK_WORKSPACE_SWEEP_BATCH_SIZE` | `200` | 每次周期扫描最多处理的终态任务数量 |
 | `TASK_WORKSPACE_CLEANUP_HISTORY_LIMIT` | `300` | 内存中保留的清理事件历史条数（用于运维观测） |
 | `CODEX_ENABLE_OUTPUT_SCHEMA` | `0` | 是否给 Codex 传 `--output-schema`（默认关闭，降低兼容风险） |
+| `SUPPORT_LLM_BASE_URL` | `http://192.168.0.29:6006/v1` | 右下角智能客服使用的 OpenAI-compatible 网关地址 |
+| `SUPPORT_LLM_MODEL` | `Qwen3.5-35B-A3B-FP8` | 智能客服调用的模型名 |
+| `SUPPORT_LLM_API_KEY` | `` | 可选：网关需要 Bearer 鉴权时填写 |
+| `SUPPORT_LLM_POOL_TIMEOUT_SECS` | `45` | 智能客服连接池获取连接的等待超时（秒） |
+| `SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS` | `8` | 智能客服启动自检读取超时（秒） |
+| `SUPPORT_CHAT_INCLUDE_REASONING` | `1` | 是否输出模型 reasoning（默认开启，前端会折叠显示思考过程） |
+| `SUPPORT_CHAT_REASONING_MAX_CHARS` | `6000` | 思考过程最大保留字符数（超出后截断，避免前端渲染过载） |
 
 ### 清理运维接口
 
 - `GET /runtime/workspace-cleanup`：查看清理配置、计数指标、最近清理事件、当前 in-flight 任务
 - `POST /runtime/workspace-cleanup/sweep?max_tasks=100`：管理员手动触发一次终态任务清理扫描
+- `GET /runtime/support-chat/health`：检查智能客服模型网关是否可达、目标模型是否可用
 
 ## 当前边界（MVP）
 

@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import (
     BackgroundTasks,
@@ -34,9 +34,10 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import httpx
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
@@ -80,6 +81,71 @@ STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().l
 }
 PER_PROJECT_MAX_WORKERS = int(os.getenv("PER_PROJECT_MAX_WORKERS", "0"))
 PER_AGENT_TYPE_MAX_WORKERS = int(os.getenv("PER_AGENT_TYPE_MAX_WORKERS", "0"))
+
+
+def _normalize_support_llm_base_url(raw_url: str) -> str:
+    base = str(raw_url or "").strip().rstrip("/")
+    if not base:
+        base = "http://192.168.0.29:6006/v1"
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
+SUPPORT_LLM_BASE_URL = _normalize_support_llm_base_url(
+    str(os.getenv("SUPPORT_LLM_BASE_URL", "http://192.168.0.29:6006/v1"))
+)
+SUPPORT_LLM_MODEL = str(os.getenv("SUPPORT_LLM_MODEL", "Qwen3.5-35B-A3B-FP8")).strip() or "Qwen3.5-35B-A3B-FP8"
+SUPPORT_LLM_API_KEY = str(os.getenv("SUPPORT_LLM_API_KEY", "")).strip()
+SUPPORT_LLM_CONNECT_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_CONNECT_TIMEOUT_SECS", "15")).strip() or "15")
+SUPPORT_LLM_WRITE_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_WRITE_TIMEOUT_SECS", "45")).strip() or "45")
+SUPPORT_LLM_POOL_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_POOL_TIMEOUT_SECS", "45")).strip() or "45")
+SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS", "8")).strip() or "8")
+SUPPORT_CHAT_MAX_MESSAGES = int(str(os.getenv("SUPPORT_CHAT_MAX_MESSAGES", "24")).strip() or "24")
+SUPPORT_CHAT_INCLUDE_REASONING = str(
+    os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "1")
+).strip().lower() in {"1", "true", "yes", "on"}
+SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "6000")).strip() or "6000")
+
+SUPPORT_TUTORIAL = """
+你正在服务的产品是 LinX协作平台简易演示网络版（多 Agent 协作任务看板），以下是平台教程要点：
+- 平台目标：统一管理 Codex/Claude 等终端 Agent，完成任务自动流转。
+- 核心流程：任务分发 -> 开发 -> 审查 -> 合并 -> 验收。
+- 快速上手：
+  1) 先创建/选择项目（每个项目绑定本地 Git 仓库）。
+  2) 点击“+ 创建任务”，填写标题、描述、优先级和依赖。
+  3) 任务默认进入 triage（待评估），后续由 Agent 自动推进。
+  4) 在底部 Agent 终端可查看实时日志，支持筛选和放大。
+  5) 任务详情里可看日志、交接、交付文件、审查意见，并在待验收时执行接受/打回。
+- 关键状态：
+  triage/triaging（评估） -> todo（待开发） -> in_progress（开发中） -> in_review/reviewing（审查） -> approved（通过） -> pending_acceptance（待验收） -> completed（完成）。
+  失败或返工可能进入 blocked（阻塞）、needs_changes（需修改）、cancelled（取消）。
+- 角色说明：
+  leader 负责评估/分解，developer 负责实现，reviewer 负责审查，manager 负责合并。
+- 办公区：
+  可上传、预览、下载项目文件，支持常见文档/代码预览。
+- 使用建议：
+  提问时可描述“当前状态 + 目标状态 + 报错/日志”，你要给出可执行步骤。
+""".strip()
+
+SUPPORT_SYSTEM_PROMPT = (
+    "你是 LinX协作平台简易演示网络版平台的智能客服助手。"
+    "你的首要职责是帮助用户解决平台使用问题、流程问题、状态流转问题和常见报错。"
+    "当用户想闲聊时，你可以自然闲聊，但保持礼貌、简洁。"
+    "如果模型支持 reasoning 字段，可在 reasoning 中输出思考过程；"
+    "reasoning 必须精简（不超过 5 行要点，不要输出“Thinking Process”等模板标题）。"
+    "最终结论必须放在 content 中，不要把思考过程混入最终答复正文。"
+    "最终答复必须使用简体中文。"
+    "如果用户信息不足，先追问关键上下文，再给方案。"
+    "回答尽量结构化，优先给可执行步骤。"
+    "以下是平台教程知识，请优先据此解答：\n"
+    f"{SUPPORT_TUTORIAL}"
+)
+FRONTEND_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 
 def _init_request_access_logger() -> logging.Logger:
@@ -1389,6 +1455,15 @@ class GeneratePromptRequest(BaseModel):
     description: str
     cli: str = "codex"
 
+class SupportChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+class SupportChatRequest(BaseModel):
+    messages: list[SupportChatMessage] = Field(default_factory=list)
+    temperature: float = Field(default=0.5, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1024, ge=64, le=4096)
+
 class MkdirRequest(BaseModel):
     path: str
 
@@ -1677,7 +1752,7 @@ def _serve_frontend_page(*names: str):
     for name in names:
         page = frontend_dir / name
         if page.exists():
-            return FileResponse(str(page))
+            return FileResponse(str(page), headers=FRONTEND_NO_CACHE_HEADERS)
     return {"status": "ok"}
 
 
@@ -2103,16 +2178,16 @@ async def setup_project(project_id: str, user: dict = Depends(require_user)):
     if not (proj_path / ".git").exists():
         rc, out, err = run("git", "init")
         log.append(f"git init: {out or err}")
-        run("git", "config", "user.email", "agent@opc-demo.local")
-        run("git", "config", "user.name", "OPC Agent")
+        run("git", "config", "user.email", "agent@linx.local")
+        run("git", "config", "user.name", "linX Agent")
         rc, out, err = run("git", "checkout", "-b", "main")
         log.append(f"checkout main: {out or err}")
         rc, out, err = run("git", "commit", "--allow-empty", "-m", "chore: init project")
         log.append(f"init commit: {out or err}")
     else:
         # Ensure git user config
-        run("git", "config", "user.email", "agent@opc-demo.local")
-        run("git", "config", "user.name", "OPC Agent")
+        run("git", "config", "user.email", "agent@linx.local")
+        run("git", "config", "user.name", "linX Agent")
         log.append("git repo already exists")
     log.append("shared dev worktree disabled; agents create their own worktrees on demand")
 
@@ -3011,6 +3086,358 @@ async def mkdir_project(project_id: str, body: MkdirRequest, user: dict = Depend
     parent_rel = str(Path(body.path).parent) if str(Path(body.path).parent) != "." else ""
     await manager.broadcast({"event": "files_changed", "project_id": project_id, "path": parent_rel})
     return {"ok": True}
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _support_llm_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if SUPPORT_LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {SUPPORT_LLM_API_KEY}"
+    return headers
+
+
+def _support_llm_stream_headers() -> dict[str, str]:
+    headers = _support_llm_headers()
+    headers["Accept"] = "text/event-stream"
+    return headers
+
+
+def _support_text_from_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        chunks: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                if item:
+                    chunks.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content:
+                chunks.append(content)
+        return "".join(chunks)
+    return ""
+
+
+def _support_extract_stream_piece(payload: dict[str, Any]) -> tuple[str, str, str | None]:
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish_reason: str | None = None
+
+    def _collect_piece(raw: Any, *, reasoning: bool = False):
+        text = _support_text_from_content(raw)
+        if not text:
+            return
+        if reasoning:
+            reasoning_parts.append(text)
+        else:
+            text_parts.append(text)
+
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for row in choices:
+            if not isinstance(row, dict):
+                continue
+            row_finish = str(row.get("finish_reason") or "").strip()
+            if row_finish and finish_reason is None:
+                finish_reason = row_finish
+
+            delta = row.get("delta")
+            if isinstance(delta, dict):
+                _collect_piece(delta.get("content"))
+                _collect_piece(delta.get("text"))
+                _collect_piece(delta.get("reasoning_content"), reasoning=True)
+                _collect_piece(delta.get("reasoning"), reasoning=True)
+
+            message = row.get("message")
+            if isinstance(message, dict):
+                _collect_piece(message.get("content"))
+                _collect_piece(message.get("text"))
+                _collect_piece(message.get("reasoning_content"), reasoning=True)
+                _collect_piece(message.get("reasoning"), reasoning=True)
+
+            _collect_piece(row.get("content"))
+            _collect_piece(row.get("text"))
+            _collect_piece(row.get("reasoning_content"), reasoning=True)
+            _collect_piece(row.get("reasoning"), reasoning=True)
+
+    _collect_piece(payload.get("output_text"))
+    _collect_piece(payload.get("text"))
+    _collect_piece(payload.get("content"))
+
+    text = "".join(text_parts)
+    reasoning = "".join(reasoning_parts)
+    return text, reasoning, finish_reason
+
+
+@app.get("/runtime/support-chat/health")
+async def support_chat_health(user: dict = Depends(require_user)):
+    checked_at = datetime.utcnow().isoformat()
+    started = time.monotonic()
+    models_url = f"{SUPPORT_LLM_BASE_URL}/models"
+    result = {
+        "ok": False,
+        "gateway_ok": False,
+        "model_available": False,
+        "model": SUPPORT_LLM_MODEL,
+        "base_url": SUPPORT_LLM_BASE_URL,
+        "checked_at": checked_at,
+        "latency_ms": 0,
+        "detail": "",
+        "models_count": 0,
+    }
+    try:
+        timeout = httpx.Timeout(
+            connect=SUPPORT_LLM_CONNECT_TIMEOUT_SECS,
+            write=SUPPORT_LLM_WRITE_TIMEOUT_SECS,
+            read=SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS,
+            pool=SUPPORT_LLM_POOL_TIMEOUT_SECS,
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(models_url, headers=_support_llm_headers(), follow_redirects=True)
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+        if resp.status_code >= 400:
+            detail = (resp.text or "").strip()[:320] or f"HTTP {resp.status_code}"
+            result["detail"] = f"模型网关返回异常: {detail}"
+            return result
+        result["gateway_ok"] = True
+        payload = resp.json()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        model_ids: list[str] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                mid = str(row.get("id") or "").strip()
+                if mid:
+                    model_ids.append(mid)
+        result["models_count"] = len(model_ids)
+        result["model_available"] = SUPPORT_LLM_MODEL in set(model_ids)
+        if result["model_available"]:
+            result["ok"] = True
+            result["detail"] = f"模型网关可用，已发现目标模型 {SUPPORT_LLM_MODEL}"
+        else:
+            sample = ", ".join(model_ids[:6]) if model_ids else "无可用模型列表"
+            result["detail"] = f"网关可达，但未发现目标模型 {SUPPORT_LLM_MODEL}（当前: {sample}）"
+        return result
+    except Exception as exc:
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+        result["detail"] = f"模型网关不可达: {exc}"
+        return result
+
+
+@app.post("/support/chat/stream")
+async def support_chat_stream(
+    body: SupportChatRequest,
+    user: dict = Depends(require_user),
+):
+    messages = body.messages[-max(1, SUPPORT_CHAT_MAX_MESSAGES):]
+    normalized_messages: list[dict[str, str]] = []
+    for item in messages:
+        role = str(item.role or "").strip().lower()
+        content = str(item.content or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized_messages.append({"role": role, "content": content[:12000]})
+    if not normalized_messages:
+        raise HTTPException(422, "messages 不能为空")
+
+    upstream_payload: dict = {
+        "model": SUPPORT_LLM_MODEL,
+        "stream": True,
+        "messages": [{"role": "system", "content": SUPPORT_SYSTEM_PROMPT}, *normalized_messages],
+        "temperature": float(body.temperature),
+        "max_tokens": int(body.max_tokens),
+    }
+    upstream_headers = _support_llm_stream_headers()
+    upstream_url = f"{SUPPORT_LLM_BASE_URL}/chat/completions"
+    requester = str(user.get("username") or user.get("id") or "").strip() or "unknown"
+    started_at = time.monotonic()
+    REQUEST_ACCESS_LOG.info(
+        "SUPPORT_CHAT start user=%s messages=%d",
+        requester,
+        len(normalized_messages),
+    )
+
+    async def _event_stream() -> AsyncIterator[str]:
+        assembled_chars = 0
+        reasoning_chars = 0
+        parsed_payload_count = 0
+        finish_reason_emitted = ""
+        saw_done_marker = False
+        saw_reasoning = False
+        try:
+            timeout = httpx.Timeout(
+                connect=SUPPORT_LLM_CONNECT_TIMEOUT_SECS,
+                write=SUPPORT_LLM_WRITE_TIMEOUT_SECS,
+                read=None,
+                pool=SUPPORT_LLM_POOL_TIMEOUT_SECS,
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    upstream_url,
+                    json=upstream_payload,
+                    headers=upstream_headers,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        raw = (await resp.aread()).decode(errors="replace").strip()
+                        detail = raw[:360] if raw else f"HTTP {resp.status_code}"
+                        yield _sse_event("error", {"message": f"客服模型请求失败: {detail}"})
+                        return
+
+                    yield _sse_event("ready", {"model": SUPPORT_LLM_MODEL})
+                    raw_json_lines: list[str] = []
+                    async for raw_line in resp.aiter_lines():
+                        line = str(raw_line or "").strip()
+                        if not line:
+                            continue
+                        if line.startswith(("event:", "id:", "retry:", ":")):
+                            continue
+                        chunk = ""
+                        if line.startswith("data:"):
+                            chunk = line[5:].strip()
+                        elif line.startswith("{") or line.startswith("["):
+                            chunk = line
+                            if len(raw_json_lines) < 500:
+                                raw_json_lines.append(line)
+                        elif raw_json_lines and len(raw_json_lines) < 500:
+                            raw_json_lines.append(line)
+                            continue
+                        else:
+                            continue
+                        if not chunk:
+                            continue
+                        if chunk == "[DONE]":
+                            saw_done_marker = True
+                            finish_reason_emitted = finish_reason_emitted or "stop"
+                            break
+                        try:
+                            payload = json.loads(chunk)
+                        except json.JSONDecodeError:
+                            continue
+                        parsed_payload_count += 1
+                        text, reasoning, finish_reason = _support_extract_stream_piece(payload if isinstance(payload, dict) else {})
+                        if text:
+                            assembled_chars += len(text)
+                            yield _sse_event("delta", {"content": text})
+                        elif reasoning and SUPPORT_CHAT_INCLUDE_REASONING:
+                            saw_reasoning = True
+                            remain = max(0, SUPPORT_CHAT_REASONING_MAX_CHARS - reasoning_chars)
+                            chunk = reasoning[:remain] if remain else ""
+                            if chunk:
+                                reasoning_chars += len(chunk)
+                                yield _sse_event("reasoning", {"content": chunk})
+                        if finish_reason:
+                            finish_reason_emitted = str(finish_reason)
+                            if assembled_chars > 0:
+                                yield _sse_event("finish", {"reason": finish_reason_emitted})
+                                return
+
+                    if assembled_chars == 0 and raw_json_lines:
+                        joined = "\n".join(raw_json_lines).strip()
+                        try:
+                            payload = json.loads(joined)
+                        except json.JSONDecodeError:
+                            payload = None
+                        if isinstance(payload, dict):
+                            text, reasoning, finish_reason = _support_extract_stream_piece(payload)
+                            if text:
+                                assembled_chars += len(text)
+                                yield _sse_event("delta", {"content": text})
+                            elif reasoning and SUPPORT_CHAT_INCLUDE_REASONING:
+                                saw_reasoning = True
+                                remain = max(0, SUPPORT_CHAT_REASONING_MAX_CHARS - reasoning_chars)
+                                chunk = reasoning[:remain] if remain else ""
+                                if chunk:
+                                    reasoning_chars += len(chunk)
+                                    yield _sse_event("reasoning", {"content": chunk})
+                            if finish_reason:
+                                finish_reason_emitted = str(finish_reason)
+                                yield _sse_event("finish", {"reason": finish_reason_emitted})
+                                return
+
+                    # 若流式阶段未拿到正文，做一次非流式补偿：
+                    # - 已出现 reasoning：显式关闭 thinking，避免把思考过程塞进 content
+                    # - 未出现 reasoning：直接补偿，覆盖某些网关“stream 空包”场景
+                    if assembled_chars == 0 and (parsed_payload_count > 0 or saw_done_marker):
+                        fallback_payload = dict(upstream_payload)
+                        fallback_payload["stream"] = False
+                        if saw_reasoning:
+                            chat_template_kwargs = fallback_payload.get("chat_template_kwargs")
+                            if not isinstance(chat_template_kwargs, dict):
+                                chat_template_kwargs = {}
+                            chat_template_kwargs = dict(chat_template_kwargs)
+                            chat_template_kwargs["enable_thinking"] = False
+                            fallback_payload["chat_template_kwargs"] = chat_template_kwargs
+                        fallback_resp = await client.post(
+                            upstream_url,
+                            json=fallback_payload,
+                            headers=_support_llm_headers(),
+                        )
+                        if fallback_resp.status_code < 400:
+                            try:
+                                fallback_json = fallback_resp.json()
+                            except Exception:
+                                fallback_json = {}
+                            if isinstance(fallback_json, dict):
+                                text, reasoning, finish_reason = _support_extract_stream_piece(fallback_json)
+                                if text:
+                                    assembled_chars += len(text)
+                                    yield _sse_event("delta", {"content": text})
+                                elif reasoning and SUPPORT_CHAT_INCLUDE_REASONING:
+                                    saw_reasoning = True
+                                    remain = max(0, SUPPORT_CHAT_REASONING_MAX_CHARS - reasoning_chars)
+                                    chunk = reasoning[:remain] if remain else ""
+                                    if chunk:
+                                        reasoning_chars += len(chunk)
+                                        yield _sse_event("reasoning", {"content": chunk})
+                                if finish_reason:
+                                    finish_reason_emitted = str(finish_reason)
+                                if text:
+                                    yield _sse_event("finish", {"reason": finish_reason_emitted or "stop"})
+                                    return
+
+                    if assembled_chars == 0 and parsed_payload_count > 0 and not saw_reasoning:
+                        reason = finish_reason_emitted or "stop"
+                        yield _sse_event("error", {"message": f"模型返回空内容（finish_reason={reason}）"})
+                        return
+
+                    yield _sse_event("finish", {"reason": "stop"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            yield _sse_event("error", {"message": f"客服服务暂时不可用: {exc}"})
+        finally:
+            duration_ms = (time.monotonic() - started_at) * 1000
+            REQUEST_ACCESS_LOG.info(
+                "SUPPORT_CHAT done user=%s duration_ms=%.2f chars=%d payloads=%d finish=%s",
+                requester,
+                duration_ms,
+                assembled_chars,
+                parsed_payload_count,
+                finish_reason_emitted or "",
+            )
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Agent Types ────────────────────────────────────────────────────────────────
