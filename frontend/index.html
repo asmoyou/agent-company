@@ -569,6 +569,14 @@
       <div id="panel-subtasks-list" class="space-y-1.5"></div>
     </div>
 
+    <!-- 依赖任务 -->
+    <div id="panel-dependencies-wrap">
+      <div class="text-xs text-slate-400 mb-1">依赖任务</div>
+      <div id="panel-dependencies" class="space-y-1 text-xs"></div>
+      <div class="text-xs text-slate-500 mt-2 mb-1">后续任务</div>
+      <div id="panel-dependents" class="space-y-1 text-xs"></div>
+    </div>
+
     <!-- 交付文件 -->
     <div id="panel-files-wrap">
       <div class="text-xs text-slate-400 mb-1">交付文件</div>
@@ -785,6 +793,32 @@
         <label class="block text-xs text-slate-400 mb-1">需求描述 / 验收标准</label>
         <textarea id="task-desc" rows="4" placeholder="详细描述功能要求、输入输出、边界条件..."
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">优先级</label>
+        <select id="task-priority"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+          <option value="0">P0（最高，紧急）</option>
+          <option value="1">P1（高）</option>
+          <option value="2" selected>P2（默认）</option>
+          <option value="3">P3（低）</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">依赖任务（可选，需先完成）</label>
+        <input id="task-dependency-search" type="text" placeholder="搜索任务标题 / 状态 / ID..."
+          oninput="onTaskDependencySearchInput()"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        <div class="mt-1 flex items-center justify-between text-[11px] text-slate-500">
+          <span id="task-dependency-summary">已选 0 项</span>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="selectAllVisibleDependencies()" class="hover:text-slate-300 transition">全选可见</button>
+            <button type="button" onclick="clearTaskDependencySelection()" class="hover:text-slate-300 transition">清空</button>
+          </div>
+        </div>
+        <div id="task-dependencies"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 mt-1 max-h-40 overflow-y-auto"></div>
+        <div class="text-xs text-slate-500 mt-1">可多选复选框，支持输入关键字快速过滤</div>
       </div>
       <div>
         <label class="block text-xs text-slate-400 mb-1">指定执行 Agent（可选）</label>
@@ -1828,12 +1862,46 @@ function isTaskReviewEnabled(task) {
   return !["0", "false", "off", "no"].includes(text);
 }
 
+const PRIORITY_LABEL = {
+  0: "P0",
+  1: "P1",
+  2: "P2",
+  3: "P3",
+};
+
+const PRIORITY_BADGE = {
+  0: "bg-red-900 text-red-300",
+  1: "bg-orange-900 text-orange-300",
+  2: "bg-indigo-900 text-indigo-300",
+  3: "bg-slate-700 text-slate-300",
+};
+
+function taskPriorityValue(task) {
+  const value = Number.parseInt(String(task?.priority ?? "2"), 10);
+  if (Number.isNaN(value)) return 2;
+  return Math.max(0, Math.min(3, value));
+}
+
+function compareTasksForBoard(a, b) {
+  const pa = taskPriorityValue(a);
+  const pb = taskPriorityValue(b);
+  if (pa !== pb) return pa - pb;
+  const au = parseTimestamp(a?.updated_at)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  const bu = parseTimestamp(b?.updated_at)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  if (au !== bu) return au - bu;
+  const ac = parseTimestamp(a?.created_at)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  const bc = parseTimestamp(b?.created_at)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  if (ac !== bc) return ac - bc;
+  return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
 function renderCard(task) {
   const b = STATUS_BADGE[task.status]||"bg-slate-700 text-slate-400";
   const l = STATUS_LABEL[task.status]||task.status;
   const showArchived = document.getElementById("show-archived").checked;
   if (task.archived && !showArchived) return null;
   const reviewEnabled = isTaskReviewEnabled(task);
+  const priority = taskPriorityValue(task);
 
   const feedbackSnippet = ((task.status === "needs_changes" || task.status === "blocked") && task.review_feedback &&
       !task.review_feedback.startsWith("(auto-approved"))
@@ -1865,6 +1933,11 @@ function renderCard(task) {
   // Assigned agent hint
   const agentBadge = task.assigned_agent && !task.assignee
     ? `<span class="text-[10px] text-slate-600">→${escHtml(String(task.assigned_agent).slice(0,10))}</span>` : "";
+  const priorityBadge = `<span class="text-[10px] px-1.5 py-0.5 rounded ${PRIORITY_BADGE[priority] || PRIORITY_BADGE[2]}">${PRIORITY_LABEL[priority] || "P2"}</span>`;
+  const depBlockCount = Number(task.blocking_dependency_count || 0);
+  const dependencyBadge = (task.status === "todo" && depBlockCount > 0)
+    ? `<span class="text-[10px] text-amber-400">依赖中(${depBlockCount})</span>`
+    : "";
 
   return `
     <div class="card bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
@@ -1872,10 +1945,11 @@ function renderCard(task) {
       <div class="text-[11px] font-medium text-white mb-1 leading-snug"
            style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${escHtml(task.title)}</div>
       <div class="flex items-center gap-1 flex-wrap">
+        ${priorityBadge}
         <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
         ${task.assignee?`<span class="text-slate-500 text-[10px]">${escHtml(String(task.assignee).slice(0,10))}</span>`:""}
         ${task.commit_hash?`<span class="text-[10px] font-mono text-green-600">${escHtml(String(task.commit_hash).slice(0,7))}</span>`:""}
-        ${pendingBadge}${reviewBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}
+        ${pendingBadge}${reviewBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}${dependencyBadge}
       </div>
       ${feedbackSnippet}
     </div>`;
@@ -1892,6 +1966,7 @@ function refreshBoard() {
   const counts = {};
   Object.values(tasks)
     .filter(t => t.project_id === currentProjectId)
+    .sort(compareTasksForBoard)
     .forEach(task => {
       const col = document.getElementById(`col-${task.status}`);
       if (!col) return;
@@ -2473,11 +2548,17 @@ async function openPanel(id) {
   const b=STATUS_BADGE[task.status]||"bg-slate-700 text-slate-400";
   const l=STATUS_LABEL[task.status]||task.status;
   const reviewEnabled = isTaskReviewEnabled(task);
+  const priority = taskPriorityValue(task);
+  const depBlocking = Number(task.blocking_dependency_count || 0);
   document.getElementById("panel-status").innerHTML=
-    `<span class="badge px-2 py-1 rounded-full text-xs ${b}">${l}</span>
+    `<span class="badge px-2 py-1 rounded-full text-xs ${PRIORITY_BADGE[priority] || PRIORITY_BADGE[2]}">${PRIORITY_LABEL[priority] || "P2"}</span>
+     <span class="badge px-2 py-1 rounded-full text-xs ${b}">${l}</span>
      <span class="badge px-2 py-1 rounded-full text-xs ${reviewEnabled ? "bg-slate-700 text-slate-300" : "bg-amber-900/40 text-amber-300"}">
        ${reviewEnabled ? "需审查" : "免审查"}
-     </span>`;
+     </span>
+     ${task.status === "todo" && depBlocking > 0
+       ? `<span class="badge px-2 py-1 rounded-full text-xs bg-amber-900/40 text-amber-300">依赖阻塞 ${depBlocking}</span>`
+       : ""}`;
 
   // Acceptance
   const acc = document.getElementById("panel-acceptance");
@@ -2537,6 +2618,7 @@ async function openPanel(id) {
   } else { cmWrap.classList.add("hidden"); }
 
   await loadTaskFiles(id, task.status);
+  await loadTaskDependencies(id);
   await loadTaskHandoffs(id);
 
   await loadTaskLogs(id);
@@ -2630,6 +2712,62 @@ async function loadTaskFiles(taskId, status) {
     locEl.textContent="(无法获取文件信息)";
     locEl.className="text-xs font-mono text-slate-500 bg-slate-900 rounded px-3 py-2 mb-2";
     listEl.innerHTML="";
+  }
+}
+
+async function loadTaskDependencies(taskId) {
+  const depsEl = document.getElementById("panel-dependencies");
+  const dependentsEl = document.getElementById("panel-dependents");
+  if (!depsEl || !dependentsEl) return;
+  depsEl.innerHTML = "<div class='text-slate-500'>加载中...</div>";
+  dependentsEl.innerHTML = "<div class='text-slate-500'>加载中...</div>";
+  try {
+    const res = await apiFetch(`${API}/tasks/${taskId}/dependencies`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const deps = Array.isArray(data.dependencies) ? data.dependencies : [];
+    const dependents = Array.isArray(data.dependents) ? data.dependents : [];
+    if (!deps.length) {
+      depsEl.innerHTML = "<div class='text-slate-500'>无依赖任务</div>";
+    } else {
+      depsEl.innerHTML = deps.map(dep => {
+        const depId = String(dep.depends_on_task_id || "").trim();
+        const depTask = tasks[depId];
+        const title = String(dep.depends_on_title || depTask?.title || depId || "-");
+        const status = String(dep.depends_on_status || depTask?.status || "-");
+        const state = String(dep.required_state || "completed");
+        const satisfied = !!dep.satisfied;
+        const action = depTask ? `onclick="openPanel('${escAttr(depId)}')"` : "";
+        return `<button type="button" ${action}
+          class="w-full text-left rounded border px-2 py-1 transition ${satisfied ? "border-emerald-900/40 bg-emerald-900/10 hover:bg-emerald-900/20" : "border-amber-900/40 bg-amber-900/10 hover:bg-amber-900/20"}">
+            <div class="text-slate-200">${escHtml(title)}</div>
+            <div class="text-[11px] ${satisfied ? "text-emerald-400" : "text-amber-400"}">
+              ${satisfied ? "已满足" : "未满足"} · 规则=${escHtml(state)} · 当前=${escHtml(status)}
+            </div>
+          </button>`;
+      }).join("");
+    }
+    if (!dependents.length) {
+      dependentsEl.innerHTML = "<div class='text-slate-500'>无后续任务</div>";
+    } else {
+      dependentsEl.innerHTML = dependents.map(item => {
+        const id = String(item.id || "").trim();
+        const task = tasks[id];
+        const title = String(item.title || task?.title || id || "-");
+        const status = String(item.status || task?.status || "-");
+        const p = taskPriorityValue(item);
+        const action = task ? `onclick="openPanel('${escAttr(id)}')"` : "";
+        const blocked = Number(item.blocking_dependency_count || 0);
+        return `<button type="button" ${action}
+          class="w-full text-left rounded border border-slate-700 bg-slate-900/30 hover:bg-slate-900/50 px-2 py-1 transition">
+            <div class="text-slate-200">${escHtml(title)}</div>
+            <div class="text-[11px] text-slate-500">${PRIORITY_LABEL[p] || "P2"} · ${escHtml(status)}${blocked > 0 ? ` · 依赖阻塞(${blocked})` : ""}</div>
+          </button>`;
+      }).join("");
+    }
+  } catch {
+    depsEl.innerHTML = "<div class='text-slate-500'>无法加载依赖信息</div>";
+    dependentsEl.innerHTML = "<div class='text-slate-500'>无法加载后续任务</div>";
   }
 }
 
@@ -3058,11 +3196,122 @@ async function autoSyncProjects() {
 }
 
 // ── Create Task Modal ─────────────────────────────────────────────────────────
+let taskDependencySelected = new Set();
+let taskDependencySearchQuery = "";
+
+function updateTaskDependencySummary(visibleCount = 0, totalCount = 0) {
+  const el = document.getElementById("task-dependency-summary");
+  if (!el) return;
+  const selected = taskDependencySelected.size;
+  if (taskDependencySearchQuery.trim()) {
+    el.textContent = `已选 ${selected} 项 · 匹配 ${visibleCount}/${totalCount}`;
+    return;
+  }
+  el.textContent = `已选 ${selected} 项 · 共 ${totalCount} 项`;
+}
+
+function toggleTaskDependency(depId, checked) {
+  const id = String(depId || "").trim();
+  if (!id) return;
+  if (checked) taskDependencySelected.add(id);
+  else taskDependencySelected.delete(id);
+  const all = Object.values(tasks)
+    .filter(t => t.project_id === currentProjectId)
+    .filter(t => !t.archived)
+    .filter(t => t.status !== "cancelled");
+  const visible = document.querySelectorAll('#task-dependencies input[data-dep-id]').length;
+  updateTaskDependencySummary(visible, all.length);
+}
+
+function onTaskDependencySearchInput() {
+  const input = document.getElementById("task-dependency-search");
+  taskDependencySearchQuery = String(input?.value || "");
+  renderTaskDependencyOptions();
+}
+
+function clearTaskDependencySelection() {
+  taskDependencySelected.clear();
+  renderTaskDependencyOptions();
+}
+
+function selectAllVisibleDependencies() {
+  document.querySelectorAll('#task-dependencies input[data-dep-id]').forEach((cb) => {
+    const depId = String(cb.getAttribute("data-dep-id") || "").trim();
+    if (!depId) return;
+    cb.checked = true;
+    taskDependencySelected.add(depId);
+  });
+  const all = Object.values(tasks)
+    .filter(t => t.project_id === currentProjectId)
+    .filter(t => !t.archived)
+    .filter(t => t.status !== "cancelled");
+  const visible = document.querySelectorAll('#task-dependencies input[data-dep-id]').length;
+  updateTaskDependencySummary(visible, all.length);
+}
+
+function renderTaskDependencyOptions() {
+  const box = document.getElementById("task-dependencies");
+  if (!box) return;
+  const candidates = Object.values(tasks)
+    .filter(t => t.project_id === currentProjectId)
+    .filter(t => !t.archived)
+    .filter(t => t.status !== "cancelled")
+    .sort(compareTasksForBoard);
+  const candidateIds = new Set(candidates.map(t => String(t.id || "").trim()).filter(Boolean));
+  taskDependencySelected = new Set(
+    Array.from(taskDependencySelected).filter(id => candidateIds.has(id))
+  );
+
+  const q = taskDependencySearchQuery.trim().toLowerCase();
+  const filtered = candidates.filter((t) => {
+    if (!q) return true;
+    const label = STATUS_LABEL[t.status] || t.status;
+    const haystack = `${t.title || ""} ${label} ${t.id || ""}`.toLowerCase();
+    return haystack.includes(q);
+  });
+
+  if (!candidates.length) {
+    box.innerHTML = "<div class='text-slate-500 px-1 py-2'>(当前项目暂无可选依赖任务)</div>";
+    updateTaskDependencySummary(0, 0);
+    return;
+  }
+  if (!filtered.length) {
+    box.innerHTML = "<div class='text-slate-500 px-1 py-2'>未找到匹配任务</div>";
+    updateTaskDependencySummary(0, candidates.length);
+    return;
+  }
+
+  box.innerHTML = filtered.map((t) => {
+    const tid = String(t.id || "").trim();
+    const checked = taskDependencySelected.has(tid) ? " checked" : "";
+    const p = taskPriorityValue(t);
+    const label = STATUS_LABEL[t.status] || t.status;
+    const title = String(t.title || "").replace(/\s+/g, " ").slice(0, 120);
+    return `<label class="flex items-start gap-2 px-1.5 py-1 rounded hover:bg-slate-600/40 cursor-pointer">
+      <input type="checkbox" data-dep-id="${escAttr(tid)}"${checked}
+        onchange="toggleTaskDependency('${escAttr(tid)}', this.checked)"
+        class="mt-0.5 h-3.5 w-3.5 rounded border-slate-500 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0" />
+      <span class="min-w-0">
+        <span class="block text-slate-100">${escHtml(title)}</span>
+        <span class="block text-[10px] text-slate-500">${PRIORITY_LABEL[p] || "P2"} · ${escHtml(label)} · ${escHtml(tid.slice(0, 12))}</span>
+      </span>
+    </label>`;
+  }).join("");
+  updateTaskDependencySummary(filtered.length, candidates.length);
+}
+
 function openCreateModal() {
   if (!currentProjectId) return;
   const proj = projects[currentProjectId];
   document.getElementById("modal-task-project").textContent = proj?`@ ${proj.name}`:"";
   renderTaskAssigneeOptions();
+  taskDependencySelected = new Set();
+  taskDependencySearchQuery = "";
+  const depSearch = document.getElementById("task-dependency-search");
+  if (depSearch) depSearch.value = "";
+  renderTaskDependencyOptions();
+  const prioritySel = document.getElementById("task-priority");
+  if (prioritySel) prioritySel.value = "2";
   const reviewToggle = document.getElementById("task-review-enabled");
   if (reviewToggle) reviewToggle.checked = true;
   document.getElementById("modal-task").classList.remove("hidden");
@@ -3072,6 +3321,14 @@ async function submitTask(e) {
   e.preventDefault();
   const title=document.getElementById("task-title").value.trim();
   const desc =document.getElementById("task-desc").value.trim();
+  const priority = Number.parseInt(document.getElementById("task-priority").value || "2", 10);
+  const dependencies = Array.from(taskDependencySelected)
+    .map(depId => String(depId || "").trim())
+    .filter(Boolean)
+    .map(depId => ({
+      depends_on_task_id: depId,
+      required_state: "completed",
+    }));
   const assignedAgent = document.getElementById("task-assigned-agent").value || null;
   const reviewEnabled = document.getElementById("task-review-enabled").checked !== false;
   if (!title) return;
@@ -3082,6 +3339,8 @@ async function submitTask(e) {
         title,
         description:desc,
         project_id:currentProjectId,
+        priority: Number.isFinite(priority) ? Math.max(0, Math.min(3, priority)) : 2,
+        dependencies,
         assigned_agent: assignedAgent,
         review_enabled: reviewEnabled,
       }),
@@ -3089,6 +3348,12 @@ async function submitTask(e) {
     if (!res.ok) throw new Error(await res.text());
     document.getElementById("task-title").value="";
     document.getElementById("task-desc").value="";
+    document.getElementById("task-priority").value="2";
+    taskDependencySelected = new Set();
+    taskDependencySearchQuery = "";
+    const depSearch = document.getElementById("task-dependency-search");
+    if (depSearch) depSearch.value = "";
+    renderTaskDependencyOptions();
     document.getElementById("task-assigned-agent").value="";
     document.getElementById("task-review-enabled").checked = true;
     closeCreateModal();
@@ -3237,6 +3502,9 @@ function connectWS() {
     } else if (msg.event==="task_created"||msg.event==="task_updated") {
       tasks[msg.task.id]=msg.task;
       refreshBoard();
+      if (!document.getElementById("modal-task").classList.contains("hidden")) {
+        renderTaskDependencyOptions();
+      }
       if (currentTaskId===msg.task.id) openPanel(msg.task.id);
       // If current panel shows parent of updated task, refresh subtask list
       if (msg.task.parent_task_id && currentTaskId===msg.task.parent_task_id) {

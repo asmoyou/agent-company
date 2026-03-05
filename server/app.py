@@ -1219,6 +1219,15 @@ class UserUpdateRequest(BaseModel):
     role: Literal["admin", "user"] | None = None
 
 
+class TaskDependencyItem(BaseModel):
+    depends_on_task_id: str
+    required_state: Literal["completed", "approved"] = "completed"
+
+
+class TaskDependenciesUpdate(BaseModel):
+    dependencies: list[TaskDependencyItem] = Field(default_factory=list)
+
+
 class TaskCreate(BaseModel):
     title: str
     description: str = ""
@@ -1227,6 +1236,8 @@ class TaskCreate(BaseModel):
     subtask_order: int | None = None
     assigned_agent: str | None = None
     dev_agent: str | None = None
+    priority: int = Field(default=2, ge=0, le=3)
+    dependencies: list[TaskDependencyItem] = Field(default_factory=list)
     review_enabled: bool = True
     status: str = "triage"   # default: all new tasks enter triage first
 
@@ -1239,6 +1250,7 @@ class TaskUpdate(BaseModel):
     review_enabled: bool | None = None
     review_feedback: str | None = None
     commit_hash: str | None = None
+    priority: int | None = Field(default=None, ge=0, le=3)
     archived: int | None = None
     feedback_source: str | None = None
     feedback_stage: str | None = None
@@ -2041,17 +2053,27 @@ async def create_task(body: TaskCreate, principal: dict = Depends(require_agent_
         if direct_todo and not dev_agent:
             dev_agent = assigned_agent
 
-    task = db.create_task(
-        title=body.title,
-        description=body.description,
-        project_id=body.project_id,
-        parent_task_id=body.parent_task_id,
-        assigned_agent=assigned_agent,
-        dev_agent=dev_agent,
-        status=effective_status,
-        subtask_order=body.subtask_order,
-        review_enabled=bool(body.review_enabled),
-    )
+    dependency_payload = [item.model_dump() for item in (body.dependencies or [])]
+    created_by = principal.get("id") if is_user else principal.get("username")
+    try:
+        task = db.create_task(
+            title=body.title,
+            description=body.description,
+            project_id=body.project_id,
+            parent_task_id=body.parent_task_id,
+            assigned_agent=assigned_agent,
+            dev_agent=dev_agent,
+            status=effective_status,
+            subtask_order=body.subtask_order,
+            priority=body.priority,
+            dependencies=dependency_payload,
+            review_enabled=bool(body.review_enabled),
+            created_by=str(created_by or "").strip() or None,
+        )
+    except db.DependencyCycleError as e:
+        raise HTTPException(409, str(e))
+    except db.DependencyValidationError as e:
+        raise HTTPException(422, str(e))
     await manager.broadcast({"event": "task_created", "task": task})
     return task
 
@@ -2401,6 +2423,70 @@ async def get_subtasks(task_id: str):
     if not task:
         raise HTTPException(404, "Task not found")
     return db.list_subtasks(task_id)
+
+
+@app.get("/tasks/{task_id}/dependencies")
+async def get_task_dependencies(task_id: str, user: dict = Depends(require_user)):
+    require_task_access(task_id, user)
+    dependencies = db.list_task_dependencies(task_id)
+    if dependencies is None:
+        raise HTTPException(404, "Task not found")
+    dependents = db.list_task_dependents(task_id) or []
+    compact_dependents = [
+        {
+            "id": t.get("id"),
+            "project_id": t.get("project_id"),
+            "title": t.get("title"),
+            "status": t.get("status"),
+            "priority": t.get("priority"),
+            "ready": t.get("ready"),
+            "blocking_dependency_count": t.get("blocking_dependency_count"),
+        }
+        for t in dependents
+    ]
+    return {
+        "dependencies": dependencies,
+        "dependents": compact_dependents,
+    }
+
+
+@app.put("/tasks/{task_id}/dependencies")
+async def replace_task_dependencies(
+    task_id: str,
+    body: TaskDependenciesUpdate,
+    user: dict = Depends(require_user),
+):
+    require_task_access(task_id, user)
+    is_admin = _is_admin(user)
+    if not is_admin:
+        for dep in body.dependencies:
+            dep_id = str(dep.depends_on_task_id or "").strip()
+            if not dep_id:
+                raise HTTPException(422, "depends_on_task_id 不能为空")
+            visible = db.get_task(dep_id, user_id=user["id"], is_admin=False)
+            if not visible:
+                raise HTTPException(404, f"Task not found: {dep_id}")
+
+    payload = [item.model_dump() for item in body.dependencies]
+    try:
+        dependencies = db.replace_task_dependencies(
+            task_id,
+            payload,
+            created_by=user.get("id"),
+        )
+    except db.DependencyCycleError as e:
+        raise HTTPException(409, str(e))
+    except db.DependencyValidationError as e:
+        raise HTTPException(422, str(e))
+    if dependencies is None:
+        raise HTTPException(404, "Task not found")
+
+    task = db.get_task(task_id, user_id=user["id"], is_admin=is_admin)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    await manager.broadcast({"event": "task_updated", "task": task})
+    return {"task": task, "dependencies": dependencies}
+
 
 @app.get("/tasks/{task_id}/logs")
 async def get_logs(task_id: str, user: dict = Depends(require_user)):
