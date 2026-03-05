@@ -162,7 +162,98 @@
     .toast.warning{border-left-color:#f59e0b;}
     .toast.info{border-left-color:#38bdf8;}
     .toast .t-title{font-size:12px;font-weight:600;color:#e2e8f0;margin-bottom:2px;}
-    .toast .t-msg{font-size:12px;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;}
+    .toast .t-msg{font-size:12px;color:#cbd5e1;word-break:break-word;}
+    .msg-rich{line-height:1.58;white-space:normal;word-break:break-word;}
+    .msg-rich > *:first-child{margin-top:0;}
+    .msg-rich > *:last-child{margin-bottom:0;}
+    .msg-rich p{margin:6px 0;}
+    .msg-rich ul,.msg-rich ol{margin:6px 0;padding-left:20px;}
+    .msg-rich li{margin:2px 0;}
+    .msg-rich blockquote{
+      margin:7px 0;padding:2px 0 2px 10px;border-left:2px solid #475569;
+      color:#94a3b8;
+    }
+    .msg-rich code{
+      font-family:'SF Mono','Monaco','Menlo',monospace;
+      font-size:0.92em;
+      background:rgba(30,41,59,.65);
+      border:1px solid rgba(71,85,105,.55);
+      border-radius:4px;
+      padding:1px 4px;
+      color:#dbeafe;
+    }
+    .msg-rich pre{
+      margin:7px 0;
+      background:#0b1220;
+      border:1px solid #334155;
+      border-radius:6px;
+      padding:8px 10px;
+      overflow:auto;
+    }
+    .msg-rich pre code{
+      border:0;
+      background:transparent;
+      padding:0;
+      color:inherit;
+      font-size:12px;
+      line-height:1.55;
+      white-space:pre;
+    }
+    .msg-rich a{
+      color:#60a5fa;
+      text-decoration:underline;
+      text-underline-offset:2px;
+    }
+    .msg-rich a:hover{color:#93c5fd;}
+    .msg-dialog-overlay{
+      position:fixed;inset:0;z-index:90;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(2,6,23,.72);backdrop-filter:blur(2px);
+      padding:16px;
+    }
+    .msg-dialog{
+      width:min(620px,calc(100vw - 32px));
+      background:#0f172a;border:1px solid #334155;border-radius:12px;
+      box-shadow:0 20px 50px rgba(2,6,23,.65);
+      display:flex;flex-direction:column;max-height:min(78vh,760px);
+    }
+    .msg-dialog-head{
+      display:flex;align-items:center;justify-content:space-between;
+      gap:10px;padding:12px 14px;border-bottom:1px solid rgba(51,65,85,.8);
+    }
+    .msg-dialog-title{font-size:14px;font-weight:600;color:#e2e8f0;}
+    .msg-dialog-close{
+      border:0;background:transparent;color:#94a3b8;cursor:pointer;
+      font-size:20px;line-height:1;padding:0 3px;
+    }
+    .msg-dialog-close:hover{color:#e2e8f0;}
+    .msg-dialog-body{
+      padding:12px 14px;overflow:auto;flex:1 1 auto;
+      color:#cbd5e1;font-size:13px;
+    }
+    .msg-dialog-input-wrap{
+      border-top:1px solid rgba(51,65,85,.65);
+      padding:10px 14px 0;
+    }
+    .msg-dialog-input{
+      width:100%;background:#0b1220;border:1px solid #334155;border-radius:8px;
+      color:#e2e8f0;padding:8px 10px;font-size:13px;outline:none;
+      min-height:72px;resize:vertical;line-height:1.45;
+    }
+    .msg-dialog-input:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.2);}
+    .msg-dialog-hint{margin-top:6px;font-size:11px;color:#64748b;}
+    .msg-dialog-actions{
+      display:flex;justify-content:flex-end;gap:8px;
+      padding:12px 14px;border-top:1px solid rgba(51,65,85,.8);
+    }
+    .msg-btn{
+      border:1px solid #334155;background:#1e293b;color:#cbd5e1;
+      border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;
+      transition:border-color .12s,color .12s,background .12s;
+    }
+    .msg-btn:hover{color:#e2e8f0;border-color:#475569;}
+    .msg-btn.primary{background:#4f46e5;border-color:#4338ca;color:#eef2ff;}
+    .msg-btn.primary:hover{background:#6366f1;border-color:#4f46e5;}
     @keyframes toast-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
     .lane {
       width: var(--lane-normal-width, 12rem);
@@ -336,6 +427,23 @@
   </div>
 </header>
 <div id="toast-wrap" class="toast-wrap"></div>
+<div id="msg-dialog-overlay" class="msg-dialog-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="msg-dialog">
+    <div class="msg-dialog-head">
+      <div id="msg-dialog-title" class="msg-dialog-title">提示</div>
+      <button id="msg-dialog-close" type="button" class="msg-dialog-close" aria-label="关闭">&times;</button>
+    </div>
+    <div id="msg-dialog-body" class="msg-dialog-body msg-rich"></div>
+    <div id="msg-dialog-input-wrap" class="msg-dialog-input-wrap hidden">
+      <textarea id="msg-dialog-input" class="msg-dialog-input"></textarea>
+      <div id="msg-dialog-hint" class="msg-dialog-hint"></div>
+    </div>
+    <div class="msg-dialog-actions">
+      <button id="msg-dialog-cancel" type="button" class="msg-btn">取消</button>
+      <button id="msg-dialog-ok" type="button" class="msg-btn primary">确定</button>
+    </div>
+  </div>
+</div>
 
 <!-- Board -->
 <main class="flex-1 p-3 overflow-x-auto">
@@ -499,7 +607,7 @@
 
     <div>
       <div class="text-xs text-slate-400 mb-1">需求描述</div>
-      <div id="panel-desc" class="text-sm text-slate-300 whitespace-pre-wrap bg-slate-900/50 rounded p-3"></div>
+      <div id="panel-desc" class="text-sm text-slate-300 msg-rich bg-slate-900/50 rounded p-3"></div>
     </div>
 
     <!-- 用户验收区 (pending_acceptance only) -->
@@ -584,7 +692,7 @@
     <!-- 审查意见 -->
     <div id="panel-feedback-wrap" class="hidden">
       <div class="text-xs text-slate-400 mb-1">审查意见</div>
-      <div id="panel-feedback" class="text-sm rounded p-3 whitespace-pre-wrap border"></div>
+      <div id="panel-feedback" class="text-sm msg-rich rounded p-3 border"></div>
     </div>
 
     <!-- 修改意见历史 -->
@@ -1136,12 +1244,12 @@ async function submitEditUser(e) {
       "任务上限"
     );
   } catch (err) {
-    alert(err.message);
+    await uiAlert(err.message, "输入有误", "warning");
     return;
   }
 
   if (!username) {
-    alert("用户名不能为空");
+    await uiAlert("用户名不能为空", "输入有误", "warning");
     return;
   }
 
@@ -1173,14 +1281,14 @@ async function submitEditUser(e) {
       if (me.ok) setAuthUser(await me.json());
     }
   } catch (err) {
-    alert("更新用户失败: " + err.message);
+    await uiAlert("更新用户失败: " + err.message, "操作失败", "error");
   }
 }
 
 async function deleteUser(userId) {
   const user = findUserById(userId);
   if (!user) return;
-  if (!confirm(`确认删除用户 ${user.username} 吗？`)) return;
+  if (!await uiConfirm(`确认删除用户 ${user.username} 吗？`, "删除用户", {okText: "删除"})) return;
   try {
     const res = await apiFetch(`${API}/users/${encodeURIComponent(userId)}`, {
       method: "DELETE",
@@ -1188,7 +1296,7 @@ async function deleteUser(userId) {
     if (!res.ok) throw new Error(await res.text());
     await loadUsers();
   } catch (err) {
-    alert("删除用户失败: " + err.message);
+    await uiAlert("删除用户失败: " + err.message, "操作失败", "error");
   }
 }
 
@@ -1206,7 +1314,7 @@ async function submitCreateUser(e) {
     maxProjects = parseQuotaInput(maxProjectsInput.value, "项目上限");
     maxTasks = parseQuotaInput(maxTasksInput.value, "任务上限");
   } catch (err) {
-    alert(err.message);
+    await uiAlert(err.message, "输入有误", "warning");
     return;
   }
   if (!username || !password) return;
@@ -1226,7 +1334,7 @@ async function submitCreateUser(e) {
     maxTasksInput.value = "";
     await loadUsers();
   } catch (err) {
-    alert("创建用户失败: " + err.message);
+    await uiAlert("创建用户失败: " + err.message, "操作失败", "error");
   }
 }
 
@@ -1537,7 +1645,7 @@ function setAgentFormReadonly(readonly) {
 
 function openAgentForm(key) {
   if (!isAdminUser() && !key) {
-    alert("普通用户仅可查看 Agent 配置");
+    uiAlert("普通用户仅可查看 Agent 配置", "无权限", "warning");
     return;
   }
   _editingAgentKey = key;
@@ -1578,10 +1686,10 @@ function closeAgentForm() {
 }
 
 async function aiGeneratePrompt() {
-  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
+  if (!isAdminUser()) { await uiAlert("普通用户仅可查看 Agent 配置", "无权限", "warning"); return; }
   const desc = document.getElementById("af-desc").value.trim();
   const name = document.getElementById("af-name").value.trim();
-  if (!desc && !name) { alert("请先填写「用途描述」或「名称」"); return; }
+  if (!desc && !name) { await uiAlert("请先填写「用途描述」或「名称」", "输入有误", "warning"); return; }
   const btn = document.getElementById("btn-ai-gen");
   btn.textContent = "生成中..."; btn.disabled = true;
   try {
@@ -1595,7 +1703,7 @@ async function aiGeneratePrompt() {
     document.getElementById("af-prompt").value = data.prompt;
     btn.textContent = "✓ 已生成";
   } catch(err) {
-    alert("生成失败: " + err.message);
+    await uiAlert("生成失败: " + err.message, "操作失败", "error");
     btn.textContent = "✨ AI 生成";
   } finally {
     btn.disabled = false;
@@ -1604,10 +1712,10 @@ async function aiGeneratePrompt() {
 }
 
 async function saveAgentType() {
-  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
+  if (!isAdminUser()) { await uiAlert("普通用户仅可查看 Agent 配置", "无权限", "warning"); return; }
   const name = document.getElementById("af-name").value.trim();
   const key  = document.getElementById("af-key").value.trim();
-  if (!name) { alert("请填写名称"); return; }
+  if (!name) { await uiAlert("请填写名称", "输入有误", "warning"); return; }
   const polls = Array.from(
     document.querySelectorAll("#af-poll-checkboxes input:checked")
   ).map(cb => cb.value);
@@ -1626,7 +1734,7 @@ async function saveAgentType() {
         method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
       });
     } else {
-      if (!key) { alert("请填写标识符 key"); return; }
+      if (!key) { await uiAlert("请填写标识符 key", "输入有误", "warning"); return; }
       res = await apiFetch(`${API}/agent-types`, {
         method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({...body, key, working_status:"in_progress"}),
@@ -1634,16 +1742,16 @@ async function saveAgentType() {
     }
     if (!res.ok) throw new Error(await res.text());
     closeAgentForm();
-  } catch(err) { alert("保存失败: " + err.message); }
+  } catch(err) { await uiAlert("保存失败: " + err.message, "操作失败", "error"); }
 }
 
 async function deleteAgentType(key) {
-  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
-  if (!confirm(`确定删除 Agent「${agentTypes[key]?.name || key}」？此操作不可撤销。`)) return;
+  if (!isAdminUser()) { await uiAlert("普通用户仅可查看 Agent 配置", "无权限", "warning"); return; }
+  if (!await uiConfirm(`确定删除 Agent「${agentTypes[key]?.name || key}」？此操作不可撤销。`, "删除 Agent", {okText: "删除"})) return;
   try {
     const res = await apiFetch(`${API}/agent-types/${key}`, {method:"DELETE"});
     if (!res.ok) throw new Error(await res.text());
-  } catch(err) { alert("删除失败: " + err.message); }
+  } catch(err) { await uiAlert("删除失败: " + err.message, "操作失败", "error"); }
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
@@ -1922,6 +2030,262 @@ function escHtml(s) {
   return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+function normalizeMsgText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.message || String(value);
+  if (typeof value === "object") {
+    try { return JSON.stringify(value, null, 2); } catch {}
+  }
+  return String(value);
+}
+
+function escHref(url) {
+  const raw = String(url || "").trim();
+  if (!/^https?:\/\//i.test(raw)) return "#";
+  return escHtmlAttr(raw);
+}
+
+function formatInlineMsg(text) {
+  const src = String(text || "");
+  const parts = [];
+  const re = /(https?:\/\/[^\s<>"')\]]+)/g;
+  let last = 0;
+  let m;
+  const inlineMarkup = (plainText) => {
+    let html = escHtml(plainText);
+    html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    return html;
+  };
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) parts.push(inlineMarkup(src.slice(last, m.index)));
+    const rawUrl = m[1];
+    parts.push(`<a href="${escHref(rawUrl)}" target="_blank" rel="noopener noreferrer">${escHtml(rawUrl)}</a>`);
+    last = re.lastIndex;
+  }
+  if (last < src.length) parts.push(inlineMarkup(src.slice(last)));
+  return parts.join("");
+}
+
+function renderRichMsg(value) {
+  const source = normalizeMsgText(value).replace(/\r\n?/g, "\n");
+  if (!source.trim()) return "";
+  const lines = source.split("\n");
+  const out = [];
+  let i = 0;
+  let inCode = false;
+  let codeLines = [];
+  let listType = "";
+  let listItems = [];
+
+  const flushList = () => {
+    if (!listType || !listItems.length) {
+      listType = "";
+      listItems = [];
+      return;
+    }
+    out.push(`<${listType}>${listItems.join("")}</${listType}>`);
+    listType = "";
+    listItems = [];
+  };
+
+  const flushCode = () => {
+    if (!inCode) return;
+    out.push(`<pre><code>${escHtml(codeLines.join("\n"))}</code></pre>`);
+    inCode = false;
+    codeLines = [];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (inCode) {
+      if (/^```/.test(line.trim())) {
+        flushCode();
+      } else {
+        codeLines.push(line);
+      }
+      i += 1;
+      continue;
+    }
+
+    if (/^```/.test(line.trim())) {
+      flushList();
+      inCode = true;
+      codeLines = [];
+      i += 1;
+      continue;
+    }
+
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (ordered || bullet) {
+      const nextType = ordered ? "ol" : "ul";
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push(`<li>${formatInlineMsg((ordered || bullet)[1])}</li>`);
+      i += 1;
+      continue;
+    }
+    flushList();
+
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*>/.test(line)) {
+      const quoteLines = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      out.push(`<blockquote>${quoteLines.map(q => `<p>${formatInlineMsg(q)}</p>`).join("")}</blockquote>`);
+      continue;
+    }
+
+    out.push(`<p>${formatInlineMsg(line)}</p>`);
+    i += 1;
+  }
+
+  flushList();
+  flushCode();
+  return out.join("");
+}
+
+function setRichContent(target, value, fallback = "") {
+  const el = typeof target === "string" ? document.getElementById(target) : target;
+  if (!el) return;
+  const html = renderRichMsg(value);
+  if (html) {
+    el.innerHTML = html;
+    return;
+  }
+  if (fallback) el.textContent = fallback;
+  else el.innerHTML = "";
+}
+
+let _activeDialogState = null;
+
+function runMessageDialog(options = {}) {
+  const overlay = document.getElementById("msg-dialog-overlay");
+  const titleEl = document.getElementById("msg-dialog-title");
+  const bodyEl = document.getElementById("msg-dialog-body");
+  const closeBtn = document.getElementById("msg-dialog-close");
+  const cancelBtn = document.getElementById("msg-dialog-cancel");
+  const okBtn = document.getElementById("msg-dialog-ok");
+  const inputWrap = document.getElementById("msg-dialog-input-wrap");
+  const inputEl = document.getElementById("msg-dialog-input");
+  const hintEl = document.getElementById("msg-dialog-hint");
+  if (!overlay || !titleEl || !bodyEl || !closeBtn || !cancelBtn || !okBtn || !inputWrap || !inputEl || !hintEl) {
+    return Promise.resolve(options.mode === "prompt" ? null : false);
+  }
+  if (_activeDialogState?.close) _activeDialogState.close("replace");
+
+  const mode = String(options.mode || "alert");
+  const title = normalizeMsgText(options.title || "提示");
+  const message = normalizeMsgText(options.message || "");
+  const okText = normalizeMsgText(options.okText || "确定");
+  const cancelText = normalizeMsgText(options.cancelText || "取消");
+  const defaultValue = normalizeMsgText(options.defaultValue || "");
+  const inputPlaceholder = normalizeMsgText(options.inputPlaceholder || "");
+  const inputHint = normalizeMsgText(options.inputHint || "");
+  const needInput = mode === "prompt";
+  const canCancel = mode !== "alert";
+
+  titleEl.textContent = title || "提示";
+  bodyEl.innerHTML = renderRichMsg(message);
+  okBtn.textContent = okText || "确定";
+  cancelBtn.textContent = cancelText || "取消";
+  cancelBtn.classList.toggle("hidden", !canCancel);
+  inputWrap.classList.toggle("hidden", !needInput);
+  inputEl.value = defaultValue;
+  inputEl.placeholder = inputPlaceholder;
+  hintEl.textContent = inputHint;
+  hintEl.classList.toggle("hidden", !inputHint);
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKeydown, true);
+      closeBtn.removeEventListener("click", onCancel);
+      cancelBtn.removeEventListener("click", onCancel);
+      okBtn.removeEventListener("click", onOk);
+      overlay.removeEventListener("click", onOverlayClick);
+      overlay.classList.add("hidden");
+      overlay.setAttribute("aria-hidden", "true");
+      if (_activeDialogState && _activeDialogState.done === done) _activeDialogState = null;
+      resolve(result);
+    };
+    const onCancel = () => done(needInput ? null : false);
+    const onOk = () => done(needInput ? inputEl.value : true);
+    const onOverlayClick = (evt) => {
+      if (evt.target !== overlay) return;
+      if (canCancel) onCancel();
+    };
+    const onKeydown = (evt) => {
+      if (overlay.classList.contains("hidden")) return;
+      if (evt.key === "Escape") {
+        evt.preventDefault();
+        if (canCancel) onCancel();
+        return;
+      }
+      if (evt.key === "Enter" && !evt.shiftKey) {
+        const tag = String(document.activeElement?.tagName || "").toLowerCase();
+        if (tag !== "textarea") {
+          evt.preventDefault();
+          onOk();
+        }
+      }
+    };
+
+    _activeDialogState = { done, close: () => done(needInput ? null : false) };
+    closeBtn.addEventListener("click", onCancel);
+    cancelBtn.addEventListener("click", onCancel);
+    okBtn.addEventListener("click", onOk);
+    overlay.addEventListener("click", onOverlayClick);
+    document.addEventListener("keydown", onKeydown, true);
+    setTimeout(() => {
+      if (needInput) inputEl.focus();
+      else okBtn.focus();
+    }, 0);
+  });
+}
+
+function uiAlert(message, title = "提示", kind = "warning") {
+  const msg = normalizeMsgText(message);
+  return runMessageDialog({ mode: "alert", title, message: msg, okText: "我知道了" });
+}
+
+function uiConfirm(message, title = "请确认", options = {}) {
+  return runMessageDialog({
+    mode: "confirm",
+    title,
+    message,
+    okText: options.okText || "确认",
+    cancelText: options.cancelText || "取消",
+  });
+}
+
+function uiPrompt(message, defaultValue = "", title = "请输入", options = {}) {
+  return runMessageDialog({
+    mode: "prompt",
+    title,
+    message,
+    okText: options.okText || "确定",
+    cancelText: options.cancelText || "取消",
+    defaultValue,
+    inputPlaceholder: options.placeholder || "",
+    inputHint: options.hint || "",
+  });
+}
+
 function parseTimestamp(ts) {
   const raw = String(ts || "").trim();
   if (!raw) return null;
@@ -1992,7 +2356,8 @@ function showToast(title, message, kind = "error") {
   if (!wrap) return;
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
-  el.innerHTML = `<div class="t-title">${escHtml(title)}</div><div class="t-msg">${escHtml(message)}</div>`;
+  const safeTitle = normalizeMsgText(title || "提示");
+  el.innerHTML = `<div class="t-title">${escHtml(safeTitle)}</div><div class="t-msg msg-rich">${renderRichMsg(message)}</div>`;
   wrap.appendChild(el);
   while (wrap.children.length > 6) wrap.removeChild(wrap.firstChild);
   setTimeout(() => {
@@ -2024,7 +2389,7 @@ function openTerminalPopout(event, agentKey = "") {
     `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
   );
   if (!pop) {
-    alert("浏览器拦截了新窗口，请允许弹窗后重试。");
+    uiAlert("浏览器拦截了新窗口，请允许弹窗后重试。", "打开失败", "warning");
     return;
   }
   pop.focus();
@@ -2376,7 +2741,12 @@ async function copyTerminal(agent) {
     await navigator.clipboard.writeText(text);
     showToast("已复制终端", `${agent} (${lines.length} 行)`, "info");
   } catch {
-    window.prompt("复制失败，请手动复制以下内容：", text.slice(0, 12000));
+    await uiPrompt(
+      "复制失败，请手动复制以下内容。",
+      text.slice(0, 12000),
+      "手动复制",
+      { okText: "关闭", cancelText: "关闭", hint: "文本已填入输入框，可全选后复制。" }
+    );
   }
 }
 
@@ -2477,7 +2847,7 @@ async function openPanel(id) {
   if (!task) return;
 
   document.getElementById("panel-title").textContent = task.title;
-  document.getElementById("panel-desc").textContent  = task.description||"(无描述)";
+  setRichContent("panel-desc", task.description, "(无描述)");
   document.getElementById("panel-assignee").textContent = task.assignee?`负责人: ${task.assignee}`:"";
 
   const proj = projects[task.project_id];
@@ -2538,8 +2908,8 @@ async function openPanel(id) {
   if (goodFb) {
     fbWrap.classList.remove("hidden");
     const fbEl = document.getElementById("panel-feedback");
-    fbEl.textContent = task.review_feedback;
-    fbEl.className = `text-sm whitespace-pre-wrap rounded p-3 border ${
+    setRichContent(fbEl, task.review_feedback);
+    fbEl.className = `text-sm msg-rich rounded p-3 border ${
       task.status==="needs_changes"
         ?"text-red-300 bg-red-900/20 border-red-900/40"
         : task.status==="blocked"
@@ -2594,7 +2964,7 @@ function renderFeedbackHistory(task) {
     const source = escHtml(item.source || "system");
     const createdAtRaw = String(item.created_at || "").trim();
     const at = escHtml(createdAtRaw ? formatLocalDateTime(createdAtRaw) : "");
-    const feedback = escHtml(item.feedback || "");
+    const feedback = renderRichMsg(item.feedback || "");
     const resolved = !!item.resolved;
     const resolvedAtRaw = String(item.resolved_at || "").trim();
     const resolvedAt = escHtml(resolvedAtRaw ? formatLocalDateTime(resolvedAtRaw) : "");
@@ -2611,7 +2981,7 @@ function renderFeedbackHistory(task) {
         ${statusBadge}
       </div>
       <div class="text-slate-500 mt-0.5">${source}${at ? " · " + at : ""}</div>
-      <div class="text-slate-200 mt-1 whitespace-pre-wrap">${feedback}</div>
+      <div class="text-slate-200 mt-1 msg-rich">${feedback}</div>
       ${resolveLine}
     </div>`;
   }).join("");
@@ -2729,7 +3099,7 @@ function renderLogs(logs) {
   el.innerHTML=merged.map(log=>`
     <div class="log-entry">
       <div class="text-indigo-400 font-medium">${escHtml(log.agent)}</div>
-      <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(log.message)}</div>
+      <div class="text-slate-300 mt-0.5 msg-rich">${renderRichMsg(log.message)}</div>
       <div class="text-slate-600 mt-0.5">${formatLocalDateTime(log.created_at)}</div>
     </div>`).join("");
 }
@@ -2766,13 +3136,13 @@ function renderHandoffs(handoffs) {
     const from = escHtml(h.from_agent || "-");
     const to = escHtml(h.to_agent || "-");
     const title = escHtml(h.title || h.stage || "交接");
-    const summary = escHtml(h.summary || "");
+    const summary = renderRichMsg(h.summary || "");
     const stage = escHtml(h.stage || "");
     const sFrom = escHtml(h.status_from || "-");
     const sTo = escHtml(h.status_to || "-");
     const commitHash = escHtml(h.commit_hash || h.payload?.commit_hash || "");
     const sourceBranch = escHtml(h.payload?.source_branch || "");
-    const conclusion = escHtml(h.conclusion || h.payload?.conclusion || "");
+    const conclusion = renderRichMsg(h.conclusion || h.payload?.conclusion || "");
     const relatedHistory = Array.isArray(h.payload?.related_history_commits)
       ? h.payload.related_history_commits
       : [];
@@ -2790,7 +3160,9 @@ function renderHandoffs(handoffs) {
           }).join(" · ")
         }${relatedHistory.length > 5 ? ` · +${relatedHistory.length - 5}` : ""}</div>`
       : "";
-    const conclusionLine = conclusion ? `<div class="text-amber-200 mt-1 whitespace-pre-wrap">结论: ${conclusion}</div>` : "";
+    const conclusionLine = conclusion
+      ? `<div class="text-amber-200 mt-1 msg-rich"><p>结论:</p>${conclusion}</div>`
+      : "";
     return `<div class="log-entry border-l-indigo-600/40">
       <div class="text-indigo-300 font-medium">${title}</div>
       <div class="text-slate-400 mt-0.5">${from} → ${to} · ${stage}</div>
@@ -2799,7 +3171,7 @@ function renderHandoffs(handoffs) {
       ${branchLine}
       ${relatedLine}
       ${conclusionLine}
-      ${summary ? `<div class="text-slate-300 mt-1 whitespace-pre-wrap">${summary}</div>` : ""}
+      ${summary ? `<div class="text-slate-300 mt-1 msg-rich">${summary}</div>` : ""}
       ${artifact}
       <details class="mt-1">
         <summary class="cursor-pointer text-slate-500 hover:text-slate-300">payload</summary>
@@ -2824,7 +3196,7 @@ function showRejectInput() {
 async function rejectTask() {
   if (!currentTaskId) return;
   const fb=document.getElementById("reject-feedback").value.trim();
-  if (!fb){alert("请填写修改意见");return;}
+  if (!fb){await uiAlert("请填写修改意见", "输入有误", "warning");return;}
   const updated = await taskAction(currentTaskId, "reject", {feedback: fb});
   if (updated) closePanel();
 }
@@ -2841,13 +3213,18 @@ async function archiveCurrentTask() {
 }
 async function decomposeCurrentTask() {
   if (!currentTaskId) return;
-  if (!confirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？")) return;
+  if (!await uiConfirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？", "强制分解", {okText: "确认分解"})) return;
   await taskAction(currentTaskId, "decompose");
 }
 async function cancelCurrentTask() {
   if (!currentTaskId) return;
-  if (!confirm("取消后任务将被归档，且不会再被 Agent 执行。确认取消？")) return;
-  const reasonInput = prompt("可选：填写取消原因（会写入任务日志）", "");
+  if (!await uiConfirm("取消后任务将被归档，且不会再被 Agent 执行。确认取消？", "取消任务", {okText: "确认取消"})) return;
+  const reasonInput = await uiPrompt(
+    "可选：填写取消原因（会写入任务日志）",
+    "",
+    "取消原因",
+    {okText: "继续", cancelText: "跳过", hint: "可留空。"}
+  );
   const reason = reasonInput === null ? "" : reasonInput.trim();
   const res = await apiFetch(`${API}/tasks/${currentTaskId}/cancel`, {
     method: "POST",
@@ -2855,7 +3232,7 @@ async function cancelCurrentTask() {
     body: JSON.stringify({reason: reason || null, include_subtasks: true}),
   });
   if (!res.ok) {
-    alert("取消失败: " + await res.text());
+    await uiAlert("取消失败: " + await res.text(), "操作失败", "error");
     return;
   }
   closePanel();
@@ -2900,7 +3277,7 @@ async function taskAction(id, action, extra = {}) {
     method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({action, ...extra})});
   if (!res.ok) {
-    alert("操作失败: "+await res.text());
+    await uiAlert("操作失败: "+await res.text(), "操作失败", "error");
     return null;
   }
   return await res.json();
@@ -3061,7 +3438,7 @@ async function submitNewProject(e) {
     closeNewProjectModal();
     document.getElementById("proj-name").value="";
     document.getElementById("proj-path").value="";
-  } catch(err) { alert("创建失败: "+err.message); }
+  } catch(err) { await uiAlert("创建失败: "+err.message, "操作失败", "error"); }
 }
 
 async function deleteCurrentProject() {
@@ -3071,7 +3448,7 @@ async function deleteCurrentProject() {
   const projectName = String(proj.name || currentProjectId);
   const projectPath = String(proj.path || "");
   const message = `确认删除项目「${projectName}」？\n\n将把项目目录移入回收站，并清理数据库中的全部任务、日志、交接与终端历史记录。\n目录: ${projectPath || "(未知)"}`;
-  if (!window.confirm(message)) return;
+  if (!await uiConfirm(message, "删除项目", {okText: "删除并清理"})) return;
 
   try {
     const pid = currentProjectId;
@@ -3092,7 +3469,7 @@ async function deleteCurrentProject() {
       renderTerminals();
     }
   } catch(err) {
-    alert("删除失败: " + err.message);
+    await uiAlert("删除失败: " + err.message, "操作失败", "error");
   }
 }
 
@@ -3110,7 +3487,7 @@ async function syncProjects() {
       btn.textContent = `✓ 清理 ${data.deleted.length} 个`;
     }
   } catch(err) {
-    alert("同步失败: " + err.message);
+    await uiAlert("同步失败: " + err.message, "同步失败", "error");
     btn.textContent = "↻ 同步";
     btn.disabled = false;
     return;
@@ -3295,7 +3672,7 @@ async function submitTask(e) {
     document.getElementById("task-assigned-agent").value="";
     document.getElementById("task-review-enabled").checked = true;
     closeCreateModal();
-  } catch(err){alert("创建失败: "+err.message);}
+  } catch(err){await uiAlert("创建失败: "+err.message, "操作失败", "error");}
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -3453,7 +3830,7 @@ function connectWS() {
           const el=document.getElementById("panel-logs");
           const d=document.createElement("div");d.className="log-entry";
           d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
-            <div class="text-slate-300 mt-0.5 whitespace-pre-wrap">${escHtml(msg.log.message)}</div>
+            <div class="text-slate-300 mt-0.5 msg-rich">${renderRichMsg(msg.log.message)}</div>
             <div class="text-slate-600 mt-0.5">${formatLocalDateTime(msg.log.created_at)}</div>`;
           el.appendChild(d); el.scrollTop=el.scrollHeight;
         }
@@ -3574,7 +3951,7 @@ async function fbDownload(path) {
     a.remove();
     URL.revokeObjectURL(blobUrl);
   } catch (err) {
-    alert("下载失败: " + err.message);
+    await uiAlert("下载失败: " + err.message, "操作失败", "error");
   }
 }
 
@@ -3589,7 +3966,7 @@ async function fbHandleUpload(event) {
     });
     if (!res.ok) throw new Error(await res.text());
     fbLoadDirectory(fbCurrentPath);
-  } catch (err) { alert("上传失败: " + err.message); }
+  } catch (err) { await uiAlert("上传失败: " + err.message, "操作失败", "error"); }
   event.target.value = "";
 }
 
@@ -3605,22 +3982,22 @@ function fbDrop(event) {
   }).then(res => {
     if (!res.ok) throw new Error("Upload failed");
     fbLoadDirectory(fbCurrentPath);
-  }).catch(err => alert("上传失败: " + err.message));
+  }).catch(err => uiAlert("上传失败: " + err.message, "操作失败", "error"));
 }
 
 async function fbDelete(path, isDir) {
   const name = path.split("/").pop();
   const typeStr = isDir === "true" ? "文件夹" : "文件";
-  if (!confirm(`确定删除${typeStr} "${name}" 吗？`)) return;
+  if (!await uiConfirm(`确定删除${typeStr} "${name}" 吗？`, "删除确认", {okText: "删除"})) return;
   try {
     const res = await apiFetch(`${API}/projects/${currentProjectId}/files?path=${encodeURIComponent(path)}`, {method:"DELETE"});
     if (!res.ok) throw new Error(await res.text());
     fbLoadDirectory(fbCurrentPath);
-  } catch (err) { alert("删除失败: " + err.message); }
+  } catch (err) { await uiAlert("删除失败: " + err.message, "操作失败", "error"); }
 }
 
 async function fbCreateFolder() {
-  const name = prompt("输入文件夹名称:");
+  const name = await uiPrompt("输入文件夹名称:", "", "新建文件夹", {okText: "创建", cancelText: "取消", placeholder: "例如 docs"});
   if (!name || !currentProjectId) return;
   const newPath = fbCurrentPath ? fbCurrentPath + "/" + name : name;
   try {
@@ -3630,7 +4007,7 @@ async function fbCreateFolder() {
     });
     if (!res.ok) throw new Error(await res.text());
     fbLoadDirectory(fbCurrentPath);
-  } catch (err) { alert("创建失败: " + err.message); }
+  } catch (err) { await uiAlert("创建失败: " + err.message, "操作失败", "error"); }
 }
 
 function fbFileIcon(name) {
@@ -3679,7 +4056,7 @@ function copyProjectPath() {
     const orig = btn.textContent;
     btn.textContent = "✓";
     setTimeout(() => btn.textContent = orig, 1200);
-  }).catch(() => alert("复制失败"));
+  }).catch(() => uiAlert("复制失败", "操作失败", "error"));
 }
 
 async function initApp() {
@@ -3692,7 +4069,7 @@ async function initApp() {
     connectWS();
   } catch (err) {
     if (!redirectingToLogin) {
-      alert("初始化失败: " + err.message);
+      await uiAlert("初始化失败: " + err.message, "初始化失败", "error");
     }
   }
 }
