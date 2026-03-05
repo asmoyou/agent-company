@@ -1758,7 +1758,7 @@ def _serve_frontend_page(*names: str):
 
 @app.get("/")
 async def root():
-    return _serve_frontend_page("login.html", "index.html")
+    return _serve_frontend_page("index.html", "app.html", "login.html")
 
 
 @app.get("/login")
