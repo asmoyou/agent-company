@@ -10,6 +10,8 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlightjs-line-numbers.js@2.9.0/dist/highlightjs-line-numbers.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <style>
     body { background: #0f172a; color: #e2e8f0; }
     .card { transition: transform 0.15s, box-shadow 0.15s; }
@@ -149,7 +151,7 @@
     #file-panel.open{transform:translateX(0);}
     #file-overlay{transition:opacity 0.2s;opacity:0;pointer-events:none;}
     #file-overlay.open{opacity:1;pointer-events:auto;}
-    .fb-shell{display:flex;flex:1 1 auto;min-height:0;}
+    .fb-shell{position:relative;display:flex;flex:1 1 auto;min-height:0;}
     .fb-nav{width:44%;min-width:320px;display:flex;flex-direction:column;border-right:1px solid #334155;min-height:0;}
     .fb-preview{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0;}
     .fb-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:7px;cursor:pointer;transition:background 0.12s,border-color 0.12s;border:1px solid transparent;}
@@ -188,6 +190,29 @@
     .fb-markdown th,.fb-markdown td{border:1px solid #334155;padding:4px 8px;}
     .fb-markdown blockquote{border-left-color:#64748b;color:#cbd5e1;background:rgba(15,23,42,.5);padding:4px 10px;border-radius:0 6px 6px 0;}
     .fb-markdown pre{background:#0b1220;border-color:#334155;}
+    .fb-sheet-wrap{height:100%;display:flex;flex-direction:column;gap:8px;}
+    .fb-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#94a3b8;font-size:11px;}
+    .fb-sheet-table-wrap{flex:1;overflow:auto;border:1px solid #334155;border-radius:8px;background:#020617;}
+    .fb-sheet-table{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0;font-size:12px;}
+    .fb-sheet-table th,.fb-sheet-table td{border-right:1px solid #1e293b;border-bottom:1px solid #1e293b;padding:4px 8px;white-space:pre;vertical-align:top;}
+    .fb-sheet-table th{position:sticky;top:0;background:#111827;color:#e2e8f0;z-index:2;}
+    .fb-sheet-rownum{position:sticky;left:0;background:#0b1220;color:#64748b;z-index:1;text-align:right;min-width:44px;}
+    .fb-sheet-table th.fb-sheet-rownum{z-index:3;background:#0f172a;}
+    .fb-sheet-cell-empty{color:#475569;}
+    .fb-ppt-wrap{height:100%;overflow:auto;display:flex;flex-direction:column;gap:8px;}
+    .fb-ppt-card{border:1px solid #334155;background:#0b1220;border-radius:8px;padding:8px 10px;}
+    .fb-ppt-title{font-size:12px;color:#cbd5e1;margin-bottom:4px;}
+    .fb-ppt-text{font-size:12px;line-height:1.6;color:#94a3b8;white-space:pre-wrap;word-break:break-word;}
+    .fb-drop-overlay{
+      position:absolute;inset:10px;display:none;align-items:center;justify-content:center;
+      border:2px dashed rgba(99,102,241,.8);border-radius:12px;
+      background:rgba(15,23,42,.78);backdrop-filter:blur(1px);z-index:35;pointer-events:none;
+    }
+    .fb-drop-overlay.active{display:flex;}
+    .fb-drop-overlay-card{
+      border:1px solid rgba(99,102,241,.55);background:rgba(2,6,23,.78);
+      border-radius:10px;padding:12px 16px;box-shadow:0 12px 26px rgba(2,6,23,.45);text-align:center;
+    }
     .fb-drop-active{border:2px dashed #6366f1!important;background:rgba(99,102,241,0.08)!important;}
     @media (max-width:1024px){
       #file-panel{width:100vw!important;}
@@ -621,17 +646,18 @@
       <button onclick="closeFileBrowser()" class="text-slate-400 hover:text-white text-xl ml-1">&times;</button>
     </div>
   </div>
-  <div class="fb-shell">
+  <div id="fb-shell" class="fb-shell"
+    ondragenter="fbDragEnter(event)"
+    ondragover="fbDragOver(event)"
+    ondragleave="fbDragLeave(event)"
+    ondrop="fbDrop(event)">
     <div class="fb-nav">
       <!-- Breadcrumb -->
       <div class="px-4 py-2 border-b border-slate-700/50 shrink-0 flex items-center gap-1 text-xs text-slate-400 overflow-x-auto" id="fb-breadcrumb" style="white-space:nowrap;">
         <span class="cursor-pointer hover:text-white" onclick="fbNavigate('')">🏠 root</span>
       </div>
       <!-- File list (drop zone) -->
-      <div id="fb-list" class="flex-1 overflow-y-auto p-2"
-        ondragover="event.preventDefault();this.classList.add('fb-drop-active')"
-        ondragleave="this.classList.remove('fb-drop-active')"
-        ondrop="fbDrop(event)">
+      <div id="fb-list" class="flex-1 overflow-y-auto p-2">
         <div class="text-sm text-slate-500 text-center py-8">选择项目后即可浏览项目办公区</div>
       </div>
       <!-- Status bar -->
@@ -655,6 +681,12 @@
       <div id="fb-preview-meta" class="px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/50 shrink-0">选择文件后可预览</div>
       <div id="fb-preview-body" class="fb-preview-body">
         <div class="fb-preview-placeholder">选择文件后可在这里预览内容，支持文本、图片、PDF、音视频。</div>
+      </div>
+    </div>
+    <div id="fb-drop-overlay" class="fb-drop-overlay">
+      <div class="fb-drop-overlay-card">
+        <div class="text-sm font-medium text-indigo-200">拖拽文件以上传到项目办公区</div>
+        <div id="fb-drop-target-path" class="text-xs text-indigo-300/90 mt-1 font-mono">目标目录: /</div>
       </div>
     </div>
   </div>
@@ -4037,6 +4069,7 @@ let fbPreviewBlobUrl = "";
 let fbPreviewRequestToken = 0;
 let fbPreviewMode = "render";
 let fbPreviewTextState = null;
+let fbDragDepth = 0;
 
 const FB_PREVIEW_TEXT_EXT = new Set([
   "txt", "md", "markdown", "json", "js", "ts", "jsx", "tsx",
@@ -4050,6 +4083,8 @@ const FB_PREVIEW_CODE_EXT = new Set([
   "css", "scss", "html", "xml", "yml", "yaml", "toml", "ini", "cfg",
   "sh", "bash", "zsh", "sql", "json", "vue", "svelte",
 ]);
+const FB_PREVIEW_SHEET_EXT = new Set(["xlsx", "xls", "xlsm", "xlsb", "csv", "tsv"]);
+const FB_PREVIEW_PPT_EXT = new Set(["pptx", "pptm", "ppsx", "potx", "ppt"]);
 const FB_PREVIEW_IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]);
 const FB_PREVIEW_AUDIO_EXT = new Set(["mp3", "wav", "ogg", "m4a", "flac"]);
 const FB_PREVIEW_VIDEO_EXT = new Set(["mp4", "webm", "mov", "m4v", "avi", "mkv"]);
@@ -4060,12 +4095,37 @@ function fbFileExt(path) {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
+function fbUpdateDropPathHint() {
+  const el = document.getElementById("fb-drop-target-path");
+  if (!el) return;
+  el.textContent = `目标目录: /${fbCurrentPath || ""}`;
+}
+
+function fbSetDropOverlay(active) {
+  const overlay = document.getElementById("fb-drop-overlay");
+  const listEl = document.getElementById("fb-list");
+  if (overlay) overlay.classList.toggle("active", !!active);
+  if (listEl) listEl.classList.toggle("fb-drop-active", !!active);
+  if (active) fbUpdateDropPathHint();
+}
+
+function fbHasDraggedFiles(event) {
+  const dt = event?.dataTransfer;
+  if (!dt) return false;
+  const types = dt.types;
+  if (!types) return false;
+  if (typeof types.includes === "function") return types.includes("Files");
+  try { return Array.from(types).includes("Files"); } catch { return false; }
+}
+
 function openFileBrowser(path = "") {
   if (!currentProjectId) return;
   const panel = document.getElementById("file-panel");
   const wasOpen = panel.classList.contains("open");
   panel.classList.add("open");
   document.getElementById("file-overlay").classList.add("open");
+  fbDragDepth = 0;
+  fbSetDropOverlay(false);
   if (!wasOpen) fbClearPreview(true);
   fbNavigate(String(path || "").trim());
 }
@@ -4073,6 +4133,8 @@ function openFileBrowser(path = "") {
 function closeFileBrowser() {
   document.getElementById("file-panel").classList.remove("open");
   document.getElementById("file-overlay").classList.remove("open");
+  fbDragDepth = 0;
+  fbSetDropOverlay(false);
   fbClearPreview(true);
 }
 
@@ -4147,14 +4209,218 @@ function fbHighlightPreviewedItem() {
   });
 }
 
+function fbScoreDecodedText(text) {
+  const replacement = (String(text || "").match(/\uFFFD/g) || []).length;
+  const controls = (String(text || "").match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) || []).length;
+  return replacement * 10 + controls;
+}
+
+function fbDecodeBufferToText(buffer, extraEncodings = []) {
+  const candidates = Array.from(new Set([
+    ...(extraEncodings || []),
+    "utf-8", "gb18030", "gbk", "utf-16le", "utf-16be",
+  ]));
+  let best = null;
+  for (const enc of candidates) {
+    try {
+      const text = new TextDecoder(enc, { fatal: false }).decode(buffer);
+      const score = fbScoreDecodedText(text);
+      if (!best || score < best.score) best = { text, encoding: enc, score };
+    } catch (_) {}
+  }
+  if (best) return { text: best.text, encoding: best.encoding };
+  try {
+    return { text: new TextDecoder().decode(buffer), encoding: "utf-8" };
+  } catch {
+    return { text: "", encoding: "" };
+  }
+}
+
+async function fbReadTextBlob(blob, path = "") {
+  const ext = fbFileExt(path);
+  const preferred = (ext === "csv" || ext === "tsv") ? ["utf-8", "gb18030", "gbk"] : ["utf-8"];
+  const buffer = await blob.arrayBuffer();
+  return fbDecodeBufferToText(buffer, preferred);
+}
+
+function fbSheetColumnLabel(index) {
+  let n = Number(index || 0) + 1;
+  let out = "";
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    out = String.fromCharCode(65 + m) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out || "A";
+}
+
+function fbRenderSheetTable({rows, colCount, fullRows, fullCols, shownRows, shownCols, sheetName, clipped}, bodyEl) {
+  const headCols = Array.from({length: Math.max(1, colCount)}, (_, i) =>
+    `<th>${fbSheetColumnLabel(i)}</th>`
+  ).join("");
+  const bodyRows = rows.map((row, idx) => {
+    const cells = Array.from({length: Math.max(1, colCount)}, (_, colIdx) => {
+      const raw = (Array.isArray(row) && colIdx < row.length) ? row[colIdx] : "";
+      const text = String(raw ?? "");
+      return `<td class="${text ? "" : "fb-sheet-cell-empty"}">${text ? escHtml(text) : "·"}</td>`;
+    }).join("");
+    return `<tr><td class="fb-sheet-rownum">${idx + 1}</td>${cells}</tr>`;
+  }).join("");
+  const clipNoteText = clipped ? "预览已截断" : "完整显示";
+  const clipNoteClass = clipped ? "text-amber-400" : "text-emerald-400";
+  bodyEl.innerHTML = `<div class="fb-sheet-wrap">
+    <div class="fb-sheet-head">
+      <span>工作表: ${escHtml(sheetName || "Sheet1")}</span>
+      <span>${shownRows}/${fullRows} 行 · ${shownCols}/${fullCols} 列 · <span class="${clipNoteClass}">${clipNoteText}</span></span>
+    </div>
+    <div class="fb-sheet-table-wrap">
+      <table class="fb-sheet-table">
+        <thead><tr><th class="fb-sheet-rownum">#</th>${headCols}</tr></thead>
+        <tbody>${bodyRows || `<tr><td class="fb-sheet-rownum">1</td><td class="fb-sheet-cell-empty">·</td></tr>`}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+async function fbRenderSpreadsheetPreview(blob, path, bodyEl, metaEl, baseMeta) {
+  if (!window.XLSX || typeof window.XLSX.read !== "function" || !window.XLSX.utils) {
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">当前环境缺少 Excel 解析组件，请先下载查看。</div>';
+    metaEl.textContent = `${baseMeta} · 组件未加载`;
+    return;
+  }
+  const ext = fbFileExt(path);
+  let workbook = null;
+  let encodingInfo = "";
+  try {
+    if (ext === "csv" || ext === "tsv") {
+      const decoded = await fbReadTextBlob(blob, path);
+      const fs = ext === "tsv" ? "\t" : undefined;
+      workbook = window.XLSX.read(decoded.text, { type: "string", FS: fs, raw: false });
+      encodingInfo = decoded.encoding ? ` · ${decoded.encoding}` : "";
+    } else {
+      const buffer = await blob.arrayBuffer();
+      workbook = window.XLSX.read(buffer, { type: "array", raw: false });
+    }
+  } catch (err) {
+    bodyEl.innerHTML = `<div class="fb-preview-placeholder text-red-400">表格解析失败：${escHtml(err.message || "未知错误")}</div>`;
+    metaEl.textContent = `${baseMeta} · 解析失败`;
+    return;
+  }
+  const sheetNames = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (!sheetNames.length) {
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">表格文件没有可预览的数据。</div>';
+    metaEl.textContent = `${baseMeta} · 空表格`;
+    return;
+  }
+  const sheetName = String(sheetNames[0] || "Sheet1");
+  const sheet = workbook.Sheets[sheetName];
+  const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+  const fullRows = rows.length;
+  const fullCols = rows.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0);
+  const maxRows = 200;
+  const maxCols = 40;
+  const shownRows = Math.min(fullRows, maxRows);
+  const shownCols = Math.min(fullCols || 1, maxCols);
+  const clippedRows = rows.slice(0, shownRows).map(row => (Array.isArray(row) ? row.slice(0, shownCols) : []));
+  const clipped = fullRows > shownRows || fullCols > shownCols;
+  fbRenderSheetTable({
+    rows: clippedRows,
+    colCount: shownCols,
+    fullRows,
+    fullCols: fullCols || 1,
+    shownRows,
+    shownCols,
+    sheetName,
+    clipped,
+  }, bodyEl);
+  metaEl.textContent = `${baseMeta} · 表格预览${encodingInfo}`;
+}
+
+function fbExtractSlideText(xml) {
+  const out = [];
+  const re = /<a:t[^>]*>([\s\S]*?)<\/a:t>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const raw = String(m[1] || "");
+    const text = raw
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'");
+    if (text.trim()) out.push(text.trim());
+  }
+  return out.join("\n");
+}
+
+async function fbRenderPresentationPreview(blob, path, bodyEl, metaEl, baseMeta) {
+  const ext = fbFileExt(path);
+  if (ext === "ppt") {
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">`.ppt` 为旧二进制格式，暂不支持在线解析，请下载后用本地 Office 打开。</div>';
+    metaEl.textContent = `${baseMeta} · 不支持旧版 PPT 在线预览`;
+    return;
+  }
+  if (!window.JSZip || typeof window.JSZip.loadAsync !== "function") {
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">当前环境缺少 PPT 解析组件，请先下载查看。</div>';
+    metaEl.textContent = `${baseMeta} · 组件未加载`;
+    return;
+  }
+  let zip;
+  try {
+    const buffer = await blob.arrayBuffer();
+    zip = await window.JSZip.loadAsync(buffer);
+  } catch (err) {
+    bodyEl.innerHTML = `<div class="fb-preview-placeholder text-red-400">PPT 解析失败：${escHtml(err.message || "未知错误")}</div>`;
+    metaEl.textContent = `${baseMeta} · 解析失败`;
+    return;
+  }
+  const slideEntries = Object.keys(zip.files)
+    .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => {
+      const na = Number((a.match(/slide(\d+)\.xml/i) || [0, 0])[1] || 0);
+      const nb = Number((b.match(/slide(\d+)\.xml/i) || [0, 0])[1] || 0);
+      return na - nb;
+    });
+  if (!slideEntries.length) {
+    bodyEl.innerHTML = '<div class="fb-preview-placeholder">未检测到可预览的幻灯片内容。</div>';
+    metaEl.textContent = `${baseMeta} · 未找到幻灯片`;
+    return;
+  }
+  const maxSlides = 80;
+  const shownEntries = slideEntries.slice(0, maxSlides);
+  const cards = [];
+  for (let i = 0; i < shownEntries.length; i++) {
+    const name = shownEntries[i];
+    try {
+      const xml = await zip.files[name].async("string");
+      const text = fbExtractSlideText(xml);
+      cards.push(`<div class="fb-ppt-card">
+        <div class="fb-ppt-title">第 ${i + 1} 页</div>
+        <div class="fb-ppt-text">${text ? escHtml(text) : "（此页无可提取文本，可能主要为图片/图表）"}</div>
+      </div>`);
+    } catch {
+      cards.push(`<div class="fb-ppt-card">
+        <div class="fb-ppt-title">第 ${i + 1} 页</div>
+        <div class="fb-ppt-text">（该页解析失败）</div>
+      </div>`);
+    }
+  }
+  const clipped = slideEntries.length > shownEntries.length;
+  const clipHint = clipped ? ` · 已截断到前 ${shownEntries.length} 页` : "";
+  bodyEl.innerHTML = `<div class="fb-ppt-wrap">${cards.join("")}</div>`;
+  metaEl.textContent = `${baseMeta} · 演示文稿文本预览 (${shownEntries.length}/${slideEntries.length} 页)${clipHint}`;
+}
+
 function fbPreviewKind(path, contentType = "") {
   const ext = fbFileExt(path);
   const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("presentation") || ct.includes("powerpoint") || FB_PREVIEW_PPT_EXT.has(ext)) return "presentation";
+  if (ct.includes("spreadsheet") || ct.includes("excel") || ct.includes("csv") || FB_PREVIEW_SHEET_EXT.has(ext)) return "sheet";
   if (ct.startsWith("image/") || FB_PREVIEW_IMAGE_EXT.has(ext)) return "image";
   if (ct.includes("pdf") || ext === "pdf") return "pdf";
   if (ct.startsWith("audio/") || FB_PREVIEW_AUDIO_EXT.has(ext)) return "audio";
   if (ct.startsWith("video/") || FB_PREVIEW_VIDEO_EXT.has(ext)) return "video";
-  if (ct.startsWith("text/") || ct.includes("json") || ct.includes("javascript") || ct.includes("xml") || FB_PREVIEW_TEXT_EXT.has(ext)) return "text";
+  if (ct.startsWith("text/") || ct.includes("json") || ct.includes("javascript") || FB_PREVIEW_TEXT_EXT.has(ext)) return "text";
   return "unsupported";
 }
 
@@ -4274,6 +4540,14 @@ async function fbPreview(path) {
     if (metaEl) metaEl.textContent = baseMeta;
     if (downloadBtn) downloadBtn.disabled = false;
 
+    if (kind === "sheet") {
+      await fbRenderSpreadsheetPreview(blob, previewPath, bodyEl, metaEl, baseMeta);
+      return;
+    }
+    if (kind === "presentation") {
+      await fbRenderPresentationPreview(blob, previewPath, bodyEl, metaEl, baseMeta);
+      return;
+    }
     if (kind === "image") {
       fbPreviewBlobUrl = URL.createObjectURL(blob);
       bodyEl.innerHTML = `<div class="fb-preview-image-wrap"><img src="${fbPreviewBlobUrl}" alt="${escHtmlAttr(fallbackName)}" class="fb-preview-image" /></div>`;
@@ -4299,7 +4573,8 @@ async function fbPreview(path) {
       return;
     }
     if (kind === "text") {
-      const raw = await blob.text();
+      const decoded = await fbReadTextBlob(blob, previewPath);
+      const raw = decoded.text;
       if (token !== fbPreviewRequestToken || fbPreviewPath !== previewPath) return;
       const limit = 320000;
       const truncated = raw.length > limit;
@@ -4307,7 +4582,7 @@ async function fbPreview(path) {
       fbPreviewTextState = {
         path: previewPath,
         content: view,
-        baseMeta,
+        baseMeta: decoded.encoding ? `${baseMeta} · ${decoded.encoding}` : baseMeta,
         truncated,
       };
       fbSetPreviewModeButton(true);
@@ -4380,6 +4655,7 @@ async function fbLoadDirectory(path) {
 
 function fbNavigate(path) {
   fbCurrentPath = path;
+  fbUpdateDropPathHint();
   fbLoadDirectory(path);
   // Update breadcrumb
   const bc = document.getElementById("fb-breadcrumb");
@@ -4450,33 +4726,53 @@ async function fbDownload(path, isDir = "false") {
 async function fbHandleUpload(event) {
   const fileList = event.target.files;
   if (!fileList || !fileList.length || !currentProjectId) return;
+  await fbUploadFiles(Array.from(fileList));
+  event.target.value = "";
+}
+
+async function fbUploadFiles(files) {
+  const uploadFiles = Array.from(files || []).filter(f => f && typeof f.name === "string");
+  if (!uploadFiles.length || !currentProjectId) return;
   const fd = new FormData();
-  for (const f of fileList) fd.append("files", f);
+  for (const f of uploadFiles) fd.append("files", f);
   try {
     const res = await apiFetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
       method: "POST", body: fd
     });
     if (!res.ok) throw new Error(await res.text());
-    showToast("上传成功", `已上传 ${fileList.length} 个文件`, "info");
+    showToast("上传成功", `已上传 ${uploadFiles.length} 个文件`, "info");
     fbLoadDirectory(fbCurrentPath);
   } catch (err) { await uiAlert("上传失败: " + err.message, "操作失败", "error"); }
-  event.target.value = "";
 }
 
-function fbDrop(event) {
+function fbDragEnter(event) {
+  if (!currentProjectId || !fbHasDraggedFiles(event)) return;
   event.preventDefault();
-  event.currentTarget.classList.remove("fb-drop-active");
+  fbDragDepth += 1;
+  fbSetDropOverlay(true);
+}
+
+function fbDragOver(event) {
+  if (!currentProjectId || !fbHasDraggedFiles(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  fbSetDropOverlay(true);
+}
+
+function fbDragLeave(event) {
+  if (!fbHasDraggedFiles(event)) return;
+  fbDragDepth = Math.max(0, fbDragDepth - 1);
+  if (fbDragDepth === 0) fbSetDropOverlay(false);
+}
+
+async function fbDrop(event) {
+  if (!fbHasDraggedFiles(event)) return;
+  event.preventDefault();
+  fbDragDepth = 0;
+  fbSetDropOverlay(false);
   const files = event.dataTransfer.files;
   if (!files || !files.length || !currentProjectId) return;
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  apiFetch(`${API}/projects/${currentProjectId}/files/upload?path=${encodeURIComponent(fbCurrentPath)}`, {
-    method: "POST", body: fd
-  }).then(res => {
-    if (!res.ok) throw new Error("Upload failed");
-    showToast("上传成功", `已上传 ${files.length} 个文件`, "info");
-    fbLoadDirectory(fbCurrentPath);
-  }).catch(err => uiAlert("上传失败: " + err.message, "操作失败", "error"));
+  await fbUploadFiles(Array.from(files));
 }
 
 async function fbDelete(path, isDir) {
