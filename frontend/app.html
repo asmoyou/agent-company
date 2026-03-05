@@ -317,12 +317,6 @@
       <input type="checkbox" id="auto-collapse-empty-cols" onchange="refreshBoard()" class="rounded" checked>
       自动压缩空列
     </label>
-    <!-- Prompts editor -->
-    <button onclick="openPromptsModal()"
-      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
-      title="编辑 Agent 提示词">
-      ⚙ 提示词
-    </button>
     <!-- Agent management -->
     <button onclick="openAgentsModal()"
       class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
@@ -815,99 +809,6 @@
     </form>
   </div>
 </div>
-
-<!-- Prompts Editor Modal -->
-<div id="modal-prompts" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl flex flex-col" style="max-height:85vh">
-    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
-      <div>
-        <h3 class="font-semibold text-white">Agent 提示词</h3>
-        <p class="text-xs text-slate-500 mt-0.5">
-          提示词统一存储在数据库 <code class="text-slate-400">agent_types.prompt</code>，保存后自动热重载
-        </p>
-      </div>
-      <button onclick="closePromptsModal()" class="text-slate-400 hover:text-white text-xl shrink-0">&times;</button>
-    </div>
-    <div class="px-6 pt-3 text-xs text-slate-500 shrink-0">范围：全局（数据库）</div>
-    <!-- Agent tabs -->
-    <div class="px-6 pt-3 flex gap-2 shrink-0">
-      <button onclick="setPromptAgent('developer')" id="ptab-developer"
-        class="text-xs px-3 py-1.5 rounded-lg bg-blue-900/60 text-blue-300 font-medium">Developer</button>
-      <button onclick="setPromptAgent('reviewer')" id="ptab-reviewer"
-        class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 text-slate-400">Reviewer</button>
-    </div>
-    <div class="flex-1 overflow-hidden px-6 pb-4 pt-3 flex flex-col gap-2">
-      <div class="text-xs text-slate-500 flex flex-wrap items-center gap-2">
-        <span>占位符：</span>
-        <code class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{task_title}</code>
-        <code class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{task_description}</code>
-        <code id="ph-rework" class="text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{rework_section}</code>
-        <code id="ph-diff" class="hidden text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{diff}</code>
-      </div>
-      <textarea id="prompt-editor"
-        class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-200 font-mono resize-none focus:outline-none focus:border-indigo-500"
-        style="min-height:280px" placeholder="加载中..."></textarea>
-      <div class="flex justify-between items-center">
-        <button onclick="resetPromptToDefault()"
-          class="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg">重置为默认</button>
-        <button onclick="savePrompt()"
-          class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-// ── Prompts editor ────────────────────────────────────────────────────────────
-let promptAgent = "developer";
-
-const DEFAULT_PROMPTS = {
-  developer: `你是一名专业软件工程师，负责实现以下任务。\n\n## 任务信息\n\n**标题**：{task_title}\n\n**需求描述**：\n{task_description}\n\n{rework_section}\n\n## 工作要求\n\n1. 所有成果必须写入文件，不要只在终端打印输出\n2. 代码任务 → 创建对应语言的源文件；文档任务 → 创建 .md 文件\n3. 至少创建一个文件\n4. 直接开始实现，不需要解释计划`,
-  reviewer: `你是资深代码/文档审查工程师。\n\n## 任务：{task_title}\n\n需求：{task_description}\n\n## 变更\n\n\`\`\`\n{diff}\n\`\`\`\n\n审查完毕后，最后一行只输出一个 JSON 对象（不要代码块、不要其他文字）：\n- decision 只能是 "approve" 或 "request_changes"\n- decision="approve" 时必须提供 comment\n- decision="request_changes" 时必须提供 feedback`,
-};
-
-function openPromptsModal() {
-  document.getElementById("modal-prompts").classList.remove("hidden");
-  setPromptAgent("developer");
-}
-function closePromptsModal() {
-  document.getElementById("modal-prompts").classList.add("hidden");
-}
-function setPromptAgent(agent) {
-  promptAgent = agent;
-  ["developer","reviewer"].forEach(a => {
-    document.getElementById(`ptab-${a}`).className = a === agent
-      ? "text-xs px-3 py-1.5 rounded-lg bg-blue-900/60 text-blue-300 font-medium"
-      : "text-xs px-3 py-1.5 rounded-lg bg-slate-700 text-slate-400";
-  });
-  document.getElementById("ph-rework").classList.toggle("hidden", agent !== "developer");
-  document.getElementById("ph-diff").classList.toggle("hidden", agent !== "reviewer");
-  loadPromptContent();
-}
-async function loadPromptContent() {
-  const ta = document.getElementById("prompt-editor");
-  ta.value = "加载中...";
-  try {
-    const url = `${API}/prompts/${promptAgent}`;
-    const data = await (await apiFetch(url)).json();
-    ta.value = data.content || DEFAULT_PROMPTS[promptAgent] || "";
-  } catch { ta.value = DEFAULT_PROMPTS[promptAgent] || ""; }
-}
-async function savePrompt() {
-  const content = document.getElementById("prompt-editor").value;
-  const url = `${API}/prompts/${promptAgent}`;
-  const res = await apiFetch(url, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({content})});
-  if (res.ok) {
-    const btn = document.querySelector("#modal-prompts button[onclick='savePrompt()']");
-    const orig = btn.textContent; btn.textContent = "✓ 已保存";
-    setTimeout(()=>btn.textContent=orig, 1500);
-    loadPromptContent();
-  } else { alert("保存失败: "+await res.text()); }
-}
-function resetPromptToDefault() {
-  document.getElementById("prompt-editor").value = DEFAULT_PROMPTS[promptAgent]||"";
-}
-</script>
 
 <script>
 const API = `${location.protocol}//${location.host}`;
