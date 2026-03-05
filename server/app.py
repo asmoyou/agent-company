@@ -1618,10 +1618,27 @@ def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None,
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
+def _serve_frontend_page(*names: str):
+    for name in names:
+        page = frontend_dir / name
+        if page.exists():
+            return FileResponse(str(page))
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
-    index = frontend_dir / "index.html"
-    return FileResponse(str(index)) if index.exists() else {"status": "ok"}
+    return _serve_frontend_page("login.html", "index.html")
+
+
+@app.get("/login")
+async def login_page():
+    return _serve_frontend_page("login.html", "index.html")
+
+
+@app.get("/app")
+async def app_page():
+    return _serve_frontend_page("app.html", "login.html", "index.html")
 
 
 # ── Auth & Users ──────────────────────────────────────────────────────────────

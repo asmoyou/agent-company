@@ -148,6 +148,12 @@ decompose -> decomposed -> (subtasks in todo...)
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `SERVER_URL` | `http://localhost:8080` | Agent 请求后端地址 |
+| `SERVER_HOST` | `0.0.0.0` | FastAPI 监听地址（`0.0.0.0` 可被局域网其他设备访问） |
+| `SERVER_PORT` | `8080` | FastAPI 监听端口 |
+| `OPEN_BROWSER` | `1` | 启动后是否自动打开浏览器（`1/true` 开启） |
+| `LOCAL_ACCESS_URL` | `http://localhost:8080` | 启动日志展示的本机访问地址 |
+| `BROWSER_URL` | `http://localhost:8080` | 自动打开浏览器时使用的地址 |
+| `LAN_IP_OVERRIDE` | `` | 手动指定局域网 IP（自动检测失败时可设置） |
 | `POLL_INTERVAL` | `5` | Agent 轮询间隔（秒） |
 | `CLI_TIMEOUT` | `300` | 单次 CLI 超时（秒） |
 | `FEATURE_STRICT_CLAIM_SCOPE` | `1` | 是否强制 `/tasks/claim` 与任务创建必须带 `project_id` |
