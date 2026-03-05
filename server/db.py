@@ -13,6 +13,15 @@ DB_PATH = Path(__file__).parent.parent / "tasks.db"
 CANCELLED_STATUS = "cancelled"
 ACTIONABLE_FEEDBACK_STATUSES = {"needs_changes", "blocked"}
 FEEDBACK_RESOLVE_STATUSES = {"approved", "pending_acceptance", "completed", CANCELLED_STATUS}
+DEFAULT_TASK_PRIORITY = 2
+MIN_TASK_PRIORITY = 0
+MAX_TASK_PRIORITY = 3
+DEPENDENCY_STATE_COMPLETED = "completed"
+DEPENDENCY_STATE_APPROVED = "approved"
+ALLOWED_DEPENDENCY_STATES = {
+    DEPENDENCY_STATE_COMPLETED,
+    DEPENDENCY_STATE_APPROVED,
+}
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 SESSION_TTL_DAYS = 30
@@ -26,6 +35,15 @@ LOGIN_LOCK_MAX_SECS = max(
 
 class LeaseConflictError(RuntimeError):
     """Raised when task lease fence validation fails."""
+
+
+class DependencyValidationError(ValueError):
+    """Raised when task dependency payload is invalid."""
+
+
+class DependencyCycleError(RuntimeError):
+    """Raised when task dependency change would introduce a cycle."""
+
 
 DEVELOPER_PROMPT_DEFAULT = (
     "你是一名专业软件工程师，负责实现以下任务。\n\n"
@@ -151,6 +169,7 @@ def init_db():
             project_id      TEXT REFERENCES projects(id),
             title           TEXT NOT NULL,
             description     TEXT NOT NULL DEFAULT '',
+            priority        INTEGER NOT NULL DEFAULT 2,
             status          TEXT NOT NULL DEFAULT 'todo',
             assignee        TEXT,
             claim_run_id    TEXT,
@@ -163,6 +182,19 @@ def init_db():
             archived        INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id            TEXT NOT NULL,
+            depends_on_task_id TEXT NOT NULL,
+            required_state     TEXT NOT NULL DEFAULT 'completed',
+            created_by         TEXT,
+            created_at         TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (depends_on_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE (task_id, depends_on_task_id),
+            CHECK (task_id != depends_on_task_id)
         );
 
         CREATE TABLE IF NOT EXISTS logs (
@@ -248,6 +280,7 @@ def init_db():
         ("project_id", "TEXT"),
         ("title", "TEXT NOT NULL DEFAULT ''"),
         ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("priority", "INTEGER NOT NULL DEFAULT 2"),
         ("status", "TEXT NOT NULL DEFAULT 'todo'"),
         ("assignee", "TEXT"),
         ("claim_run_id", "TEXT"),
@@ -264,6 +297,13 @@ def init_db():
         ("dev_agent", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
         ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "task_dependencies", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("depends_on_task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("required_state", "TEXT NOT NULL DEFAULT 'completed'"),
+        ("created_by", "TEXT"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
     _ensure_columns(conn, "logs", [
         ("task_id", "TEXT"),
@@ -314,6 +354,9 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_priority_updated ON tasks(project_id, priority, updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_task ON task_dependencies(task_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id)")
 
     _seed_admin_user(conn)
     _cleanup_expired_sessions(conn)
@@ -322,6 +365,8 @@ def init_db():
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
     _backfill_subtask_order(conn)
+    _normalize_task_priority(conn)
+    _normalize_task_dependency_required_state(conn)
     conn.commit()
     conn.close()
 
@@ -689,12 +734,67 @@ def _backfill_subtask_order(conn):
             conn.execute("UPDATE tasks SET subtask_order=? WHERE id=?", (idx, row["id"]))
 
 
+def _normalize_task_priority(conn):
+    conn.execute(
+        """
+        UPDATE tasks
+           SET priority=?
+         WHERE priority IS NULL
+            OR priority < ?
+            OR priority > ?
+        """,
+        (DEFAULT_TASK_PRIORITY, MIN_TASK_PRIORITY, MAX_TASK_PRIORITY),
+    )
+
+
+def _normalize_task_dependency_required_state(conn):
+    conn.execute(
+        """
+        UPDATE task_dependencies
+           SET required_state=?
+         WHERE TRIM(COALESCE(required_state, '')) NOT IN (?, ?)
+        """,
+        (
+            DEPENDENCY_STATE_COMPLETED,
+            DEPENDENCY_STATE_COMPLETED,
+            DEPENDENCY_STATE_APPROVED,
+        ),
+    )
+
+
 def _now():
     return datetime.utcnow().isoformat()
 
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _normalize_priority_value(priority, default: int = DEFAULT_TASK_PRIORITY) -> int:
+    try:
+        out = int(priority)
+    except Exception:
+        out = int(default)
+    if out < MIN_TASK_PRIORITY:
+        return MIN_TASK_PRIORITY
+    if out > MAX_TASK_PRIORITY:
+        return MAX_TASK_PRIORITY
+    return out
+
+
+def _normalize_dependency_required_state(state: str | None) -> str:
+    raw = str(state or "").strip().lower()
+    if raw in ALLOWED_DEPENDENCY_STATES:
+        return raw
+    return DEPENDENCY_STATE_COMPLETED
+
+
+def _dependency_is_satisfied(required_state: str, depends_on_status: str) -> bool:
+    req = _normalize_dependency_required_state(required_state)
+    dep_status = str(depends_on_status or "").strip().lower()
+    if req == DEPENDENCY_STATE_APPROVED:
+        return dep_status in {"approved", "pending_acceptance", "completed"}
+    return dep_status == "completed"
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -1409,13 +1509,208 @@ def _join_project(base_sql: str) -> str:
     """
 
 
+def _normalize_dependency_payload(dependencies) -> list[dict]:
+    if dependencies is None:
+        return []
+    if not isinstance(dependencies, list):
+        raise DependencyValidationError("dependencies 必须是数组")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(dependencies, 1):
+        if not isinstance(item, dict):
+            raise DependencyValidationError(f"dependencies[{idx}] 必须是对象")
+        dep_id = str(item.get("depends_on_task_id") or "").strip()
+        if not dep_id:
+            raise DependencyValidationError(f"dependencies[{idx}] 缺少 depends_on_task_id")
+        raw_state = str(item.get("required_state") or DEPENDENCY_STATE_COMPLETED).strip().lower()
+        if raw_state not in ALLOWED_DEPENDENCY_STATES:
+            allowed = ", ".join(sorted(ALLOWED_DEPENDENCY_STATES))
+            raise DependencyValidationError(
+                f"dependencies[{idx}].required_state 不合法，仅支持: {allowed}"
+            )
+        if dep_id in seen:
+            continue
+        seen.add(dep_id)
+        out.append(
+            {
+                "depends_on_task_id": dep_id,
+                "required_state": raw_state,
+            }
+        )
+    return out
+
+
+def _dependency_reachable_in_conn(conn, from_task_id: str, target_task_id: str) -> bool:
+    row = conn.execute(
+        """
+        WITH RECURSIVE dep_chain(task_id) AS (
+            SELECT ?
+            UNION
+            SELECT td.depends_on_task_id
+              FROM task_dependencies td
+              JOIN dep_chain dc ON td.task_id = dc.task_id
+        )
+        SELECT 1
+          FROM dep_chain
+         WHERE task_id=?
+         LIMIT 1
+        """,
+        (from_task_id, target_task_id),
+    ).fetchone()
+    return bool(row)
+
+
+def _list_task_dependencies_in_conn(conn, task_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            td.id,
+            td.task_id,
+            td.depends_on_task_id,
+            td.required_state,
+            td.created_by,
+            td.created_at,
+            dep.title AS depends_on_title,
+            dep.status AS depends_on_status,
+            dep.priority AS depends_on_priority
+          FROM task_dependencies td
+          JOIN tasks dep ON dep.id = td.depends_on_task_id
+         WHERE td.task_id=?
+         ORDER BY dep.priority ASC, dep.updated_at ASC, dep.created_at ASC, dep.id ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        dep = dict(row)
+        dep["required_state"] = _normalize_dependency_required_state(dep.get("required_state"))
+        dep["satisfied"] = _dependency_is_satisfied(
+            dep["required_state"],
+            str(dep.get("depends_on_status") or ""),
+        )
+        out.append(dep)
+    return out
+
+
+def _replace_task_dependencies_in_conn(
+    conn,
+    task_id: str,
+    dependencies,
+    created_by: str | None = None,
+) -> list[dict] | None:
+    task_row = conn.execute(
+        "SELECT id, project_id FROM tasks WHERE id=?",
+        (task_id,),
+    ).fetchone()
+    if not task_row:
+        return None
+
+    project_id = str(task_row["project_id"] or "").strip()
+    normalized = _normalize_dependency_payload(dependencies)
+
+    for dep in normalized:
+        dep_id = dep["depends_on_task_id"]
+        if dep_id == task_id:
+            raise DependencyValidationError("任务不能依赖自身")
+        dep_row = conn.execute(
+            "SELECT id, project_id FROM tasks WHERE id=?",
+            (dep_id,),
+        ).fetchone()
+        if not dep_row:
+            raise DependencyValidationError(f"依赖任务不存在: {dep_id}")
+        dep_project_id = str(dep_row["project_id"] or "").strip()
+        if dep_project_id != project_id:
+            raise DependencyValidationError("依赖任务必须与当前任务同项目")
+        if _dependency_reachable_in_conn(conn, dep_id, task_id):
+            raise DependencyCycleError("检测到循环依赖，无法保存")
+
+    conn.execute("DELETE FROM task_dependencies WHERE task_id=?", (task_id,))
+    now = _now()
+    created_by_value = str(created_by or "").strip() or None
+    for dep in normalized:
+        conn.execute(
+            """
+            INSERT INTO task_dependencies
+                (task_id, depends_on_task_id, required_state, created_by, created_at)
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                task_id,
+                dep["depends_on_task_id"],
+                dep["required_state"],
+                created_by_value,
+                now,
+            ),
+        )
+    return _list_task_dependencies_in_conn(conn, task_id)
+
+
+def _attach_dependency_state_to_tasks_in_conn(conn, task_rows: list[dict]) -> None:
+    if not task_rows:
+        return
+    task_ids = [str(t.get("id") or "").strip() for t in task_rows if str(t.get("id") or "").strip()]
+    if not task_ids:
+        return
+    placeholders = ",".join("?" for _ in task_ids)
+    dep_rows = conn.execute(
+        f"""
+        SELECT
+            td.task_id,
+            td.depends_on_task_id,
+            td.required_state,
+            dep.status AS depends_on_status
+          FROM task_dependencies td
+          JOIN tasks dep ON dep.id = td.depends_on_task_id
+         WHERE td.task_id IN ({placeholders})
+        """,
+        task_ids,
+    ).fetchall()
+    summary: dict[str, dict] = {
+        tid: {
+            "dependency_count": 0,
+            "blocking_dependency_ids": [],
+        }
+        for tid in task_ids
+    }
+    for row in dep_rows:
+        tid = str(row["task_id"] or "").strip()
+        if not tid:
+            continue
+        info = summary.setdefault(
+            tid,
+            {"dependency_count": 0, "blocking_dependency_ids": []},
+        )
+        info["dependency_count"] += 1
+        required_state = _normalize_dependency_required_state(row["required_state"])
+        if not _dependency_is_satisfied(required_state, str(row["depends_on_status"] or "")):
+            dep_id = str(row["depends_on_task_id"] or "").strip()
+            if dep_id and dep_id not in info["blocking_dependency_ids"]:
+                info["blocking_dependency_ids"].append(dep_id)
+
+    for task in task_rows:
+        tid = str(task.get("id") or "").strip()
+        info = summary.get(tid, {"dependency_count": 0, "blocking_dependency_ids": []})
+        blocking = list(info.get("blocking_dependency_ids") or [])
+        status = str(task.get("status") or "").strip().lower()
+        ready = True
+        if status == "todo":
+            ready = len(blocking) == 0
+        task["dependency_count"] = int(info.get("dependency_count") or 0)
+        task["blocking_dependency_ids"] = blocking
+        task["blocking_dependency_count"] = len(blocking)
+        task["ready"] = ready
+
+
 def create_task(title: str, description: str, project_id: str | None = None,
                 parent_task_id: str | None = None,
                 assigned_agent: str | None = None,
                 dev_agent: str | None = None,
                 status: str = "triage",
                 subtask_order: int | None = None,
-                review_enabled: bool = True) -> dict:
+                review_enabled: bool = True,
+                priority: int | None = None,
+                dependencies: list[dict] | None = None,
+                created_by: str | None = None) -> dict:
     conn = get_conn()
     tid = str(uuid.uuid4())
     now = _now()
@@ -1426,38 +1721,55 @@ def create_task(title: str, description: str, project_id: str | None = None,
     if normalized_subtask_order < 0:
         normalized_subtask_order = 0
     normalized_review_enabled = 1 if bool(review_enabled) else 0
-    if normalized_status == "todo":
-        todo_pollers = _todo_pollers(conn)
-        if normalized_assigned and normalized_assigned not in todo_pollers:
-            normalized_assigned = (
-                normalized_dev_agent if normalized_dev_agent in todo_pollers else None
+    normalized_priority = _normalize_priority_value(priority, default=DEFAULT_TASK_PRIORITY)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if normalized_status == "todo":
+            todo_pollers = _todo_pollers(conn)
+            if normalized_assigned and normalized_assigned not in todo_pollers:
+                normalized_assigned = (
+                    normalized_dev_agent if normalized_dev_agent in todo_pollers else None
+                )
+        conn.execute(
+            """INSERT INTO tasks
+               (id, project_id, title, description, priority, status,
+                parent_task_id, subtask_order, assigned_agent, dev_agent, review_enabled, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                tid,
+                project_id,
+                title,
+                description,
+                normalized_priority,
+                normalized_status,
+                parent_task_id,
+                normalized_subtask_order,
+                normalized_assigned,
+                normalized_dev_agent,
+                normalized_review_enabled,
+                now,
+                now,
+            ),
+        )
+        if dependencies is not None:
+            _replace_task_dependencies_in_conn(
+                conn,
+                task_id=tid,
+                dependencies=dependencies,
+                created_by=created_by,
             )
-    conn.execute(
-        """INSERT INTO tasks
-           (id, project_id, title, description, status,
-            parent_task_id, subtask_order, assigned_agent, dev_agent, review_enabled, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            tid,
-            project_id,
-            title,
-            description,
-            normalized_status,
-            parent_task_id,
-            normalized_subtask_order,
-            normalized_assigned,
-            normalized_dev_agent,
-            normalized_review_enabled,
-            now,
-            now,
-        ),
-    )
-    conn.commit()
-    row = conn.execute(
-        _join_project("SELECT * FROM tasks WHERE id=?"), (tid,)
-    ).fetchone()
-    conn.close()
-    return dict(row)
+        row = conn.execute(
+            _join_project("SELECT * FROM tasks WHERE id=?"), (tid,)
+        ).fetchone()
+        task = dict(row) if row else None
+        if not task:
+            conn.rollback()
+            raise RuntimeError("create_task failed")
+        _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        conn.commit()
+        return task
+    finally:
+        conn.close()
 
 
 def list_subtasks(parent_task_id: str, user_id: str | None = None, is_admin: bool = True) -> list[dict]:
@@ -1505,8 +1817,10 @@ def list_subtasks(parent_task_id: str, user_id: str | None = None, is_admin: boo
             """,
             (parent_task_id,),
         ).fetchall()
+    out = [dict(r) for r in rows]
+    _attach_dependency_state_to_tasks_in_conn(conn, out)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
 
 
 def check_parent_completion(parent_task_id: str) -> bool:
@@ -1551,8 +1865,11 @@ def get_task(task_id: str, user_id: str | None = None, is_admin: bool = True) ->
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
         ).fetchone()
+    task = dict(row) if row else None
+    if task:
+        _attach_dependency_state_to_tasks_in_conn(conn, [task])
     conn.close()
-    return dict(row) if row else None
+    return task
 
 
 def list_tasks(project_id: str | None = None, user_id: str | None = None, is_admin: bool = True) -> list[dict]:
@@ -1595,8 +1912,72 @@ def list_tasks(project_id: str | None = None, user_id: str | None = None, is_adm
             rows = conn.execute(
                 _join_project("SELECT * FROM tasks ORDER BY created_at DESC")
             ).fetchall()
+    out = [dict(r) for r in rows]
+    _attach_dependency_state_to_tasks_in_conn(conn, out)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
+
+
+def list_task_dependencies(task_id: str) -> list[dict] | None:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            return None
+        return _list_task_dependencies_in_conn(conn, task_id)
+    finally:
+        conn.close()
+
+
+def list_task_dependents(task_id: str) -> list[dict] | None:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            return None
+        rows = conn.execute(
+            _join_project(
+                """
+                SELECT t.*
+                  FROM tasks t
+                  JOIN task_dependencies td ON td.task_id = t.id
+                 WHERE td.depends_on_task_id=?
+                 ORDER BY t.priority ASC, t.updated_at ASC, t.created_at ASC, t.id ASC
+                """
+            ),
+            (task_id,),
+        ).fetchall()
+        out = [dict(r) for r in rows]
+        _attach_dependency_state_to_tasks_in_conn(conn, out)
+        return out
+    finally:
+        conn.close()
+
+
+def replace_task_dependencies(
+    task_id: str,
+    dependencies,
+    created_by: str | None = None,
+) -> list[dict] | None:
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        out = _replace_task_dependencies_in_conn(
+            conn,
+            task_id=task_id,
+            dependencies=dependencies,
+            created_by=created_by,
+        )
+        if out is None:
+            conn.rollback()
+            return None
+        conn.commit()
+        return out
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def list_terminal_tasks_for_workspace_cleanup(limit: int = 200) -> list[dict]:
@@ -1659,7 +2040,13 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
         ).fetchone()
-        return dict(row) if row else None
+        task = dict(row) if row else None
+        if task:
+            _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        return task
+
+    if "priority" in fields:
+        fields["priority"] = _normalize_priority_value(fields.get("priority"), default=DEFAULT_TASK_PRIORITY)
 
     target_status = str(fields.get("status") or current["status"] or "").strip()
     now = _now()
@@ -1727,7 +2114,10 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     row = conn.execute(
         _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
     ).fetchone()
-    return dict(row) if row else None
+    task = dict(row) if row else None
+    if task:
+        _attach_dependency_state_to_tasks_in_conn(conn, [task])
+    return task
 
 
 def update_task(task_id: str, **fields) -> dict | None:
@@ -1758,7 +2148,7 @@ def get_tasks_by_status(
                      WHERE t.status=?
                        AND t.project_id=?
                        AND p.created_by_user_id=?
-                     ORDER BY t.updated_at ASC
+                     ORDER BY t.priority ASC, t.updated_at ASC
                     """
                 ),
                 (status, project_id, user_id),
@@ -1772,7 +2162,7 @@ def get_tasks_by_status(
                       JOIN projects p ON p.id = t.project_id
                      WHERE t.status=?
                        AND p.created_by_user_id=?
-                     ORDER BY t.updated_at ASC
+                     ORDER BY t.priority ASC, t.updated_at ASC
                     """
                 ),
                 (status, user_id),
@@ -1780,16 +2170,18 @@ def get_tasks_by_status(
     else:
         if project_id:
             rows = conn.execute(
-                _join_project("SELECT * FROM tasks WHERE status=? AND project_id=? ORDER BY updated_at ASC"),
+                _join_project("SELECT * FROM tasks WHERE status=? AND project_id=? ORDER BY priority ASC, updated_at ASC"),
                 (status, project_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                _join_project("SELECT * FROM tasks WHERE status=? ORDER BY updated_at ASC"),
+                _join_project("SELECT * FROM tasks WHERE status=? ORDER BY priority ASC, updated_at ASC"),
                 (status,),
             ).fetchall()
+    out = [dict(r) for r in rows]
+    _attach_dependency_state_to_tasks_in_conn(conn, out)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
 
 
 def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | None:
@@ -2015,9 +2407,30 @@ def claim_task(
                 )
                 """
             )
+            where.append(
+                """
+                NOT EXISTS (
+                    SELECT 1
+                      FROM task_dependencies td
+                      JOIN tasks dep ON dep.id = td.depends_on_task_id
+                     WHERE td.task_id = t.id
+                       AND (
+                           (
+                               COALESCE(td.required_state, 'completed') = 'completed'
+                               AND dep.status != 'completed'
+                           )
+                           OR
+                           (
+                               COALESCE(td.required_state, 'completed') = 'approved'
+                               AND dep.status NOT IN ('approved', 'pending_acceptance', 'completed')
+                           )
+                       )
+                )
+                """
+            )
 
         row = conn.execute(
-            f"SELECT t.id FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.updated_at ASC LIMIT 1",
+            f"SELECT t.id FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.priority ASC, t.updated_at ASC LIMIT 1",
             tuple(params),
         ).fetchone()
         if not row:
@@ -2058,7 +2471,10 @@ def claim_task(
         claimed = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (row["id"],)
         ).fetchone()
-        return dict(claimed) if claimed else None
+        task = dict(claimed) if claimed else None
+        if task:
+            _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        return task
     finally:
         conn.close()
 

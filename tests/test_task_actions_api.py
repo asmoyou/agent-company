@@ -1218,6 +1218,71 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 401)
 
+    def test_create_task_with_priority_and_dependencies(self):
+        dep = self._create_task(status="todo")
+        created = self.client.post(
+            "/tasks",
+            json={
+                "title": "needs dep",
+                "description": "create with priority and dependency",
+                "project_id": self.project["id"],
+                "priority": 0,
+                "assigned_agent": "developer",
+                "dependencies": [
+                    {
+                        "depends_on_task_id": dep["id"],
+                        "required_state": "completed",
+                    }
+                ],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        task = created.json()
+        self.assertEqual(int(task.get("priority", -1)), 0)
+        self.assertEqual(int(task.get("blocking_dependency_count") or 0), 1)
+        self.assertFalse(bool(task.get("ready")))
+
+        dep_rows = self.client.get(
+            f"/tasks/{task['id']}/dependencies",
+            headers=self._headers,
+        )
+        self.assertEqual(dep_rows.status_code, 200)
+        data = dep_rows.json()
+        self.assertEqual(len(data.get("dependencies") or []), 1)
+        self.assertEqual(data["dependencies"][0]["depends_on_task_id"], dep["id"])
+
+    def test_replace_task_dependencies_rejects_cycle(self):
+        a = self._create_task(status="todo")
+        b = self._create_task(status="todo")
+        ok = self.client.put(
+            f"/tasks/{a['id']}/dependencies",
+            json={
+                "dependencies": [
+                    {
+                        "depends_on_task_id": b["id"],
+                        "required_state": "completed",
+                    }
+                ]
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(ok.status_code, 200)
+
+        bad = self.client.put(
+            f"/tasks/{b['id']}/dependencies",
+            json={
+                "dependencies": [
+                    {
+                        "depends_on_task_id": a["id"],
+                        "required_state": "completed",
+                    }
+                ]
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(bad.status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()
