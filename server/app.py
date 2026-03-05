@@ -929,7 +929,18 @@ async def _task_workspace_cleanup_watchdog():
 
 
 # Pre-populate built-ins so they appear on init
-for _k in ("developer", "reviewer", "manager"):
+for _k in (
+    "developer",
+    "reviewer",
+    "manager",
+    "leader",
+    "product_manager",
+    "finance_officer",
+    "legal_counsel",
+    "business_manager",
+    "bid_writer",
+    "risk_compliance_officer",
+):
     _ensure_agent_state(_k)
 
 
