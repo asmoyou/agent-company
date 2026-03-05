@@ -1210,9 +1210,30 @@ let agentTypes = {};          // key → agent_type record
 const _urlParams = new URLSearchParams(location.search);
 const terminalOnlyMode = _urlParams.get("terminal_popout") === "1";
 const requestedProjectId = _urlParams.get("project") || null;
+const PROJECT_STORAGE_KEY = "opc_selected_project_id";
+function loadStoredProjectId() {
+  try {
+    const value = String(localStorage.getItem(PROJECT_STORAGE_KEY) || "").trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+function persistProjectId(projectId) {
+  try {
+    const normalized = String(projectId || "").trim();
+    if (normalized) localStorage.setItem(PROJECT_STORAGE_KEY, normalized);
+    else localStorage.removeItem(PROJECT_STORAGE_KEY);
+  } catch {}
+}
+function setCurrentProjectId(projectId) {
+  const normalized = String(projectId || "").trim() || null;
+  currentProjectId = normalized;
+  persistProjectId(normalized);
+}
 const requestedAgentKey = _urlParams.get("agent") || "";
 let terminalAgentFilter = terminalOnlyMode ? requestedAgentKey : "";
-let currentProjectId = requestedProjectId || null;
+let currentProjectId = requestedProjectId || loadStoredProjectId() || null;
 let currentTaskId = null;
 let ws = null;
 let wsPingTimer = null;
@@ -1872,12 +1893,17 @@ function loadProjects(list) {
   sel.innerHTML = '<option value="">— 选择项目 —</option>' +
     list.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join("");
   if (list.length > 0) {
+    const storedProjectId = loadStoredProjectId();
     const preferredProjectId =
       (requestedProjectId && projects[requestedProjectId] && requestedProjectId) ||
       (currentProjectId && projects[currentProjectId] && currentProjectId) ||
+      (storedProjectId && projects[storedProjectId] && storedProjectId) ||
       list[0].id;
-    currentProjectId = preferredProjectId;
+    setCurrentProjectId(preferredProjectId);
     sel.value = preferredProjectId;
+  } else {
+    setCurrentProjectId(null);
+    sel.value = "";
   }
   updateProjectUI();
 }
@@ -1893,7 +1919,7 @@ function upsertProjectOption(project) {
 }
 
 function onProjectChange() {
-  currentProjectId = document.getElementById("project-select").value || null;
+  setCurrentProjectId(document.getElementById("project-select").value || null);
   reconnectWSForScope();
   updateProjectUI();
   refreshBoard();
@@ -2976,7 +3002,7 @@ function openTaskWorkspace(event, taskId) {
       sel.value = targetProjectId;
       onProjectChange();
     } else {
-      currentProjectId = targetProjectId;
+      setCurrentProjectId(targetProjectId);
       reconnectWSForScope();
       updateProjectUI();
       refreshBoard();
@@ -3634,7 +3660,7 @@ async function submitNewProject(e) {
     upsertProjectOption(proj);
     const sel = document.getElementById("project-select");
     sel.value = proj.id;
-    currentProjectId = proj.id;
+    setCurrentProjectId(proj.id);
     reconnectWSForScope();
     updateProjectUI();
     refreshBoard();
@@ -3663,7 +3689,7 @@ async function deleteCurrentProject() {
       const sel = document.getElementById("project-select");
       const opt = sel.querySelector(`option[value="${pid}"]`);
       if (opt) opt.remove();
-      currentProjectId = sel.value || null;
+      setCurrentProjectId(sel.value || null);
       sel.value = currentProjectId || "";
       reconnectWSForScope();
       Object.keys(tasks).forEach(tid => { if (tasks[tid].project_id === pid) delete tasks[tid]; });
@@ -3935,7 +3961,7 @@ function connectWS() {
     }
     if (closeCode === 4403) {
       document.getElementById("ws-label").textContent="当前项目无权限，正在重置范围...";
-      currentProjectId = null;
+      setCurrentProjectId(null);
       const sel = document.getElementById("project-select");
       if (sel) sel.value = "";
       if (typeof updateProjectUI === "function") updateProjectUI();
@@ -3995,7 +4021,7 @@ function connectWS() {
       projects[msg.project.id]=msg.project;
       const sel=document.getElementById("project-select");
       upsertProjectOption(msg.project);
-      if (!currentProjectId) { sel.value=msg.project.id; currentProjectId=msg.project.id; updateProjectUI(); }
+      if (!currentProjectId) { sel.value=msg.project.id; setCurrentProjectId(msg.project.id); updateProjectUI(); }
     } else if (msg.event==="project_deleted") {
       const pid=msg.project_id;
       delete projects[pid];
@@ -4005,7 +4031,7 @@ function connectWS() {
       if (opt) opt.remove();
       // If current project was deleted, switch to first available
       if (currentProjectId===pid) {
-        currentProjectId=sel.value||null;
+        setCurrentProjectId(sel.value||null);
         sel.value=currentProjectId||"";
         reconnectWSForScope();
         updateProjectUI();
