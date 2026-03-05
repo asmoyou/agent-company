@@ -216,7 +216,6 @@
     body.terminal-compact .term-follow {
       display:none!important;
     }
-    body.terminal-compact #agent-status-badges { display:none!important; }
     body.terminal-compact #terminal-grid > div {
       min-width:300px!important;
     }
@@ -361,9 +360,9 @@
     <button id="terminal-popout-btn" class="term-popout-btn ml-auto" onclick="openTerminalPopout(event)" title="在新窗口查看终端">
       ↗ 放大
     </button>
-    <span id="terminal-chevron" class="text-slate-500 text-sm">▲</span>
+    <span id="terminal-chevron" class="text-slate-500 text-sm">▼</span>
   </div>
-  <div id="terminal-panel" style="height:200px;">
+  <div id="terminal-panel" class="collapsed" style="height:200px;">
     <div id="terminal-grid" class="flex gap-3 px-4 pb-3 overflow-x-auto" style="height:184px;"></div>
   </div>
 </div>
@@ -985,7 +984,7 @@ let ws = null;
 let wsPingTimer = null;
 let wsReconnectTimer = null;
 let wsCloseExpected = false;
-let terminalsVisible = true;
+let terminalsVisible = terminalOnlyMode;
 let agentStates = {};          // key -> runtime status payload
 let agentTermLines = {};       // key -> ring buffer of terminal entries
 let runtimeAgents = {};        // runtime-key -> {agent_key, worker_id, project_id}
@@ -1618,10 +1617,8 @@ function updateProjectUI() {
 function applyTerminalOnlyMode() {
   document.body.classList.toggle("terminal-only", terminalOnlyMode);
   document.body.classList.toggle("terminal-compact", !terminalOnlyMode);
-  if (!terminalOnlyMode) return;
-  terminalsVisible = true;
-  const panel = document.getElementById("terminal-panel");
-  if (panel) panel.classList.remove("collapsed");
+  if (terminalOnlyMode) terminalsVisible = true;
+  syncTerminalVisibility();
 }
 
 // ── Board ─────────────────────────────────────────────────────────────────────
@@ -1953,11 +1950,17 @@ function openTerminalPopout(event, agentKey = "") {
   pop.focus();
 }
 
+function syncTerminalVisibility() {
+  const panel = document.getElementById("terminal-panel");
+  const chevron = document.getElementById("terminal-chevron");
+  if (panel) panel.classList.toggle("collapsed", !terminalsVisible);
+  if (chevron) chevron.textContent = terminalsVisible ? "▲" : "▼";
+}
+
 function toggleTerminals() {
   if (terminalOnlyMode) return;
   terminalsVisible = !terminalsVisible;
-  document.getElementById("terminal-panel").classList.toggle("collapsed", !terminalsVisible);
-  document.getElementById("terminal-chevron").textContent = terminalsVisible?"▲":"▼";
+  syncTerminalVisibility();
 }
 
 const ANSI_RE = /\x1b\[([0-9;]*)m/g;
