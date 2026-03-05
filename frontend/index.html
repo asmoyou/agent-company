@@ -3613,14 +3613,34 @@ function fbNavigate(path) {
   bc.innerHTML = html;
 }
 
-function fbDownload(path) {
+function fbFilenameFromDisposition(disposition) {
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded && encoded[1]) {
+    try { return decodeURIComponent(encoded[1]); } catch (_) {}
+  }
+  const plain = disposition.match(/filename="?([^";]+)"?/i);
+  return plain && plain[1] ? plain[1] : "";
+}
+
+async function fbDownload(path) {
   if (!currentProjectId) return;
-  const a = document.createElement("a");
-  a.href = `${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(path)}`;
-  a.download = "";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  try {
+    const res = await apiFetch(`${API}/projects/${currentProjectId}/files/download?path=${encodeURIComponent(path)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const headerName = fbFilenameFromDisposition(res.headers.get("Content-Disposition") || "");
+    const fallbackName = String(path || "").split("/").pop() || "download";
+    const a = document.createElement("a");
+    const blobUrl = URL.createObjectURL(blob);
+    a.href = blobUrl;
+    a.download = headerName || fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(blobUrl);
+  } catch (err) {
+    alert("下载失败: " + err.message);
+  }
 }
 
 async function fbHandleUpload(event) {
