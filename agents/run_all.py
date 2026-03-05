@@ -31,6 +31,12 @@ BUILTIN_KEYS = {
     "business_manager",
     "bid_writer",
     "risk_compliance_officer",
+    "admin_specialist",
+    "marketing_specialist",
+    "hr_specialist",
+    "operations_specialist",
+    "customer_service_specialist",
+    "procurement_specialist",
 }
 RELOAD_INTERVAL_SECS = 3
 PROJECT_WORKERS_PER_AGENT = max(1, int(os.getenv("PROJECT_WORKERS_PER_AGENT", "1")))

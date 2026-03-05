@@ -7,7 +7,7 @@ from pathlib import Path
 from base import BaseAgent, get_project_dirs, parse_status_list
 
 TRIAGE_PROMPT_DEFAULT = (
-    "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
+    "你是项目主管，负责先完善任务需求，再评估是否需要分解与分派执行。请处理以下任务：\n\n"
     "## 任务标题\n{task_title}\n\n"
     "## 任务描述\n{task_description}\n\n"
     "## 可用 Agent 类型\n{agent_list}\n\n"
@@ -24,7 +24,7 @@ TRIAGE_PROMPT_DEFAULT = (
 )
 
 FORCE_DECOMPOSE_PROMPT = (
-    "你是一个专业的项目分解专家。请将以下任务分解为 2-5 个可执行的子任务：\n\n"
+    "你是项目主管。请在需求清晰的前提下，将以下任务分解为 2-5 个可执行子任务：\n\n"
     "## 任务标题\n{task_title}\n\n"
     "## 任务描述\n{task_description}\n\n"
     "## 可用 Agent 类型\n{agent_list}\n\n"
@@ -435,7 +435,7 @@ class LeaderAgent(BaseAgent):
         output: str = "",
     ):
         task_id = task["id"]
-        msg = f"[系统错误] Leader 结构化结果无效：{reason}"
+        msg = f"[系统错误] 主管（Leader）结构化结果无效：{reason}"
         current = self._current_system_retry(task.get("review_feedback"))
         next_retry = current + 1
         rollback_status = str(prev_status or task.get("status") or "triage").strip() or "triage"
@@ -464,7 +464,7 @@ class LeaderAgent(BaseAgent):
                     "to_agent": self.name,
                     "status_from": task.get("status"),
                     "status_to": rollback_status,
-                    "title": "Leader 结构化结果自动重试",
+                    "title": "主管（Leader）结构化结果自动重试",
                     "summary": feedback[:300],
                     "conclusion": "结构化结果无效，自动重试中",
                     "payload": {
@@ -483,7 +483,7 @@ class LeaderAgent(BaseAgent):
         if output.strip():
             await self.add_log(task_id, f"输出摘要:\n{output[:1000]}")
         await self.add_alert(
-            summary="Leader 结构化结果无效，任务阻塞",
+            summary="主管（Leader）结构化结果无效，任务阻塞",
             task_id=task_id,
             message=msg,
             kind="error",
@@ -506,7 +506,7 @@ class LeaderAgent(BaseAgent):
                 "to_agent": self.name,
                 "status_from": prev_status,
                 "status_to": "blocked",
-                "title": "Leader 结构化结果无效",
+                "title": "主管（Leader）结构化结果无效",
                 "summary": msg,
                 "conclusion": "结构化结果无效，任务阻塞等待修复",
                 "payload": {"reason": reason, "stage_code": stage_code},
@@ -566,11 +566,11 @@ class LeaderAgent(BaseAgent):
 
         if original_status == "decompose":
             # User explicitly requested decomposition — skip evaluation
-            await self.add_log(task_id, "Leader 执行强制分解（用户指定）")
+            await self.add_log(task_id, "主管（Leader）执行强制分解（用户指定）")
             await self._force_decompose(task)
         else:
             # Auto triage — evaluate complexity first
-            await self.add_log(task_id, "Leader 评估任务复杂度...")
+            await self.add_log(task_id, "主管（Leader）评估任务复杂度...")
             await self._auto_triage(task)
 
     async def _auto_triage(self, task: dict):
@@ -609,7 +609,7 @@ class LeaderAgent(BaseAgent):
             x for x in ("{task_title}", "{task_description}", "{agent_list}") if x in prompt
         ]
         if unresolved:
-            await self.add_log(task_id, f"⚠ Leader 模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
+            await self.add_log(task_id, f"⚠ 主管（Leader）模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
             prompt = self._render_prompt(
                 TRIAGE_PROMPT_DEFAULT,
                 task_title=task["title"],
@@ -657,12 +657,12 @@ class LeaderAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
                 return
             prev_status = task.get("_claimed_from_status", task.get("status", "triage"))
-            fail_msg = f"❌ Leader 评估失败（exit={returncode}），退回 {prev_status}"
+            fail_msg = f"❌ 主管（Leader）评估失败（exit={returncode}），退回 {prev_status}"
             await self.add_log(task_id, fail_msg)
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
             await self.add_alert(
-                summary=f"Leader 评估失败（exit={returncode}）",
+                summary=f"主管（Leader）评估失败（exit={returncode}）",
                 task_id=task_id,
                 message=output[-1200:].strip(),
                 kind="error",
@@ -679,7 +679,7 @@ class LeaderAgent(BaseAgent):
                     "status_from": prev_status,
                     "status_to": prev_status,
                     "title": "任务评估失败",
-                    "summary": f"Leader 评估失败（exit={returncode}），保持状态 {prev_status}",
+                    "summary": f"主管（Leader）评估失败（exit={returncode}），保持状态 {prev_status}",
                     "conclusion": f"评估失败，保持状态 {prev_status}",
                     "payload": {"exit_code": returncode},
                 },
@@ -805,7 +805,7 @@ class LeaderAgent(BaseAgent):
             x for x in ("{task_title}", "{task_description}", "{agent_list}") if x in prompt
         ]
         if unresolved:
-            await self.add_log(task_id, f"⚠ Leader 强制分解模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
+            await self.add_log(task_id, f"⚠ 主管（Leader）强制分解模板仍有未替换占位符: {', '.join(unresolved)}，回退默认模板")
             prompt = self._render_prompt(
                 FORCE_DECOMPOSE_PROMPT,
                 task_title=task["title"],
@@ -853,12 +853,12 @@ class LeaderAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):
                 return
             prev_status = task.get("_claimed_from_status", task.get("status", "decompose"))
-            fail_msg = f"❌ Leader 分解失败（exit={returncode}），退回 {prev_status}"
+            fail_msg = f"❌ 主管（Leader）分解失败（exit={returncode}），退回 {prev_status}"
             await self.add_log(task_id, fail_msg)
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
             await self.add_alert(
-                summary=f"Leader 分解失败（exit={returncode}）",
+                summary=f"主管（Leader）分解失败（exit={returncode}）",
                 task_id=task_id,
                 message=output[-1200:].strip(),
                 kind="error",
@@ -875,7 +875,7 @@ class LeaderAgent(BaseAgent):
                     "status_from": prev_status,
                     "status_to": prev_status,
                     "title": "任务分解失败",
-                    "summary": f"Leader 分解失败（exit={returncode}），保持状态 {prev_status}",
+                    "summary": f"主管（Leader）分解失败（exit={returncode}），保持状态 {prev_status}",
                     "conclusion": f"分解失败，保持状态 {prev_status}",
                     "payload": {"exit_code": returncode},
                 },

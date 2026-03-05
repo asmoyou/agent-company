@@ -97,13 +97,14 @@ MANAGER_PROMPT_DEFAULT = (
 )
 
 LEADER_PROMPT_DEFAULT = (
-    "你是一个专业的项目评估与分解专家。请评估以下任务是否需要分解：\n\n"
+    "你是项目主管，负责先完善任务需求，再评估是否需要分解与分派执行。请处理以下任务：\n\n"
     "## 任务标题\n{task_title}\n\n"
     "## 任务描述\n{task_description}\n\n"
     "## 可用 Agent 类型\n{agent_list}\n\n"
     "## 评估标准\n"
     "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
-    "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
+    "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n"
+    "- **信息不足任务**：先在 refined_description 中补齐结构化需求，并标记待确认项\n\n"
     "## 子任务质量门槛（必须满足）\n"
     "1. 子任务必须可独立验收，禁止空泛措辞。\n"
     "2. 每个子任务必须包含：title/objective/todo_steps/deliverables/acceptance_criteria/agent。\n"
@@ -214,6 +215,102 @@ RISK_COMPLIANCE_PROMPT_DEFAULT = (
     "直接开始执行，不需要解释计划。"
 )
 
+ADMIN_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名行政专员，负责以下任务的通用文书与内部行政材料输出。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出结构完整的行政文书（通知、请示、会议纪要、制度草案、流程说明等）\n"
+    "2. 术语、格式、日期、责任人和执行时间必须清晰，避免模糊表述\n"
+    "3. 所有成果必须写入文件（`.md` / `.docx` 模板说明 / `.csv` 等）\n"
+    "4. 在当前工作分支完成并提交，不要自行合并 main\n"
+    "5. 如信息缺失，请标注“待确认”并列出最小补充清单\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
+MARKETING_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名市场专员，负责以下任务的市场调研、活动策划与推广文案输出。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出可落地的市场方案（目标客群、渠道策略、预算拆分、里程碑、复盘指标）\n"
+    "2. 给出关键假设、数据依据和风险提示，不可只写口号\n"
+    "3. 涉及宣传内容时，需给出多版本文案与适用场景\n"
+    "4. 所有成果必须写入文件并提交到当前工作分支\n"
+    "5. 提交后交由 reviewer/manager 流转，不要跳过审查\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
+HR_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名人力资源专员，负责以下任务的招聘、培训、绩效与组织制度文档输出。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出结构化 HR 材料（JD、面试评估表、培训计划、绩效模板、制度草案）\n"
+    "2. 明确岗位职责、评估标准、流程节点与责任角色\n"
+    "3. 所有成果必须写入文件，在当前工作分支提交\n"
+    "4. 涉及政策或法规内容时，需标注依据与待法务确认项\n"
+    "5. 提交后按 reviewer/manager 流程继续推进\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
+OPERATIONS_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名运营专员，负责以下任务的运营执行方案、流程优化与数据复盘文档。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出可执行运营方案（目标、动作、排期、资源、人效指标、复盘机制）\n"
+    "2. 拆解关键流程，给出依赖关系、风险点与应急预案\n"
+    "3. 所有成果必须写入文件并在当前工作分支提交\n"
+    "4. 涉及数据结论时要说明口径、来源和统计周期\n"
+    "5. 提交后交由 reviewer/manager 按流程处理\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
+CUSTOMER_SERVICE_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名客服专员，负责以下任务的服务话术、工单规范与客户问题闭环方案。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出标准化客服资料（FAQ、SOP、升级路径、话术模板、质检清单）\n"
+    "2. 按问题类型定义响应 SLA、升级条件和跟进节点\n"
+    "3. 所有成果必须写入文件并提交到当前工作分支\n"
+    "4. 对潜在投诉或舆情风险给出预警和处理建议\n"
+    "5. 提交后交由 reviewer/manager 继续流转\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
+PROCUREMENT_SPECIALIST_PROMPT_DEFAULT = (
+    "你是一名采购专员，负责以下任务的询报价、供应商评估与采购合规材料输出。\n\n"
+    "## 任务信息\n\n"
+    "**标题**：{task_title}\n\n"
+    "**需求描述**：\n"
+    "{task_description}\n\n"
+    "{rework_section}\n\n"
+    "## 工作要求\n\n"
+    "1. 输出采购执行材料（需求清单、比选矩阵、询报价记录、采购建议）\n"
+    "2. 明确供应商评价维度（价格、交付、质量、售后、合规）\n"
+    "3. 所有成果必须写入文件，在当前工作分支完成并提交\n"
+    "4. 标注关键风险、合同关注点与待法务确认项\n"
+    "5. 提交后按 reviewer/manager 流程继续推进\n\n"
+    "直接开始执行，不需要解释计划。"
+)
+
 BUILTIN_PROMPTS = {
     "developer": DEVELOPER_PROMPT_DEFAULT,
     "reviewer": REVIEWER_PROMPT_DEFAULT,
@@ -225,6 +322,12 @@ BUILTIN_PROMPTS = {
     "business_manager": BUSINESS_MANAGER_PROMPT_DEFAULT,
     "bid_writer": BID_WRITER_PROMPT_DEFAULT,
     "risk_compliance_officer": RISK_COMPLIANCE_PROMPT_DEFAULT,
+    "admin_specialist": ADMIN_SPECIALIST_PROMPT_DEFAULT,
+    "marketing_specialist": MARKETING_SPECIALIST_PROMPT_DEFAULT,
+    "hr_specialist": HR_SPECIALIST_PROMPT_DEFAULT,
+    "operations_specialist": OPERATIONS_SPECIALIST_PROMPT_DEFAULT,
+    "customer_service_specialist": CUSTOMER_SERVICE_SPECIALIST_PROMPT_DEFAULT,
+    "procurement_specialist": PROCUREMENT_SPECIALIST_PROMPT_DEFAULT,
 }
 
 
@@ -556,8 +659,8 @@ def _seed_builtin_agents(conn):
         },
         {
             "key": "leader",
-            "name": "分解专家",
-            "description": "评估新任务复杂度：简单任务直接推进开发，复杂任务自动分解为子任务",
+            "name": "主管",
+            "description": "负责完善任务需求并统筹分派：简单任务直接推进执行，复杂任务分解为可验收子任务",
             "poll_statuses": '["triage","decompose"]',
             "next_status": "decomposed",
             "working_status": "triaging",
@@ -617,6 +720,60 @@ def _seed_builtin_agents(conn):
             "next_status": "in_review",
             "working_status": "in_progress",
         },
+        {
+            "key": "admin_specialist",
+            "name": "行政专员",
+            "description": "负责通用行政文书、通知通告、会议纪要与制度流程文档",
+            "prompt": BUILTIN_PROMPTS["admin_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "marketing_specialist",
+            "name": "市场专员",
+            "description": "负责市场调研、品牌传播、活动策划与推广复盘",
+            "prompt": BUILTIN_PROMPTS["marketing_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "hr_specialist",
+            "name": "人力资源专员",
+            "description": "负责人力招聘、面试评估、培训方案与组织制度文档",
+            "prompt": BUILTIN_PROMPTS["hr_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "operations_specialist",
+            "name": "运营专员",
+            "description": "负责运营策略、流程执行、数据复盘与改进方案",
+            "prompt": BUILTIN_PROMPTS["operations_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "customer_service_specialist",
+            "name": "客服专员",
+            "description": "负责客服话术、工单处理规范与客户反馈闭环",
+            "prompt": BUILTIN_PROMPTS["customer_service_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
+        {
+            "key": "procurement_specialist",
+            "name": "采购专员",
+            "description": "负责采购比选、询报价、供应商管理与采购合规文档",
+            "prompt": BUILTIN_PROMPTS["procurement_specialist"],
+            "poll_statuses": '["todo","needs_changes"]',
+            "next_status": "in_review",
+            "working_status": "in_progress",
+        },
     ]
     now = _now()
     for b in builtins:
@@ -645,6 +802,24 @@ def _seed_builtin_agents(conn):
            SET poll_statuses='["triage","decompose"]', working_status='triaging'
            WHERE key='leader' AND (poll_statuses='["decompose"]' OR working_status='decomposing')"""
     )
+    # Migrate legacy leader naming/description to avoid role misunderstanding.
+    conn.execute(
+        """UPDATE agent_types
+           SET name='主管'
+           WHERE key='leader' AND is_builtin=1
+             AND (TRIM(COALESCE(name, ''))='' OR name='分解专家' OR LOWER(name)='leader')"""
+    )
+    conn.execute(
+        """UPDATE agent_types
+           SET description=?
+           WHERE key='leader' AND is_builtin=1
+             AND (
+                TRIM(COALESCE(description, ''))=''
+                OR INSTR(description, '复杂度') > 0
+                OR INSTR(description, '分解为子任务') > 0
+             )""",
+        ("负责完善任务需求并统筹分派：简单任务直接推进执行，复杂任务分解为可验收子任务",),
+    )
     # Migrate legacy rows where built-in prompt was empty.
     for key, prompt in BUILTIN_PROMPTS.items():
         conn.execute(
@@ -670,6 +845,14 @@ def _seed_builtin_agents(conn):
              AND INSTR(prompt, '输出格式') > 0
              AND INSTR(prompt, '子任务质量门槛') = 0
              AND (INSTR(prompt, 'acceptance_criteria') = 0 OR INSTR(prompt, 'todo_steps') = 0)""",
+        (BUILTIN_PROMPTS["leader"],),
+    )
+    # Migrate legacy leader prompt title to主管语义（仅在仍使用旧默认措辞时覆盖）。
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='leader' AND is_builtin=1
+             AND INSTR(prompt, '项目评估与分解专家') > 0""",
         (BUILTIN_PROMPTS["leader"],),
     )
     # Migrate outdated built-in developer prompt that lacked branch/handoff constraints.

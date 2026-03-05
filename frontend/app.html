@@ -657,11 +657,11 @@
       </button>
     </div>
 
-    <!-- 分解按钮 (todo only, non-subtask) — 强制让 leader 分解 -->
+    <!-- 分解按钮 (todo only, non-subtask) — 强制让主管（leader）分解 -->
     <div id="panel-decompose-btn" class="hidden">
       <button onclick="decomposeCurrentTask()"
         class="w-full bg-fuchsia-900/40 hover:bg-fuchsia-900/70 text-fuchsia-300 text-sm py-2 rounded-lg border border-fuchsia-900/50 transition">
-        🧩 强制分解（让 Leader 拆分为子任务）
+        🧩 强制分解（让主管拆分为子任务）
       </button>
     </div>
 
@@ -1026,9 +1026,9 @@ async function logout() {
 }
 
 const COLUMNS = [
-  { status:"triage",             label:"待评估",   dot:"bg-violet-500",  hint:"新任务进入队列，等待 Leader 评估复杂度" },
-  { status:"triaging",           label:"评估中",   dot:"bg-violet-400",  hint:"Leader 正在评估任务或决定是否分解" },
-  { status:"decompose",          label:"强制分解",  dot:"bg-fuchsia-500", hint:"任务被标记为必须分解，等待 Leader 拆分子任务" },
+  { status:"triage",             label:"待评估",   dot:"bg-violet-500",  hint:"新任务进入队列，等待主管（leader）评估复杂度" },
+  { status:"triaging",           label:"评估中",   dot:"bg-violet-400",  hint:"主管（leader）正在完善需求并决定是否分解" },
+  { status:"decompose",          label:"强制分解",  dot:"bg-fuchsia-500", hint:"任务被标记为必须分解，等待主管（leader）拆分子任务" },
   { status:"decomposed",         label:"已分解",   dot:"bg-fuchsia-400", hint:"父任务已拆分，子任务推进完成后父任务会完成" },
   { status:"todo",               label:"待开发",   dot:"bg-slate-500",   hint:"等待开发 Agent 认领并开始实现" },
   { status:"in_progress",        label:"开发中",   dot:"bg-blue-500",    hint:"开发 Agent 正在实现并提交变更" },
@@ -3213,7 +3213,7 @@ async function archiveCurrentTask() {
 }
 async function decomposeCurrentTask() {
   if (!currentTaskId) return;
-  if (!await uiConfirm("将此任务标记为「待分解」，Leader Agent 会自动拆分为子任务。确认？", "强制分解", {okText: "确认分解"})) return;
+  if (!await uiConfirm("将此任务标记为「待分解」，主管（leader）Agent 会自动拆分为子任务。确认？", "强制分解", {okText: "确认分解"})) return;
   await taskAction(currentTaskId, "decompose");
 }
 async function cancelCurrentTask() {
