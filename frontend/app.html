@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>多智能体任务看板</title>
+  <title>LinX协作平台简易演示网络版</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -534,6 +534,351 @@
     .msg-btn:hover{color:#e2e8f0;border-color:#475569;}
     .msg-btn.primary{background:#4f46e5;border-color:#4338ca;color:#eef2ff;}
     .msg-btn.primary:hover{background:#6366f1;border-color:#4f46e5;}
+    .support-chat{
+      --support-chat-base-bottom:20px;
+      --support-chat-extra-bottom:0px;
+      position:fixed;
+      right:18px;
+      bottom:calc(var(--support-chat-base-bottom) + var(--support-chat-extra-bottom));
+      z-index:70;
+      display:flex;
+      flex-direction:column;
+      align-items:flex-end;
+      gap:12px;
+      pointer-events:none;
+    }
+    .support-chat *{pointer-events:auto;}
+    .support-chat-fab{
+      width:54px;
+      height:54px;
+      border-radius:999px;
+      border:1px solid rgba(99,102,241,.55);
+      background:linear-gradient(145deg, #4f46e5, #0ea5e9);
+      color:#fff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:24px;
+      box-shadow:0 14px 30px rgba(30,64,175,.42), inset 0 1px 0 rgba(255,255,255,.25);
+      transition:transform .2s var(--ease-smooth), box-shadow .2s var(--ease-smooth), filter .2s var(--ease-smooth);
+    }
+    .support-chat-fab:hover{transform:translateY(-2px) scale(1.02);filter:brightness(1.06);}
+    .support-chat-fab.open{
+      transform:scale(.92);
+      box-shadow:0 8px 20px rgba(30,64,175,.3), inset 0 1px 0 rgba(255,255,255,.18);
+    }
+    .support-chat-panel{
+      width:min(430px, calc(100vw - 24px));
+      height:min(70vh, 640px);
+      min-height:420px;
+      background:linear-gradient(180deg, rgba(15,23,42,.97), rgba(2,6,23,.95));
+      border:1px solid rgba(100,116,139,.68);
+      border-radius:14px;
+      box-shadow:0 26px 54px rgba(2,6,23,.62), inset 0 1px 0 rgba(148,163,184,.08);
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      backdrop-filter:blur(8px);
+    }
+    .support-chat-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      padding:12px 14px 10px;
+      border-bottom:1px solid rgba(51,65,85,.82);
+      background:linear-gradient(180deg, rgba(15,23,42,.88), rgba(15,23,42,.72));
+    }
+    .support-chat-title{
+      font-size:14px;
+      line-height:1.2;
+      font-weight:600;
+      color:#f1f5f9;
+    }
+    .support-chat-subtitle{
+      margin-top:3px;
+      font-size:11px;
+      color:#94a3b8;
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:6px;
+    }
+    .support-chat-health{
+      display:inline-flex;
+      align-items:center;
+      gap:4px;
+      font-size:11px;
+      line-height:1.2;
+      border-radius:999px;
+      padding:1px 7px;
+      border:1px solid transparent;
+      vertical-align:middle;
+      white-space:nowrap;
+      max-width:270px;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .support-chat-health::before{
+      content:"";
+      width:6px;
+      height:6px;
+      border-radius:50%;
+      display:inline-block;
+      flex:0 0 auto;
+    }
+    .support-chat-health.checking{
+      color:#cbd5e1;
+      background:rgba(71,85,105,.28);
+      border-color:rgba(100,116,139,.48);
+    }
+    .support-chat-health.checking::before{background:#94a3b8;}
+    .support-chat-health.ok{
+      color:#86efac;
+      background:rgba(20,83,45,.25);
+      border-color:rgba(34,197,94,.42);
+    }
+    .support-chat-health.ok::before{background:#4ade80;}
+    .support-chat-health.warn{
+      color:#fde68a;
+      background:rgba(113,63,18,.22);
+      border-color:rgba(245,158,11,.44);
+    }
+    .support-chat-health.warn::before{background:#f59e0b;}
+    .support-chat-health.err{
+      color:#fecaca;
+      background:rgba(127,29,29,.2);
+      border-color:rgba(239,68,68,.44);
+    }
+    .support-chat-health.err::before{background:#ef4444;}
+    .support-chat-health-btn{
+      border:1px solid rgba(71,85,105,.62);
+      background:rgba(15,23,42,.55);
+      color:#cbd5e1;
+      font-size:11px;
+      line-height:1;
+      border-radius:999px;
+      padding:2px 8px;
+      cursor:pointer;
+      transition:all .18s ease;
+      white-space:nowrap;
+    }
+    .support-chat-health-btn:hover{
+      color:#e2e8f0;
+      border-color:rgba(99,102,241,.72);
+      background:rgba(30,41,59,.72);
+    }
+    .support-chat-health-btn:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+    }
+    .support-chat-close{
+      border:0;
+      background:transparent;
+      color:#94a3b8;
+      font-size:21px;
+      line-height:1;
+      padding:0 3px;
+      cursor:pointer;
+    }
+    .support-chat-close:hover{color:#e2e8f0;}
+    .support-chat-body{
+      flex:1 1 auto;
+      min-height:0;
+      overflow:auto;
+      padding:14px 12px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      background:
+        radial-gradient(540px 220px at 0% 0%, rgba(56,189,248,.07), transparent 72%),
+        radial-gradient(520px 220px at 100% 100%, rgba(99,102,241,.08), transparent 68%);
+    }
+    .support-chat-row{
+      display:flex;
+      width:100%;
+    }
+    .support-chat-row.assistant{justify-content:flex-start;}
+    .support-chat-row.user{justify-content:flex-end;}
+    .support-chat-bubble{
+      max-width:86%;
+      border-radius:14px;
+      padding:9px 11px;
+      font-size:13px;
+      line-height:1.58;
+      border:1px solid rgba(71,85,105,.74);
+      word-break:break-word;
+      box-shadow:0 8px 18px rgba(2,6,23,.25);
+    }
+    .support-chat-row.assistant .support-chat-bubble{
+      background:linear-gradient(180deg, rgba(30,41,59,.82), rgba(15,23,42,.9));
+      color:#dbeafe;
+      border-color:rgba(71,85,105,.78);
+    }
+    .support-chat-row.user .support-chat-bubble{
+      background:linear-gradient(165deg, rgba(67,56,202,.9), rgba(14,116,144,.82));
+      color:#eef2ff;
+      border-color:rgba(129,140,248,.65);
+    }
+    .support-chat-empty{
+      margin:auto;
+      text-align:center;
+      font-size:12px;
+      color:#64748b;
+      line-height:1.7;
+      max-width:300px;
+    }
+    .support-chat-thinking{
+      color:#93c5fd;
+      font-size:12px;
+      letter-spacing:.03em;
+    }
+    .support-chat-caret{
+      display:inline-block;
+      width:8px;
+      height:1em;
+      vertical-align:text-bottom;
+      margin-left:2px;
+      background:#bfdbfe;
+      border-radius:2px;
+      animation:support-chat-caret .9s steps(1) infinite;
+    }
+    @keyframes support-chat-caret{
+      0%,50%{opacity:1}
+      50.01%,100%{opacity:0}
+    }
+    .support-chat-msg{margin:0;}
+    .support-chat-msg > *:first-child{margin-top:0;}
+    .support-chat-msg > *:last-child{margin-bottom:0;}
+    .support-chat-reasoning{
+      margin:0 0 8px;
+      border:1px solid rgba(71,85,105,.72);
+      border-radius:10px;
+      background:rgba(2,6,23,.28);
+      overflow:hidden;
+    }
+    .support-chat-reasoning summary{
+      cursor:pointer;
+      list-style:none;
+      user-select:none;
+      font-size:11px;
+      line-height:1.35;
+      color:#94a3b8;
+      padding:6px 9px;
+      background:rgba(15,23,42,.52);
+      border-bottom:1px solid transparent;
+    }
+    .support-chat-reasoning summary::-webkit-details-marker{display:none;}
+    .support-chat-reasoning[open] summary{border-bottom-color:rgba(71,85,105,.68);}
+    .support-chat-reasoning.streaming summary{color:#bfdbfe;}
+    .support-chat-reasoning-body{
+      padding:8px 9px 9px;
+      max-height:220px;
+      overflow:auto;
+      color:#cbd5e1;
+      font-size:12px;
+      line-height:1.55;
+    }
+    .support-chat-reasoning-text{
+      white-space:pre-wrap;
+      word-break:break-word;
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    .support-chat-reasoning-body > *:first-child{margin-top:0;}
+    .support-chat-reasoning-body > *:last-child{margin-bottom:0;}
+    .support-chat-compose{
+      border-top:1px solid rgba(51,65,85,.8);
+      padding:10px 11px 12px;
+      background:linear-gradient(180deg, rgba(15,23,42,.88), rgba(2,6,23,.96));
+    }
+    .support-chat-input{
+      width:100%;
+      min-height:74px;
+      max-height:180px;
+      resize:vertical;
+      border-radius:10px;
+      border:1px solid rgba(71,85,105,.86);
+      background:rgba(2,6,23,.66);
+      color:#f1f5f9;
+      padding:8px 10px;
+      font-size:13px;
+      line-height:1.5;
+      outline:none;
+    }
+    .support-chat-input:focus{
+      border-color:rgba(99,102,241,.9);
+      box-shadow:0 0 0 2px rgba(99,102,241,.24);
+    }
+    .support-chat-actions{
+      margin-top:8px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:8px;
+    }
+    .support-chat-tip{
+      font-size:11px;
+      color:#64748b;
+      line-height:1.5;
+      user-select:none;
+    }
+    .support-chat-btn{
+      border-radius:8px;
+      font-size:12px;
+      line-height:1;
+      padding:8px 12px;
+      border:1px solid #334155;
+      background:#1e293b;
+      color:#d1d5db;
+      transition:all .14s ease;
+      cursor:pointer;
+      white-space:nowrap;
+    }
+    .support-chat-btn:hover:not(:disabled){
+      border-color:#475569;
+      color:#f8fafc;
+    }
+    .support-chat-btn:disabled{
+      opacity:.46;
+      cursor:not-allowed;
+    }
+    .support-chat-btn.stop{
+      background:#3f1d2e;
+      border-color:#7f1d1d;
+      color:#fecdd3;
+    }
+    .support-chat-btn.stop:hover:not(:disabled){
+      background:#4f263b;
+      border-color:#be123c;
+      color:#ffe4e6;
+    }
+    .support-chat-btn.send{
+      background:linear-gradient(135deg, #4f46e5, #6366f1);
+      border-color:rgba(99,102,241,.82);
+      color:#fff;
+      box-shadow:0 10px 18px rgba(79,70,229,.28);
+    }
+    .support-chat-btn.send:hover:not(:disabled){
+      filter:brightness(1.06);
+    }
+    @media (max-width:768px){
+      .support-chat{
+        right:10px;
+        --support-chat-base-bottom:10px;
+      }
+      .support-chat-panel{
+        width:min(100vw - 16px, 440px);
+        height:min(78vh, 670px);
+        min-height:360px;
+      }
+      .support-chat-fab{
+        width:50px;
+        height:50px;
+        font-size:22px;
+      }
+      .support-chat-bubble{max-width:92%;}
+      .support-chat-tip{display:none;}
+    }
     #modal-agents > div,
     #modal-project > div,
     #modal-dir-picker > div,
@@ -845,6 +1190,39 @@
       <button id="msg-dialog-ok" type="button" class="msg-btn primary">确定</button>
     </div>
   </div>
+</div>
+<div id="support-chat" class="support-chat" aria-live="polite">
+  <div id="support-chat-panel" class="support-chat-panel hidden" role="dialog" aria-modal="false" aria-label="智能客服">
+    <div class="support-chat-head">
+      <div>
+        <div class="support-chat-title">智能客服</div>
+        <div class="support-chat-subtitle">
+          <span>可解答平台使用问题，也可以闲聊</span>
+          <span id="support-chat-health" class="support-chat-health checking" title="启动后自动自检">模型自检: 待检查</span>
+          <button id="support-chat-health-check" type="button" class="support-chat-health-btn" title="检查模型网关与模型可用性">启动自检接口</button>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="support-chat-clear" type="button" class="support-chat-health-btn" title="清空本地历史消息">清空历史</button>
+        <button id="support-chat-close" type="button" class="support-chat-close" aria-label="关闭客服">&times;</button>
+      </div>
+    </div>
+    <div id="support-chat-body" class="support-chat-body"></div>
+    <div class="support-chat-compose">
+      <textarea
+        id="support-chat-input"
+        class="support-chat-input"
+        rows="3"
+        placeholder="输入你的问题，Enter 发送，Shift+Enter 换行"></textarea>
+      <div class="support-chat-actions">
+        <div class="support-chat-tip">客服基于本平台教程回答，必要时会先追问上下文。</div>
+        <div class="flex items-center gap-2">
+          <button id="support-chat-send" type="button" class="support-chat-btn send">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <button id="support-chat-fab" type="button" class="support-chat-fab" aria-label="打开智能客服" title="智能客服">💬</button>
 </div>
 <div id="onboarding-overlay" class="hidden" role="dialog" aria-modal="true" aria-hidden="true">
   <div class="onboarding-mask"></div>
@@ -3142,6 +3520,536 @@ function showToast(title, message, kind = "error") {
   }, 5200);
 }
 
+// ── Support Chat ──────────────────────────────────────────────────────────────
+const SUPPORT_CHAT_STORAGE_KEY = "opc_support_chat_messages_v1";
+const SUPPORT_CHAT_MAX_MESSAGES = 30;
+const SUPPORT_CHAT_DEFAULT_GREETING = "你好，我是 LinX协作平台简易演示网络版智能客服。可以问我平台使用、任务流转、状态含义、常见报错，也可以闲聊。";
+const supportChatState = {
+  refs: null,
+  open: false,
+  streaming: false,
+  abortController: null,
+  healthChecking: false,
+  messages: [],
+  seq: 0,
+  bottomObserver: null,
+  bottomRaf: 0,
+  bound: false,
+};
+
+function supportChatCreateMessage(role, content) {
+  supportChatState.seq += 1;
+  return {
+    id: `sc-${Date.now()}-${supportChatState.seq}`,
+    role: role === "user" ? "user" : "assistant",
+    content: String(content || ""),
+    reasoning: "",
+    created_at: new Date().toISOString(),
+  };
+}
+
+function supportChatNormalizeHistory(rows) {
+  if (!Array.isArray(rows)) return [];
+  const out = [];
+  for (const raw of rows) {
+    const role = String(raw?.role || "").trim().toLowerCase();
+    let content = String(raw?.content || "");
+    let reasoning = String(raw?.reasoning || "");
+    if (role === "assistant" && !reasoning.trim()) {
+      const trimmed = content.trimStart();
+      if (/^(Thinking Process:|<think>)/i.test(trimmed)) {
+        reasoning = content;
+        content = "";
+      }
+    }
+    const hasVisible = !!content.trim() || (role === "assistant" && !!reasoning.trim());
+    if ((role !== "user" && role !== "assistant") || !hasVisible) continue;
+    out.push({
+      id: String(raw?.id || `sc-history-${out.length + 1}`),
+      role,
+      content: content.slice(0, 20000),
+      reasoning: reasoning.slice(0, 30000),
+      created_at: String(raw?.created_at || ""),
+    });
+  }
+  return out.slice(-SUPPORT_CHAT_MAX_MESSAGES);
+}
+
+function supportChatLoadHistory() {
+  try {
+    const raw = localStorage.getItem(SUPPORT_CHAT_STORAGE_KEY);
+    if (!raw) return [];
+    return supportChatNormalizeHistory(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function supportChatPersistHistory() {
+  try {
+    const payload = supportChatState.messages.slice(-SUPPORT_CHAT_MAX_MESSAGES);
+    localStorage.setItem(SUPPORT_CHAT_STORAGE_KEY, JSON.stringify(payload));
+  } catch {}
+}
+
+function supportChatGetMessageById(messageId) {
+  return supportChatState.messages.find((item) => item.id === messageId) || null;
+}
+
+function supportChatAppendMessage(role, content) {
+  const msg = supportChatCreateMessage(role, content);
+  supportChatState.messages.push(msg);
+  supportChatState.messages = supportChatState.messages.slice(-SUPPORT_CHAT_MAX_MESSAGES);
+  supportChatPersistHistory();
+  supportChatRenderMessages(true);
+  return msg;
+}
+
+function supportChatReplaceMessageContent(messageId, nextContent) {
+  const msg = supportChatGetMessageById(messageId);
+  if (!msg) return;
+  msg.content = String(nextContent || "");
+  supportChatPersistHistory();
+  supportChatRenderMessages(true);
+}
+
+function supportChatAppendMessageContent(messageId, delta) {
+  const msg = supportChatGetMessageById(messageId);
+  if (!msg) return;
+  msg.content = `${msg.content || ""}${String(delta || "")}`;
+  supportChatPersistHistory();
+  supportChatRenderMessages(true);
+}
+
+function supportChatAppendMessageReasoning(messageId, delta) {
+  const msg = supportChatGetMessageById(messageId);
+  if (!msg) return;
+  msg.reasoning = `${msg.reasoning || ""}${String(delta || "")}`;
+  supportChatPersistHistory();
+  supportChatRenderMessages(true);
+}
+
+function supportChatCanSubmit() {
+  const refs = supportChatState.refs;
+  if (!refs || !refs.input) return false;
+  return !supportChatState.streaming && !!String(refs.input.value || "").trim();
+}
+
+function supportChatUpdatePrimaryButton() {
+  const refs = supportChatState.refs;
+  if (!refs || !refs.sendBtn) return;
+  const btn = refs.sendBtn;
+  if (supportChatState.streaming) {
+    btn.disabled = false;
+    btn.textContent = "停止生成";
+    btn.title = "停止当前生成";
+    btn.classList.add("stop");
+    btn.classList.remove("send");
+    return;
+  }
+  btn.disabled = !supportChatCanSubmit();
+  btn.textContent = "发送";
+  btn.title = "发送";
+  btn.classList.add("send");
+  btn.classList.remove("stop");
+}
+
+function supportChatUpdateBottomOffset() {
+  const refs = supportChatState.refs;
+  const root = refs?.root;
+  if (!root) return;
+  const shell = document.getElementById("agent-terminal-shell");
+  if (!shell) {
+    root.style.setProperty("--support-chat-extra-bottom", "0px");
+    return;
+  }
+  const rect = shell.getBoundingClientRect();
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  let overlap = 0;
+  if (rect.top < viewportH && rect.bottom > 0) {
+    overlap = Math.max(0, Math.min(viewportH, rect.bottom) - Math.max(0, rect.top));
+  }
+  root.style.setProperty("--support-chat-extra-bottom", `${Math.ceil(overlap)}px`);
+}
+
+function supportChatScheduleBottomOffset() {
+  if (supportChatState.bottomRaf) return;
+  supportChatState.bottomRaf = window.requestAnimationFrame(() => {
+    supportChatState.bottomRaf = 0;
+    supportChatUpdateBottomOffset();
+  });
+}
+
+function supportChatAutoResizeInput() {
+  const refs = supportChatState.refs;
+  const input = refs?.input;
+  if (!input) return;
+  input.style.height = "auto";
+  const next = Math.max(74, Math.min(input.scrollHeight, 180));
+  input.style.height = `${next}px`;
+}
+
+function supportChatScrollToBottom(force = false) {
+  const body = supportChatState.refs?.body;
+  if (!body) return;
+  const gap = body.scrollHeight - body.scrollTop - body.clientHeight;
+  if (force || gap < 80) body.scrollTop = body.scrollHeight;
+}
+
+function supportChatRenderMessages(scrollToBottom = false) {
+  const refs = supportChatState.refs;
+  if (!refs || !refs.body) return;
+  const list = supportChatState.messages;
+  if (!list.length) {
+    refs.body.innerHTML = '<div class="support-chat-empty">输入你想了解的问题，例如：如何创建项目、任务卡状态代表什么、为什么任务会 blocked。</div>';
+    return;
+  }
+  const tailId = list[list.length - 1]?.id || "";
+  refs.body.innerHTML = list.map((item) => {
+    const role = item.role === "user" ? "user" : "assistant";
+    const content = String(item.content || "");
+    const reasoning = String(item.reasoning || "");
+    const isTailStreaming = supportChatState.streaming && item.id === tailId;
+    const shouldOpenReasoning = role === "assistant" && !!reasoning.trim() && isTailStreaming && !content.trim();
+    const reasoningSummary = shouldOpenReasoning ? "思考中（自动展开）" : "思考过程（点击展开）";
+    const reasoningHtml = (role === "assistant" && reasoning.trim())
+      ? `<details class="support-chat-reasoning ${isTailStreaming ? "streaming" : ""}" ${shouldOpenReasoning ? "open" : ""}>
+          <summary>${reasoningSummary}</summary>
+          <div class="support-chat-reasoning-body"><div class="support-chat-reasoning-text">${escHtml(reasoning)}</div></div>
+        </details>`
+      : "";
+    const rich = content.trim()
+      ? renderRichMsg(content)
+      : (!reasoning.trim() ? '<p class="support-chat-thinking">正在思考...</p>' : "");
+    const caret = supportChatState.streaming && role === "assistant" && item.id === tailId
+      ? '<span class="support-chat-caret" aria-hidden="true"></span>'
+      : "";
+    return `<div class="support-chat-row ${role}">
+      <div class="support-chat-bubble">
+        ${reasoningHtml}
+        <div class="support-chat-msg msg-rich">${rich}${caret}</div>
+      </div>
+    </div>`;
+  }).join("");
+  supportChatScrollToBottom(scrollToBottom);
+}
+
+function supportChatSetStreaming(next) {
+  const refs = supportChatState.refs;
+  supportChatState.streaming = !!next;
+  if (!refs) return;
+  if (refs.clearBtn) refs.clearBtn.disabled = supportChatState.streaming;
+  supportChatUpdatePrimaryButton();
+}
+
+function supportChatSetOpen(nextOpen) {
+  const refs = supportChatState.refs;
+  if (!refs) return;
+  supportChatState.open = !!nextOpen;
+  refs.panel.classList.toggle("hidden", !supportChatState.open);
+  refs.fab.classList.toggle("open", supportChatState.open);
+  supportChatScheduleBottomOffset();
+  if (supportChatState.open) {
+    supportChatAutoResizeInput();
+    supportChatScrollToBottom(true);
+    setTimeout(() => refs.input?.focus(), 0);
+  }
+}
+
+function supportChatToggleOpen() {
+  supportChatSetOpen(!supportChatState.open);
+}
+
+function supportChatSetHealth(status, message, detail = "") {
+  const el = supportChatState.refs?.healthEl;
+  if (!el) return;
+  const kind = ["ok", "warn", "err", "checking"].includes(status) ? status : "checking";
+  const text = String(message || "").trim() || "模型自检: 待检查";
+  el.classList.remove("ok", "warn", "err", "checking");
+  el.classList.add("support-chat-health", kind);
+  el.textContent = text;
+  el.title = String(detail || text);
+  const btn = supportChatState.refs?.healthBtn;
+  if (btn) btn.disabled = supportChatState.healthChecking;
+}
+
+async function refreshSupportChatHealth() {
+  if (!supportChatState.refs || supportChatState.healthChecking) return;
+  supportChatState.healthChecking = true;
+  supportChatSetHealth("checking", "模型自检: 检查中...", "正在检测模型网关与模型可用性");
+  try {
+    const res = await apiFetch(`${API}/runtime/support-chat/health`);
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    const detail = String(payload?.detail || "").trim();
+    if (payload?.ok) {
+      supportChatSetHealth("ok", "模型自检: 正常", detail);
+      return;
+    }
+    if (payload?.gateway_ok) {
+      supportChatSetHealth("warn", "模型自检: 网关可达，模型不可用", detail);
+      return;
+    }
+    supportChatSetHealth("err", "模型自检: 网关不可达", detail || "无法访问模型网关");
+  } catch (err) {
+    const msg = normalizeMsgText(err?.message || err || "请求失败");
+    supportChatSetHealth("err", "模型自检: 检查失败", msg);
+  } finally {
+    supportChatState.healthChecking = false;
+    if (supportChatState.refs?.healthBtn) supportChatState.refs.healthBtn.disabled = false;
+  }
+}
+
+function supportChatParseSseBlock(block) {
+  const lines = String(block || "").split(/\r?\n/);
+  let event = "message";
+  const dataLines = [];
+  for (const raw of lines) {
+    const line = String(raw || "");
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim() || "message";
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (!dataLines.length) return null;
+  const rawData = dataLines.join("\n");
+  try {
+    return { event, data: JSON.parse(rawData) };
+  } catch {
+    return { event, data: { message: rawData, content: rawData } };
+  }
+}
+
+async function supportChatStopStreaming() {
+  if (supportChatState.abortController) {
+    supportChatState.abortController.abort();
+  }
+}
+
+async function supportChatClearHistory() {
+  const ok = await uiConfirm(
+    "确定清空智能客服历史消息吗？此操作仅清除当前浏览器中的本地记录。",
+    "清空历史消息",
+    { okText: "清空" },
+  );
+  if (!ok) return;
+  if (supportChatState.streaming) await supportChatStopStreaming();
+  supportChatState.messages = [supportChatCreateMessage("assistant", SUPPORT_CHAT_DEFAULT_GREETING)];
+  supportChatPersistHistory();
+  supportChatRenderMessages(true);
+  supportChatUpdatePrimaryButton();
+  showToast("已清空", "智能客服历史消息已清空。", "info");
+}
+
+async function supportChatStreamReply(assistantMessageId) {
+  const controller = new AbortController();
+  supportChatState.abortController = controller;
+  supportChatSetStreaming(true);
+  supportChatRenderMessages(true);
+
+  let gotDelta = false;
+  let gotReasoning = false;
+  try {
+    const requestMessages = supportChatState.messages
+      .filter((item) => (item.role === "user" || item.role === "assistant") && String(item.content || "").trim())
+      .filter((item) => !(item.role === "assistant" && String(item.content || "").trim() === SUPPORT_CHAT_DEFAULT_GREETING))
+      .slice(-SUPPORT_CHAT_MAX_MESSAGES)
+      .map((item) => ({ role: item.role, content: item.content }));
+
+    const res = await apiFetch(`${API}/support/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: requestMessages }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = normalizeMsgText(await res.text()) || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    if (!res.body || typeof res.body.getReader !== "function") {
+      throw new Error("当前浏览器不支持流式输出");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let delimiter = buffer.match(/\r?\n\r?\n/);
+      let splitAt = delimiter ? delimiter.index : -1;
+      let splitLen = delimiter ? delimiter[0].length : 0;
+      while (splitAt >= 0) {
+        const block = buffer.slice(0, splitAt);
+        buffer = buffer.slice(splitAt + splitLen);
+        const parsed = supportChatParseSseBlock(block);
+        if (!parsed) {
+          delimiter = buffer.match(/\r?\n\r?\n/);
+          splitAt = delimiter ? delimiter.index : -1;
+          splitLen = delimiter ? delimiter[0].length : 0;
+          continue;
+        }
+        if (parsed.event === "delta") {
+          const chunk = String(parsed.data?.content || "");
+          if (chunk) {
+            gotDelta = true;
+            supportChatAppendMessageContent(assistantMessageId, chunk);
+          }
+        } else if (parsed.event === "reasoning") {
+          const chunk = String(parsed.data?.content || "");
+          if (chunk) {
+            gotReasoning = true;
+            supportChatAppendMessageReasoning(assistantMessageId, chunk);
+          }
+        } else if (parsed.event === "error") {
+          const message = String(parsed.data?.message || "客服服务请求失败");
+          throw new Error(message);
+        }
+        delimiter = buffer.match(/\r?\n\r?\n/);
+        splitAt = delimiter ? delimiter.index : -1;
+        splitLen = delimiter ? delimiter[0].length : 0;
+      }
+    }
+
+    if (buffer.trim()) {
+      const parsed = supportChatParseSseBlock(buffer);
+      if (parsed && parsed.event === "delta") {
+        const chunk = String(parsed.data?.content || "");
+        if (chunk) {
+          gotDelta = true;
+          supportChatAppendMessageContent(assistantMessageId, chunk);
+        }
+      } else if (parsed && parsed.event === "reasoning") {
+        const chunk = String(parsed.data?.content || "");
+        if (chunk) {
+          gotReasoning = true;
+          supportChatAppendMessageReasoning(assistantMessageId, chunk);
+        }
+      }
+    }
+
+    if (!gotDelta && !gotReasoning) {
+      supportChatReplaceMessageContent(assistantMessageId, "抱歉，这次没有收到完整回复。你可以重试一次。");
+    } else if (!gotDelta && gotReasoning) {
+      supportChatReplaceMessageContent(
+        assistantMessageId,
+        "（模型本轮只返回了思考过程，未产出最终答复。可重试一次，或把问题缩短后再试。）",
+      );
+    }
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const existing = supportChatGetMessageById(assistantMessageId)?.content || "";
+      if (!String(existing).trim()) {
+        supportChatReplaceMessageContent(assistantMessageId, "已停止生成。你可以继续提问。");
+      }
+    } else {
+      const reason = normalizeMsgText(err?.message || err || "客服服务异常");
+      const existing = supportChatGetMessageById(assistantMessageId)?.content || "";
+      const next = existing
+        ? `${existing}\n\n> [系统提示] ${reason}`
+        : `> [系统提示] ${reason}`;
+      supportChatReplaceMessageContent(assistantMessageId, next);
+    }
+  } finally {
+    supportChatState.abortController = null;
+    supportChatSetStreaming(false);
+    supportChatRenderMessages(true);
+  }
+}
+
+async function supportChatSendInput() {
+  const refs = supportChatState.refs;
+  if (!refs || supportChatState.streaming) return;
+  const content = String(refs.input.value || "").trim();
+  if (!content) {
+    supportChatUpdatePrimaryButton();
+    return;
+  }
+
+  refs.input.value = "";
+  supportChatAutoResizeInput();
+  supportChatUpdatePrimaryButton();
+
+  supportChatAppendMessage("user", content);
+  const assistantMsg = supportChatAppendMessage("assistant", "");
+  await supportChatStreamReply(assistantMsg.id);
+}
+
+function initSupportChat() {
+  if (supportChatState.bound) return;
+  const refs = {
+    root: document.getElementById("support-chat"),
+    panel: document.getElementById("support-chat-panel"),
+    body: document.getElementById("support-chat-body"),
+    input: document.getElementById("support-chat-input"),
+    sendBtn: document.getElementById("support-chat-send"),
+    clearBtn: document.getElementById("support-chat-clear"),
+    healthEl: document.getElementById("support-chat-health"),
+    healthBtn: document.getElementById("support-chat-health-check"),
+    fab: document.getElementById("support-chat-fab"),
+    closeBtn: document.getElementById("support-chat-close"),
+  };
+  if (!refs.root || !refs.panel || !refs.body || !refs.input || !refs.sendBtn || !refs.clearBtn || !refs.healthEl || !refs.healthBtn || !refs.fab || !refs.closeBtn) {
+    return;
+  }
+  supportChatState.refs = refs;
+  supportChatState.bound = true;
+
+  supportChatState.messages = supportChatLoadHistory();
+  if (!supportChatState.messages.length) {
+    supportChatState.messages = [supportChatCreateMessage("assistant", SUPPORT_CHAT_DEFAULT_GREETING)];
+    supportChatPersistHistory();
+  }
+  supportChatRenderMessages(true);
+  supportChatSetOpen(false);
+  supportChatSetStreaming(false);
+  supportChatSetHealth("checking", "模型自检: 待检查", "登录后会自动检查模型网关状态");
+  supportChatAutoResizeInput();
+  supportChatUpdatePrimaryButton();
+  supportChatScheduleBottomOffset();
+
+  window.addEventListener("resize", supportChatScheduleBottomOffset);
+  window.addEventListener("scroll", supportChatScheduleBottomOffset, { passive: true });
+  if (window.ResizeObserver) {
+    const shell = document.getElementById("agent-terminal-shell");
+    if (shell) {
+      supportChatState.bottomObserver = new ResizeObserver(() => supportChatScheduleBottomOffset());
+      supportChatState.bottomObserver.observe(shell);
+    }
+  }
+
+  refs.fab.addEventListener("click", supportChatToggleOpen);
+  refs.closeBtn.addEventListener("click", () => supportChatSetOpen(false));
+  refs.clearBtn.addEventListener("click", () => { supportChatClearHistory(); });
+  refs.sendBtn.addEventListener("click", () => {
+    if (supportChatState.streaming) {
+      supportChatStopStreaming();
+      return;
+    }
+    supportChatSendInput();
+  });
+  refs.healthBtn.addEventListener("click", () => { refreshSupportChatHealth(); });
+  refs.input.addEventListener("input", () => {
+    supportChatAutoResizeInput();
+    supportChatUpdatePrimaryButton();
+  });
+  refs.input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    supportChatSendInput();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!supportChatState.open || supportChatState.streaming) return;
+    supportChatSetOpen(false);
+  });
+}
+
 // ── Terminals ─────────────────────────────────────────────────────────────────
 function openTerminalPopout(event, agentKey = "") {
   if (event) {
@@ -3174,6 +4082,8 @@ function syncTerminalVisibility() {
   const chevron = document.getElementById("terminal-chevron");
   if (panel) panel.classList.toggle("collapsed", !terminalsVisible);
   if (chevron) chevron.textContent = terminalsVisible ? "▲" : "▼";
+  supportChatScheduleBottomOffset();
+  window.setTimeout(() => supportChatScheduleBottomOffset(), 280);
 }
 
 function toggleTerminals() {
@@ -5552,11 +6462,13 @@ function copyProjectPath() {
 
 async function initApp() {
   buildBoard();
+  initSupportChat();
   applyTerminalOnlyMode();
   updateBoardLaneWidths();
   window.addEventListener("resize", updateBoardLaneWidths);
   try {
     await ensureAuthenticated();
+    refreshSupportChatHealth();
     connectWS();
   } catch (err) {
     if (!redirectingToLogin) {
