@@ -91,6 +91,42 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], task["id"])
         self.assertEqual(call.kwargs["fields"]["description"], refined)
         self.assertEqual(call.kwargs["fields"]["status"], "todo")
+        self.assertEqual(call.kwargs["fields"]["assigned_agent"], "developer")
+        self.assertEqual(call.kwargs["fields"]["dev_agent"], "developer")
+        self.assertEqual(call.kwargs["handoff"]["to_agent"], "developer")
+
+    async def test_auto_triage_simple_infers_art_designer_from_reason(self):
+        task = self._task(status="triaging", claimed_from="triage")
+        self.agent.http.get = mock.AsyncMock(return_value=self._resp(200, []))
+
+        async def _fake_run_cli(prompt, cwd, **kwargs):
+            out = Path(cwd) / ".opc" / "decisions" / f"{task['id']}.leader-triage.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(
+                    {
+                        "refined_description": "## 任务目标\n- 生成宣传图",
+                        "action": "simple",
+                        "reason": "该任务可由单一美术设计师独立完成。",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return 0, "ok"
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_fake_run_cli)
+        self.agent.transition_task = mock.AsyncMock(
+            return_value={"task": {**task, "status": "todo"}}
+        )
+        self.agent._create_subtasks = mock.AsyncMock(return_value=0)
+
+        await self.agent._auto_triage(task)
+
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["assigned_agent"], "art_designer")
+        self.assertEqual(call.kwargs["fields"]["dev_agent"], "art_designer")
+        self.assertEqual(call.kwargs["handoff"]["to_agent"], "art_designer")
 
     async def test_force_decompose_runs_single_cli_and_updates_description(self):
         task = self._task(status="decompose", claimed_from="decompose")
