@@ -26,13 +26,13 @@ OPC-demo 用结构化任务流和结构化交接材料来解决这些问题。
 ## 核心能力
 
 - 一个看板统一管理多种 CLI Agent。
-- 内置 `leader`、`developer`、`reviewer`、`manager`、`product_manager`、`finance_officer`、`legal_counsel`、`business_manager`、`bid_writer`、`risk_compliance_officer`，支持扩展自定义 Agent。
+- 内置 `leader(主管)`、`developer`、`reviewer`、`manager`、`product_manager`、`finance_officer`、`legal_counsel`、`business_manager`、`bid_writer`、`risk_compliance_officer`、`admin_specialist`、`marketing_specialist`、`hr_specialist`、`operations_specialist`、`customer_service_specialist`、`procurement_specialist`，支持扩展自定义 Agent。
 - 支持配置 Codex / Claude 等终端 CLI。
 - 任务状态机 + 阻塞态恢复，减少“无限重试”和假进度。
 - 结构化 handoff（可审计、可回放、可追责）。
 - 基于 Git `worktree` 并行开发，每个 Agent 独立工作区。
 - 跨 Agent 自动同步提交（默认 `cherry-pick`）。
-- Leader 自动决策是否分解任务：简单任务不分解直接开发，复杂任务才分解并强制输出 `todo_steps / deliverables / acceptance_criteria`。
+- Leader（主管）会先完善需求再决策是否分解：简单任务直接推进执行，复杂任务才分解并强制输出 `todo_steps / deliverables / acceptance_criteria`。
 - 支持按项目隔离的 worker 运行：同一 agent 类型可在多个项目并发处理，认领时强制携带 `project_id`（可配置）。
 
 ## 快速开始
@@ -74,7 +74,7 @@ python3 -c "from server import db; db.init_db(); print(f'initialized: {db.DB_PAT
 
 1. 创建项目并绑定本地 Git 仓库路径。
 2. 创建任务（默认进入 `triage`）。
-3. `leader` 评估复杂度：简单任务 -> `todo`；复杂任务 -> `decomposed` 并自动生成子任务清单。
+3. `leader`（主管）先完善需求并评估复杂度：简单任务 -> `todo`；复杂任务 -> `decomposed` 并自动生成子任务清单。
 4. `developer` 提交代码 + handoff（包含 commit hash）。
 5. `reviewer` 基于 commit 审查并给出结构化结论。
 6. `manager` 合并到 `main`，进入验收。

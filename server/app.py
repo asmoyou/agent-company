@@ -971,6 +971,12 @@ for _k in (
     "business_manager",
     "bid_writer",
     "risk_compliance_officer",
+    "admin_specialist",
+    "marketing_specialist",
+    "hr_specialist",
+    "operations_specialist",
+    "customer_service_specialist",
+    "procurement_specialist",
 ):
     _ensure_agent_state(_k)
 
@@ -2450,7 +2456,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
             status_to="decompose",
             title="人工要求分解",
             summary="用户要求将任务转为分解模式",
-            conclusion="已切换到待分解，等待 Leader 处理",
+            conclusion="已切换到待分解，等待主管（leader）处理",
             payload={"action": "decompose"},
         )
         log_row = {"agent": "user", "message": "↪ 人工要求分解：任务已转为 decompose"}
