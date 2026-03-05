@@ -130,7 +130,7 @@ def get_project_dirs(task: dict, agent_key: str | None = None) -> tuple[Path, Pa
 class BaseAgent:
     name: str = "base"
     poll_statuses: list[str] = []
-    cli_name: str = "claude"
+    cli_name: str = "codex"
     working_status: str = ""
 
     def __init__(self, shutdown_event: asyncio.Event | None = None):

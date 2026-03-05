@@ -1319,7 +1319,7 @@ class AgentTypeCreate(BaseModel):
     poll_statuses: list[str] = ["todo"]
     next_status: str = "in_review"
     working_status: str = "in_progress"
-    cli: str = "claude"
+    cli: str = "codex"
 
 class AgentTypeUpdate(BaseModel):
     name: str | None = None
@@ -1332,7 +1332,7 @@ class AgentTypeUpdate(BaseModel):
 
 class GeneratePromptRequest(BaseModel):
     description: str
-    cli: str = "claude"
+    cli: str = "codex"
 
 class MkdirRequest(BaseModel):
     path: str
@@ -2902,9 +2902,15 @@ async def generate_agent_prompt(body: GeneratePromptRequest, _admin: dict = Depe
         "   {rework_section} - 审查反馈（返工时会有内容，初次为空）\n"
         "3. 只输出提示词内容本身，不要任何前缀说明或解释"
     )
-    cli = body.cli if body.cli in ("claude", "codex") else "claude"
+    cli = body.cli if body.cli in ("claude", "codex") else "codex"
     cmd = ["claude", "--dangerously-skip-permissions", "-p", meta_prompt] if cli == "claude" \
           else ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", meta_prompt]
+    started_at = time.monotonic()
+    REQUEST_ACCESS_LOG.info(
+        'PROMPT_GEN start cli=%s desc_len=%d',
+        cli,
+        len((body.description or "").strip()),
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -2914,12 +2920,37 @@ async def generate_agent_prompt(body: GeneratePromptRequest, _admin: dict = Depe
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
         generated = stdout.decode(errors="replace").strip()
         if not generated:
+            duration_ms = (time.monotonic() - started_at) * 1000
+            REQUEST_ACCESS_LOG.info(
+                "PROMPT_GEN empty cli=%s duration_ms=%.2f",
+                cli,
+                duration_ms,
+            )
             raise HTTPException(500, "生成结果为空")
+        duration_ms = (time.monotonic() - started_at) * 1000
+        REQUEST_ACCESS_LOG.info(
+            "PROMPT_GEN ok cli=%s duration_ms=%.2f prompt_len=%d",
+            cli,
+            duration_ms,
+            len(generated),
+        )
         return {"prompt": generated}
     except asyncio.TimeoutError:
         proc.kill()
+        duration_ms = (time.monotonic() - started_at) * 1000
+        REQUEST_ACCESS_LOG.info(
+            "PROMPT_GEN timeout cli=%s duration_ms=%.2f",
+            cli,
+            duration_ms,
+        )
         raise HTTPException(504, "生成超时（90s）")
     except FileNotFoundError:
+        duration_ms = (time.monotonic() - started_at) * 1000
+        REQUEST_ACCESS_LOG.info(
+            "PROMPT_GEN missing_cli cli=%s duration_ms=%.2f",
+            cli,
+            duration_ms,
+        )
         raise HTTPException(500, f"CLI 工具 '{cli}' 未找到，请先安装")
 
 @app.post("/agent-types", status_code=201)

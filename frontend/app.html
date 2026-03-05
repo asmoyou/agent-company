@@ -377,7 +377,8 @@
     </div>
     <div id="agents-list-view" class="flex-1 overflow-y-auto p-4">
       <div id="agent-types-list" class="space-y-2"></div>
-      <button onclick="openAgentForm(null)"
+      <div id="agent-readonly-tip" class="hidden mt-3 text-xs text-slate-500 text-center">普通用户仅可查看 Agent 配置</div>
+      <button id="btn-agent-create" onclick="openAgentForm(null)"
         class="w-full mt-3 py-2 border border-dashed border-slate-600 text-slate-400 hover:text-indigo-400 hover:border-indigo-500 rounded-lg text-sm transition">
         + 新建自定义 Agent
       </button>
@@ -386,6 +387,9 @@
       <div class="flex items-center gap-2">
         <button onclick="closeAgentForm()" class="text-slate-400 hover:text-white text-sm">← 返回</button>
         <h4 class="text-white font-medium" id="agent-form-title">新建 Agent</h4>
+      </div>
+      <div id="agent-form-readonly-tip" class="hidden text-xs text-amber-300 bg-amber-900/20 border border-amber-700/40 rounded px-3 py-2">
+        当前账号为普通用户，仅可查看，不能修改。
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div>
@@ -418,8 +422,8 @@
           <label class="block text-xs text-slate-400 mb-1">CLI 工具</label>
           <select id="af-cli"
             class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
-            <option value="claude">claude</option>
             <option value="codex">codex</option>
+            <option value="claude">claude</option>
           </select>
         </div>
       </div>
@@ -439,7 +443,7 @@
       </div>
       <div class="flex justify-end gap-3">
         <button onclick="closeAgentForm()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
-        <button onclick="saveAgentType()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
+        <button id="btn-agent-save" onclick="saveAgentType()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
       </div>
     </div>
     <div class="px-5 py-2 border-t border-slate-700 text-xs text-slate-600 shrink-0">
@@ -1381,14 +1385,22 @@ function closeAgentsModal() {
 }
 function renderAgentTypesList() {
   const el = document.getElementById("agent-types-list");
+  const editable = isAdminUser();
+  const createBtn = document.getElementById("btn-agent-create");
+  const readonlyTip = document.getElementById("agent-readonly-tip");
+  if (createBtn) createBtn.classList.toggle("hidden", !editable);
+  if (readonlyTip) readonlyTip.classList.toggle("hidden", editable);
   const list = Object.values(agentTypes);
   if (!list.length) { el.innerHTML = '<div class="text-slate-500 text-sm text-center py-4">暂无 Agent</div>'; return; }
   el.innerHTML = list.map(at => {
     const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]').join(', '); } catch { return at.poll_statuses||''; } })();
     const builtin = at.is_builtin ? '<span class="text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">内置</span>' : '';
-    const actions = `
+    const actions = editable
+      ? `
       <button onclick="openAgentForm('${at.key}')" class="text-xs text-slate-400 hover:text-indigo-400 px-2 py-1 rounded hover:bg-slate-700 transition">编辑</button>
-      ${at.is_builtin ? '' : `<button onclick="deleteAgentType('${at.key}')" class="text-xs text-slate-400 hover:text-red-400 px-2 py-1 rounded hover:bg-slate-700 transition">删除</button>`}`;
+      ${at.is_builtin ? '' : `<button onclick="deleteAgentType('${at.key}')" class="text-xs text-slate-400 hover:text-red-400 px-2 py-1 rounded hover:bg-slate-700 transition">删除</button>`}`
+      : `
+      <button onclick="openAgentForm('${at.key}')" class="text-xs text-slate-400 hover:text-indigo-400 px-2 py-1 rounded hover:bg-slate-700 transition">查看</button>`;
     return `<div class="flex items-start justify-between bg-slate-700/40 rounded-lg px-4 py-3">
       <div>
         <div class="flex items-center gap-2 mb-1">
@@ -1419,21 +1431,50 @@ function _fillNextStatus(selected) {
     `<option value="${s}" ${s===selected?'selected':''}>${s}</option>`).join("");
 }
 
+function setAgentFormReadonly(readonly) {
+  const fieldIds = ["af-name", "af-key", "af-desc", "af-prompt", "af-cli", "af-next-status"];
+  fieldIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (readonly) {
+      el.setAttribute("disabled", "disabled");
+    } else {
+      el.removeAttribute("disabled");
+    }
+  });
+  document.querySelectorAll("#af-poll-checkboxes input").forEach(cb => {
+    cb.disabled = readonly;
+  });
+  const btnAiGen = document.getElementById("btn-ai-gen");
+  if (btnAiGen) {
+    btnAiGen.classList.toggle("hidden", readonly);
+    btnAiGen.disabled = readonly;
+  }
+  const btnSave = document.getElementById("btn-agent-save");
+  if (btnSave) btnSave.classList.toggle("hidden", readonly);
+  const tip = document.getElementById("agent-form-readonly-tip");
+  if (tip) tip.classList.toggle("hidden", !readonly);
+}
+
 function openAgentForm(key) {
+  if (!isAdminUser() && !key) {
+    alert("普通用户仅可查看 Agent 配置");
+    return;
+  }
   _editingAgentKey = key;
   document.getElementById("agents-list-view").classList.add("hidden");
   document.getElementById("agents-form-view").classList.remove("hidden");
+  const readonly = !isAdminUser();
 
   if (key) {
     // Edit mode
     const at = agentTypes[key];
-    document.getElementById("agent-form-title").textContent = `编辑 Agent — ${at.name}`;
+    document.getElementById("agent-form-title").textContent = `${readonly ? "查看" : "编辑"} Agent — ${at.name}`;
     document.getElementById("af-name").value = at.name || "";
     document.getElementById("af-key").value = at.key;
-    document.getElementById("af-key").disabled = true;
     document.getElementById("af-desc").value = at.description || "";
     document.getElementById("af-prompt").value = at.prompt || "";
-    document.getElementById("af-cli").value = at.cli || "claude";
+    document.getElementById("af-cli").value = at.cli || "codex";
     const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]'); } catch { return []; } })();
     _fillPollCheckboxes(polls);
     _fillNextStatus(at.next_status || "in_review");
@@ -1442,13 +1483,14 @@ function openAgentForm(key) {
     document.getElementById("agent-form-title").textContent = "新建 Agent";
     document.getElementById("af-name").value = "";
     document.getElementById("af-key").value = "";
-    document.getElementById("af-key").disabled = false;
     document.getElementById("af-desc").value = "";
     document.getElementById("af-prompt").value = "";
-    document.getElementById("af-cli").value = "claude";
+    document.getElementById("af-cli").value = "codex";
     _fillPollCheckboxes(["todo"]);
     _fillNextStatus("in_review");
   }
+  setAgentFormReadonly(readonly);
+  document.getElementById("af-key").disabled = key ? true : readonly;
 }
 function closeAgentForm() {
   document.getElementById("agents-list-view").classList.remove("hidden");
@@ -1457,6 +1499,7 @@ function closeAgentForm() {
 }
 
 async function aiGeneratePrompt() {
+  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
   const desc = document.getElementById("af-desc").value.trim();
   const name = document.getElementById("af-name").value.trim();
   if (!desc && !name) { alert("请先填写「用途描述」或「名称」"); return; }
@@ -1482,6 +1525,7 @@ async function aiGeneratePrompt() {
 }
 
 async function saveAgentType() {
+  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
   const name = document.getElementById("af-name").value.trim();
   const key  = document.getElementById("af-key").value.trim();
   if (!name) { alert("请填写名称"); return; }
@@ -1515,6 +1559,7 @@ async function saveAgentType() {
 }
 
 async function deleteAgentType(key) {
+  if (!isAdminUser()) { alert("普通用户仅可查看 Agent 配置"); return; }
   if (!confirm(`确定删除 Agent「${agentTypes[key]?.name || key}」？此操作不可撤销。`)) return;
   try {
     const res = await apiFetch(`${API}/agent-types/${key}`, {method:"DELETE"});

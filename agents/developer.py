@@ -28,14 +28,14 @@ DEVELOPER_PROMPT_DEFAULT = (
 class DeveloperAgent(BaseAgent):
     name = "developer"
     poll_statuses = ["todo", "needs_changes"]
-    cli_name = "claude"
+    cli_name = "codex"
     working_status = "in_progress"
 
     def __init__(self, shutdown_event=None, config: dict | None = None):
         super().__init__(shutdown_event)
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["todo", "needs_changes"])
-        self.cli_name = str(cfg.get("cli") or "claude")
+        self.cli_name = str(cfg.get("cli") or "codex")
         self.prompt_template = str(cfg.get("prompt") or DEVELOPER_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "in_progress")
 

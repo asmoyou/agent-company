@@ -246,7 +246,7 @@ def init_db():
             poll_statuses  TEXT NOT NULL DEFAULT '["todo"]',
             next_status    TEXT NOT NULL DEFAULT 'in_review',
             working_status TEXT NOT NULL DEFAULT 'in_progress',
-            cli            TEXT NOT NULL DEFAULT 'claude',
+            cli            TEXT NOT NULL DEFAULT 'codex',
             is_builtin     INTEGER NOT NULL DEFAULT 0,
             created_at     TEXT NOT NULL
         );
@@ -345,7 +345,7 @@ def init_db():
         ("poll_statuses", "TEXT NOT NULL DEFAULT '[\"todo\"]'"),
         ("next_status", "TEXT NOT NULL DEFAULT 'in_review'"),
         ("working_status", "TEXT NOT NULL DEFAULT 'in_progress'"),
-        ("cli", "TEXT NOT NULL DEFAULT 'claude'"),
+        ("cli", "TEXT NOT NULL DEFAULT 'codex'"),
         ("is_builtin", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
@@ -467,8 +467,17 @@ def _seed_builtin_agents(conn):
                    VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
                 (str(uuid.uuid4()), b["key"], b["name"], b["description"],
                  b.get("prompt", ""),
-                 b["poll_statuses"], b["next_status"], b["working_status"], "claude", now),
+                 b["poll_statuses"], b["next_status"], b["working_status"], "codex", now),
             )
+    # Keep built-in agents aligned with current default CLI.
+    conn.execute(
+        """
+        UPDATE agent_types
+           SET cli='codex'
+         WHERE is_builtin=1
+           AND LOWER(TRIM(COALESCE(cli, ''))) IN ('', 'claude')
+        """
+    )
     # Migrate existing leader record to new triage-aware config
     conn.execute(
         """UPDATE agent_types
