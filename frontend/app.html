@@ -1853,7 +1853,7 @@ function redirectToLogin(hint = "请先登录") {
   localStorage.removeItem("opc_token");
   authToken = "";
   setAuthUser(null);
-  location.href = "/";
+  location.href = "/login";
 }
 
 async function apiFetch(url, options = {}) {
@@ -6461,13 +6461,13 @@ function copyProjectPath() {
 }
 
 async function initApp() {
-  buildBoard();
-  initSupportChat();
-  applyTerminalOnlyMode();
-  updateBoardLaneWidths();
-  window.addEventListener("resize", updateBoardLaneWidths);
   try {
     await ensureAuthenticated();
+    buildBoard();
+    initSupportChat();
+    applyTerminalOnlyMode();
+    updateBoardLaneWidths();
+    window.addEventListener("resize", updateBoardLaneWidths);
     refreshSupportChatHealth();
     connectWS();
   } catch (err) {

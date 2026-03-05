@@ -4,6 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LinX协作平台简易演示网络版</title>
+  <script>
+    (() => {
+      try {
+        const token = String(localStorage.getItem("opc_token") || "").trim();
+        if (token) location.replace("/app");
+      } catch {}
+    })();
+  </script>
   <style>
     :root {
       color-scheme: dark;
@@ -432,19 +440,10 @@
     }
 
     async function tryAutoEnterApp() {
-      const token = localStorage.getItem("opc_token") || "";
+      const token = String(localStorage.getItem("opc_token") || "").trim();
       if (!token) return false;
-      try {
-        const res = await fetch(`${API}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.ok) {
-          location.replace("/app");
-          return true;
-        }
-      } catch {}
-      localStorage.removeItem("opc_token");
-      return false;
+      location.replace("/app");
+      return true;
     }
 
     async function apiFetch(url, options = {}) {
