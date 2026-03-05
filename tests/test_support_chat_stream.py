@@ -184,7 +184,15 @@ class SupportChatStreamApiTest(unittest.TestCase):
         self.assertIsNone(timeout.read)
         self.assertEqual(_FakeAsyncClient.captured["method"], "POST")
         self.assertTrue(_FakeAsyncClient.captured["url"].endswith("/chat/completions"))
-        self.assertEqual(_FakeAsyncClient.captured["json"]["model"], app_module.SUPPORT_LLM_MODEL)
+        payload = _FakeAsyncClient.captured["json"]
+        self.assertEqual(payload["model"], app_module.SUPPORT_LLM_MODEL)
+        self.assertEqual(payload["temperature"], 0.7)
+        self.assertEqual(payload["top_p"], 0.8)
+        self.assertEqual(payload["top_k"], 20)
+        self.assertEqual(payload["min_p"], 0.0)
+        self.assertEqual(payload["presence_penalty"], 1.5)
+        self.assertEqual(payload["repetition_penalty"], 1.0)
+        self.assertEqual(payload["max_tokens"], 1024)
 
     def test_support_chat_stream_surfaces_upstream_error(self):
         def _factory(**_kwargs):

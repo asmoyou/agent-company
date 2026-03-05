@@ -176,7 +176,7 @@ decompose -> decomposed -> (subtasks in todo...)
 | `SUPPORT_LLM_POOL_TIMEOUT_SECS` | `45` | 智能客服连接池获取连接的等待超时（秒） |
 | `SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS` | `8` | 智能客服启动自检读取超时（秒） |
 | `SUPPORT_CHAT_INCLUDE_REASONING` | `1` | 是否输出模型 reasoning（默认开启，前端会折叠显示思考过程） |
-| `SUPPORT_CHAT_REASONING_MAX_CHARS` | `6000` | 思考过程最大保留字符数（超出后截断，避免前端渲染过载） |
+| `SUPPORT_CHAT_REASONING_MAX_CHARS` | `1200` | 思考过程最大保留字符数（默认收紧，超出后截断，避免前端渲染过载） |
 
 ### 清理运维接口
 

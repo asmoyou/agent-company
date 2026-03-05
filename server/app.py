@@ -105,36 +105,71 @@ SUPPORT_CHAT_MAX_MESSAGES = int(str(os.getenv("SUPPORT_CHAT_MAX_MESSAGES", "24")
 SUPPORT_CHAT_INCLUDE_REASONING = str(
     os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "1")
 ).strip().lower() in {"1", "true", "yes", "on"}
-SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "6000")).strip() or "6000")
+SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "1200")).strip() or "1200")
 
 SUPPORT_TUTORIAL = """
-你正在服务的产品是 LinX协作平台简易演示网络版（多 Agent 协作任务看板），以下是平台教程要点：
-- 平台目标：统一管理 Codex/Claude 等终端 Agent，完成任务自动流转。
-- 核心流程：任务分发 -> 开发 -> 审查 -> 合并 -> 验收。
-- 快速上手：
-  1) 先创建/选择项目（每个项目绑定本地 Git 仓库）。
-  2) 点击“+ 创建任务”，填写标题、描述、优先级和依赖。
-  3) 任务默认进入 triage（待评估），后续由 Agent 自动推进。
-  4) 在底部 Agent 终端可查看实时日志，支持筛选和放大。
-  5) 任务详情里可看日志、交接、交付文件、审查意见，并在待验收时执行接受/打回。
-- 关键状态：
-  triage/triaging（评估） -> todo（待开发） -> in_progress（开发中） -> in_review/reviewing（审查） -> approved（通过） -> pending_acceptance（待验收） -> completed（完成）。
-  失败或返工可能进入 blocked（阻塞）、needs_changes（需修改）、cancelled（取消）。
-- 角色说明：
-  leader 负责评估/分解，developer 负责实现，reviewer 负责审查，manager 负责合并。
-- 办公区：
-  可上传、预览、下载项目文件，支持常见文档/代码预览。
-- 使用建议：
-  提问时可描述“当前状态 + 目标状态 + 报错/日志”，你要给出可执行步骤。
+你正在服务的产品是 LinX协作平台简易演示网络版（多 Agent 协作任务看板）。
+以下是平台事实知识，回答时优先依据这些信息，不要臆测：
+
+[0] 产品背景
+- 研发人员：神秘的游先生
+- 微信：小白客asmo
+
+[1] 用户视角主流程
+- 登录后先选项目，再创建任务，任务会自动流转。
+- 常用入口：项目选择/新建、+创建任务、任务详情抽屉、底部 Agent 终端、项目办公区、右下角客服。
+
+[2] 项目与仓库（用户无需操心底层 Git）
+- 新建项目时，系统会自动创建目录并初始化 Git 仓库（含 main 初始提交）。
+- 添加现有项目时，系统会检查目录并补齐 Git 初始化（仅管理员可操作）。
+- 系统内部使用 worktree 隔离每个任务的执行工作区；可解释该原理，但默认不要要求用户手动执行 git/worktree 命令。
+- 删除项目可同时清理目录（默认移入回收站）；“同步”会清理磁盘已不存在的项目记录。
+
+[3] 任务创建与状态
+- 创建任务可设置：标题、描述、优先级、可选依赖、是否启用 Review、可选指定执行 Agent。
+- 主流程状态：
+  triage/triaging -> todo -> in_progress -> in_review/reviewing -> approved -> pending_acceptance -> completed
+- 返工/异常常见状态：
+  needs_changes、blocked、decompose/decomposed、cancelled
+- decompose/decomposed 场景下会生成子任务，默认按 subtask_order 串行推进。
+
+[4] 用户可执行动作（任务详情）
+- pending_acceptance：accept（验收通过）/ reject（退回并填写反馈）
+- blocked：retry_blocked（按系统规则恢复流程）
+- todo：decompose（强制交给 leader 分解）
+- completed：archive（归档）
+- 非 completed/cancelled 的任务可 cancel（取消）
+
+[5] 任务详情信息面板
+- 可查看：日志（logs）、结构化交接（handoffs）、变更文件与分支信息、依赖与后续任务、审查反馈与反馈历史。
+
+[6] Agent 与终端
+- 默认角色：leader、developer、reviewer、manager（也支持自定义 Agent 类型和提示词）。
+- 底部终端用于实时排障：可看执行输出、切换筛选、放大窗口、暂停/恢复自动跟随。
+
+[7] 项目办公区能力
+- 支持目录浏览、上传、删除、下载、创建文件夹。
+- 支持常见文本/代码/Markdown/图片/PDF/音视频/表格/PPT 预览（部分格式为降级预览）。
+
+[8] 常见排障建议
+- 模型不可用或无回复：先看“模型自检”，再重试。
+- 任务不推进：先看当前状态、依赖阻塞数、终端最近日志，再判断是 blocked 还是 needs_changes。
+- 项目目录被手动删除：使用“同步”清理失效项目。
+- 权限问题：先确认是否有项目访问权限（导入现有项目/目录选择等管理员能力仅 admin 可用）。
+
+[9] 回答方式
+- 先给可执行步骤，再补充原理。
+- 如果用户信息不足，优先追问：项目名/任务ID/当前状态/报错或日志片段。
+- 不要编造不存在的按钮、状态或接口名称；不确定时明确说明并给出核实路径。
 """.strip()
 
 SUPPORT_SYSTEM_PROMPT = (
-    "你是 LinX协作平台简易演示网络版平台的智能客服助手。"
+    "你叫小白客，是 LinX协作平台简易演示网络版的智能客服助手。"
     "你的首要职责是帮助用户解决平台使用问题、流程问题、状态流转问题和常见报错。"
     "当用户想闲聊时，你可以自然闲聊，但保持礼貌、简洁。"
-    "如果模型支持 reasoning 字段，可在 reasoning 中输出思考过程；"
-    "reasoning 必须精简（不超过 5 行要点，不要输出“Thinking Process”等模板标题）。"
-    "最终结论必须放在 content 中，不要把思考过程混入最终答复正文。"
+    "默认不要输出思考过程。"
+    "如确实需要 reasoning，请仅输出 2 行内要点，且不要输出“Thinking Process”等模板标题。"
+    "最终结论必须放在 content 中，不要把思考过程或 <think> 标签混入最终答复正文。"
     "最终答复必须使用简体中文。"
     "如果用户信息不足，先追问关键上下文，再给方案。"
     "回答尽量结构化，优先给可执行步骤。"
@@ -1461,7 +1496,12 @@ class SupportChatMessage(BaseModel):
 
 class SupportChatRequest(BaseModel):
     messages: list[SupportChatMessage] = Field(default_factory=list)
-    temperature: float = Field(default=0.5, ge=0.0, le=2.0)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.8, ge=0.0, le=1.0)
+    top_k: int = Field(default=20, ge=0)
+    min_p: float = Field(default=0.0, ge=0.0, le=1.0)
+    presence_penalty: float = Field(default=1.5, ge=-2.0, le=2.0)
+    repetition_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1024, ge=64, le=4096)
 
 class MkdirRequest(BaseModel):
@@ -3257,8 +3297,16 @@ async def support_chat_stream(
         "stream": True,
         "messages": [{"role": "system", "content": SUPPORT_SYSTEM_PROMPT}, *normalized_messages],
         "temperature": float(body.temperature),
+        "top_p": float(body.top_p),
+        "top_k": int(body.top_k),
+        "min_p": float(body.min_p),
+        "presence_penalty": float(body.presence_penalty),
+        "repetition_penalty": float(body.repetition_penalty),
         "max_tokens": int(body.max_tokens),
     }
+    if not SUPPORT_CHAT_INCLUDE_REASONING:
+        # For Qwen-compatible gateways, explicitly disable thinking tokens.
+        upstream_payload["chat_template_kwargs"] = {"enable_thinking": False}
     upstream_headers = _support_llm_stream_headers()
     upstream_url = f"{SUPPORT_LLM_BASE_URL}/chat/completions"
     requester = str(user.get("username") or user.get("id") or "").strip() or "unknown"
