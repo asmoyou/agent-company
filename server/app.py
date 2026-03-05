@@ -10,7 +10,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     File as FastAPIFile,
@@ -2856,6 +2859,24 @@ def safe_resolve(project_path: str, relative: str) -> Path:
     return target
 
 
+def _build_zip_from_directory(source_dir: Path, zip_path: Path) -> None:
+    """Create a zip archive from source_dir, skipping hidden files/folders."""
+    root_name = source_dir.name or "archive"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        wrote_any = False
+        for entry in sorted(source_dir.rglob("*")):
+            rel = entry.relative_to(source_dir)
+            # Keep UX consistent with list endpoint: hidden entries are skipped.
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if entry.is_dir():
+                continue
+            zf.write(entry, arcname=str(Path(root_name) / rel))
+            wrote_any = True
+        if not wrote_any:
+            zf.writestr(str(Path(root_name) / ".keep"), "")
+
+
 # ── File management endpoints ────────────────────────────────────────────────
 @app.get("/projects/{project_id}/files")
 async def list_project_files(project_id: str, path: str = "", user: dict = Depends(require_user)):
@@ -2883,13 +2904,38 @@ async def list_project_files(project_id: str, path: str = "", user: dict = Depen
 
 
 @app.get("/projects/{project_id}/files/download")
-async def download_project_file(project_id: str, path: str, user: dict = Depends(require_user)):
+async def download_project_file(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    path: str = "",
+    user: dict = Depends(require_user),
+):
     p = require_project_access(project_id, user)
     target = safe_resolve(p["path"], path)
-    if not target.exists() or not target.is_file():
-        raise HTTPException(404, "File not found")
-    mime, _ = mimetypes.guess_type(str(target))
-    return FileResponse(str(target), media_type=mime or "application/octet-stream", filename=target.name)
+    if not target.exists():
+        raise HTTPException(404, "Path not found")
+
+    if target.is_file():
+        mime, _ = mimetypes.guess_type(str(target))
+        return FileResponse(str(target), media_type=mime or "application/octet-stream", filename=target.name)
+
+    if not target.is_dir():
+        raise HTTPException(400, "Unsupported path type")
+
+    fd, tmp_name = tempfile.mkstemp(prefix="opc-download-", suffix=".zip")
+    os.close(fd)
+    archive_path = Path(tmp_name)
+    try:
+        _build_zip_from_directory(target, archive_path)
+    except Exception:
+        with contextlib.suppress(Exception):
+            archive_path.unlink(missing_ok=True)
+        raise HTTPException(500, "Failed to package directory")
+
+    if background_tasks:
+        background_tasks.add_task(lambda p=archive_path: p.unlink(missing_ok=True))
+    filename = f"{target.name or 'project'}.zip"
+    return FileResponse(str(archive_path), media_type="application/zip", filename=filename)
 
 
 @app.post("/projects/{project_id}/files/upload")
