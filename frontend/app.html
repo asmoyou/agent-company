@@ -695,6 +695,10 @@
             class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
           <input id="new-user-password" type="password" placeholder="密码（至少 6 位）"
             class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+          <input id="new-user-max-projects" type="number" min="0" step="1" placeholder="项目上限（留空不限）"
+            class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+          <input id="new-user-max-tasks" type="number" min="0" step="1" placeholder="任务上限（留空不限）"
+            class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
         </div>
         <div class="flex justify-end">
           <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建用户</button>
@@ -728,6 +732,18 @@
           <option value="user">普通用户</option>
           <option value="admin">管理员</option>
         </select>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">项目上限</label>
+          <input id="edit-user-max-projects" type="number" min="0" step="1" placeholder="留空不限"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">任务上限</label>
+          <input id="edit-user-max-tasks" type="number" min="0" step="1" placeholder="留空不限"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        </div>
       </div>
       <div>
         <label class="block text-xs text-slate-400 mb-1">新密码（可选）</label>
@@ -999,6 +1015,28 @@ let dpCurrentPath = "";
 let dpParentPath = null;
 let _activeColTipTarget = null;
 
+function parseQuotaInput(rawValue, fieldLabel) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${fieldLabel}必须是非负整数`);
+  }
+  return parsed;
+}
+
+function normalizeQuotaValue(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function formatQuotaText(label, value) {
+  const normalized = normalizeQuotaValue(value);
+  if (normalized === null) return `${label}不限`;
+  return `${label}上限 ${normalized}`;
+}
+
 function openUsersModal() {
   if (!isAdminUser()) return;
   document.getElementById("modal-users").classList.remove("hidden");
@@ -1025,12 +1063,13 @@ async function loadUsers() {
     listEl.innerHTML = users.map(u => {
       const role = u.role === "admin" ? "管理员" : "普通用户";
       const pwd = u.password_set ? "已设置密码" : "未设置密码";
+      const quota = `${formatQuotaText("项目", u.max_projects)} · ${formatQuotaText("任务", u.max_tasks)}`;
       const isMe = currentUser && currentUser.id === u.id;
       const canDelete = !isMe && u.username !== "admin";
       return `<div class="bg-slate-700/40 rounded-lg px-3 py-2 text-xs flex items-center justify-between gap-3">
         <div>
           <div class="text-slate-200">${escHtml(u.username)}${isMe ? ' <span class="text-[10px] text-emerald-400">(当前账号)</span>' : ''}</div>
-          <div class="text-slate-500">${role} · ${pwd}</div>
+          <div class="text-slate-500">${role} · ${pwd} · ${quota}</div>
         </div>
         <div class="flex items-center gap-2">
           <button type="button" onclick="openUserEditModal('${escAttr(u.id)}')"
@@ -1057,6 +1096,8 @@ function openUserEditModal(userId) {
   _editingUserId = user.id;
   document.getElementById("edit-user-username").value = user.username || "";
   document.getElementById("edit-user-role").value = user.role || "user";
+  document.getElementById("edit-user-max-projects").value = normalizeQuotaValue(user.max_projects) ?? "";
+  document.getElementById("edit-user-max-tasks").value = normalizeQuotaValue(user.max_tasks) ?? "";
   document.getElementById("edit-user-password").value = "";
   document.getElementById("modal-user-edit").classList.remove("hidden");
   setTimeout(() => document.getElementById("edit-user-username").focus(), 20);
@@ -1067,6 +1108,10 @@ function closeUserEditModal() {
   document.getElementById("modal-user-edit").classList.add("hidden");
   const passwordInput = document.getElementById("edit-user-password");
   if (passwordInput) passwordInput.value = "";
+  const maxProjectsInput = document.getElementById("edit-user-max-projects");
+  const maxTasksInput = document.getElementById("edit-user-max-tasks");
+  if (maxProjectsInput) maxProjectsInput.value = "";
+  if (maxTasksInput) maxTasksInput.value = "";
 }
 
 async function submitEditUser(e) {
@@ -1079,6 +1124,21 @@ async function submitEditUser(e) {
   const username = (document.getElementById("edit-user-username").value || "").trim().toLowerCase();
   const role = (document.getElementById("edit-user-role").value || "").trim();
   const password = (document.getElementById("edit-user-password").value || "").trim();
+  let maxProjects = null;
+  let maxTasks = null;
+  try {
+    maxProjects = parseQuotaInput(
+      document.getElementById("edit-user-max-projects").value,
+      "项目上限"
+    );
+    maxTasks = parseQuotaInput(
+      document.getElementById("edit-user-max-tasks").value,
+      "任务上限"
+    );
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
 
   if (!username) {
     alert("用户名不能为空");
@@ -1089,6 +1149,10 @@ async function submitEditUser(e) {
   if (username !== current.username) payload.username = username;
   if (role && role !== current.role) payload.role = role;
   if (password) payload.password = password;
+  const currentMaxProjects = normalizeQuotaValue(current.max_projects);
+  const currentMaxTasks = normalizeQuotaValue(current.max_tasks);
+  if (maxProjects !== currentMaxProjects) payload.max_projects = maxProjects;
+  if (maxTasks !== currentMaxTasks) payload.max_tasks = maxTasks;
 
   if (!Object.keys(payload).length) {
     closeUserEditModal();
@@ -1132,18 +1196,34 @@ async function submitCreateUser(e) {
   e.preventDefault();
   const usernameInput = document.getElementById("new-user-username");
   const passwordInput = document.getElementById("new-user-password");
+  const maxProjectsInput = document.getElementById("new-user-max-projects");
+  const maxTasksInput = document.getElementById("new-user-max-tasks");
   const username = usernameInput.value.trim().toLowerCase();
   const password = passwordInput.value.trim();
+  let maxProjects = null;
+  let maxTasks = null;
+  try {
+    maxProjects = parseQuotaInput(maxProjectsInput.value, "项目上限");
+    maxTasks = parseQuotaInput(maxTasksInput.value, "任务上限");
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
   if (!username || !password) return;
+  const payload = {username, password};
+  if (maxProjects !== null) payload.max_projects = maxProjects;
+  if (maxTasks !== null) payload.max_tasks = maxTasks;
   try {
     const res = await apiFetch(`${API}/users`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({username, password}),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(await res.text());
     usernameInput.value = "";
     passwordInput.value = "";
+    maxProjectsInput.value = "";
+    maxTasksInput.value = "";
     await loadUsers();
   } catch (err) {
     alert("创建用户失败: " + err.message);

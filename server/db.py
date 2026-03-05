@@ -24,6 +24,7 @@ ALLOWED_DEPENDENCY_STATES = {
 }
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
+UNSET = object()
 SESSION_TTL_DAYS = 30
 LOGIN_MAX_ATTEMPTS = max(1, int(str(os.getenv("LOGIN_MAX_ATTEMPTS", "5")).strip() or "5"))
 LOGIN_LOCK_BASE_SECS = max(1, int(str(os.getenv("LOGIN_LOCK_BASE_SECS", "60")).strip() or "60"))
@@ -250,6 +251,8 @@ def init_db():
             username      TEXT NOT NULL UNIQUE,
             password_hash TEXT,
             role          TEXT NOT NULL DEFAULT 'user',
+            max_projects  INTEGER,
+            max_tasks     INTEGER,
             failed_login_attempts INTEGER NOT NULL DEFAULT 0,
             lock_until    TEXT,
             last_failed_login_at TEXT,
@@ -366,6 +369,8 @@ def init_db():
         ("username", "TEXT NOT NULL DEFAULT ''"),
         ("password_hash", "TEXT"),
         ("role", "TEXT NOT NULL DEFAULT 'user'"),
+        ("max_projects", "INTEGER"),
+        ("max_tasks", "INTEGER"),
         ("failed_login_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("lock_until", "TEXT"),
         ("last_failed_login_at", "TEXT"),
@@ -998,6 +1003,23 @@ def _normalize_username(username: str) -> str:
     return str(username or "").strip().lower()
 
 
+def _normalize_quota_limit(value, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        value = raw
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} 必须是非负整数或 null")
+    if out < 0:
+        raise ValueError(f"{field_name} 必须是非负整数或 null")
+    return out
+
+
 def _password_hash(password: str, iterations: int = 260000) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
@@ -1027,10 +1049,14 @@ def _hash_session_token(token: str) -> str:
 
 def _public_user(row) -> dict:
     data = dict(row)
+    max_projects = data.get("max_projects")
+    max_tasks = data.get("max_tasks")
     return {
         "id": data["id"],
         "username": data["username"],
         "role": data["role"],
+        "max_projects": int(max_projects) if max_projects is not None else None,
+        "max_tasks": int(max_tasks) if max_tasks is not None else None,
         "created_by": data.get("created_by"),
         "created_at": data.get("created_at"),
         "password_set": bool(str(data.get("password_hash") or "").strip()),
@@ -1145,22 +1171,42 @@ def authenticate_user(username: str, password: str) -> dict:
         conn.close()
 
 
-def create_user(username: str, password: str, role: str = ROLE_USER, created_by: str | None = None) -> dict:
+def create_user(
+    username: str,
+    password: str,
+    role: str = ROLE_USER,
+    created_by: str | None = None,
+    max_projects: int | None = None,
+    max_tasks: int | None = None,
+) -> dict:
     uname = _normalize_username(username)
     if not uname:
         raise ValueError("username 不能为空")
     if role not in {ROLE_ADMIN, ROLE_USER}:
         raise ValueError("role 不合法")
+    normalized_max_projects = _normalize_quota_limit(max_projects, "max_projects")
+    normalized_max_tasks = _normalize_quota_limit(max_tasks, "max_tasks")
     now = _now()
     uid = str(uuid.uuid4())
     conn = get_conn()
     try:
         conn.execute(
             """
-            INSERT INTO users (id, username, password_hash, role, created_by, created_at)
-            VALUES (?,?,?,?,?,?)
+            INSERT INTO users (
+                id, username, password_hash, role, max_projects, max_tasks, created_by, created_at
+            )
+            VALUES (?,?,?,?,?,?,?,?)
             """,
-            (uid, uname, _password_hash(password), role, created_by, now),
+            (
+                uid,
+                uname,
+                _password_hash(password),
+                role,
+                normalized_max_projects,
+                normalized_max_tasks,
+                created_by,
+                now,
+            ),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
@@ -1201,9 +1247,11 @@ def update_user(
     username: str | None = None,
     password: str | None = None,
     role: str | None = None,
+    max_projects=UNSET,
+    max_tasks=UNSET,
 ) -> dict | None:
     fields: list[str] = []
-    params: list[str] = []
+    params: list[object] = []
     revoke_sessions = False
 
     if username is not None:
@@ -1230,6 +1278,14 @@ def update_user(
             raise ValueError("role 不合法")
         fields.append("role=?")
         params.append(normalized_role)
+
+    if max_projects is not UNSET:
+        fields.append("max_projects=?")
+        params.append(_normalize_quota_limit(max_projects, "max_projects"))
+
+    if max_tasks is not UNSET:
+        fields.append("max_tasks=?")
+        params.append(_normalize_quota_limit(max_tasks, "max_tasks"))
 
     if not fields:
         raise ValueError("至少提供一个可更新字段")
@@ -1525,6 +1581,41 @@ def list_projects(user_id: str | None = None, is_admin: bool = True) -> list[dic
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def count_projects_by_owner(user_id: str) -> int:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return 0
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(1) AS cnt FROM projects WHERE created_by_user_id=?",
+            (uid,),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def count_tasks_by_owner(user_id: str) -> int:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return 0
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(1) AS cnt
+              FROM tasks t
+              JOIN projects p ON p.id = t.project_id
+             WHERE p.created_by_user_id=?
+            """,
+            (uid,),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row else 0
+    finally:
+        conn.close()
 
 
 def list_worker_projects(

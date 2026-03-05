@@ -581,6 +581,37 @@ def _is_admin(user: dict) -> bool:
     return str(user.get("role") or "").strip().lower() == db.ROLE_ADMIN
 
 
+def _quota_limit(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enforce_project_quota(user: dict):
+    if _is_admin(user):
+        return
+    limit = _quota_limit(user.get("max_projects"))
+    if limit is None:
+        return
+    used = db.count_projects_by_owner(user["id"])
+    if used >= limit:
+        raise HTTPException(403, f"已达到项目创建上限（{limit}）")
+
+
+def _enforce_task_quota(user: dict):
+    if _is_admin(user):
+        return
+    limit = _quota_limit(user.get("max_tasks"))
+    if limit is None:
+        return
+    used = db.count_tasks_by_owner(user["id"])
+    if used >= limit:
+        raise HTTPException(403, f"已达到任务创建上限（{limit}）")
+
+
 def require_user(authorization: str | None = Header(default=None, alias="Authorization")) -> dict:
     token = _extract_bearer_token(authorization)
     if not token:
@@ -1222,12 +1253,16 @@ class LoginRequest(BaseModel):
 class UserCreateRequest(BaseModel):
     username: str
     password: str
+    max_projects: int | None = Field(default=None, ge=0)
+    max_tasks: int | None = Field(default=None, ge=0)
 
 
 class UserUpdateRequest(BaseModel):
     username: str | None = None
     password: str | None = None
     role: Literal["admin", "user"] | None = None
+    max_projects: int | None = Field(default=None, ge=0)
+    max_tasks: int | None = Field(default=None, ge=0)
 
 
 class TaskDependencyItem(BaseModel):
@@ -1724,7 +1759,14 @@ async def create_user(body: UserCreateRequest, admin: dict = Depends(require_adm
     if db.get_user_by_username(username):
         raise HTTPException(409, "用户名已存在")
     try:
-        return db.create_user(username, password, role=db.ROLE_USER, created_by=admin["id"])
+        return db.create_user(
+            username,
+            password,
+            role=db.ROLE_USER,
+            created_by=admin["id"],
+            max_projects=body.max_projects,
+            max_tasks=body.max_tasks,
+        )
     except ValueError as e:
         raise HTTPException(422, str(e))
     except sqlite3.IntegrityError:
@@ -1768,7 +1810,21 @@ async def update_user(user_id: str, body: UserUpdateRequest, admin: dict = Depen
             if db.count_users_by_role(db.ROLE_ADMIN) <= 1:
                 raise HTTPException(422, "系统至少需要保留一个管理员")
 
-    if username is None and password is None and role is None:
+    max_projects = db.UNSET
+    max_tasks = db.UNSET
+    fields_set = body.model_fields_set
+    if "max_projects" in fields_set:
+        max_projects = body.max_projects
+    if "max_tasks" in fields_set:
+        max_tasks = body.max_tasks
+
+    if (
+        username is None
+        and password is None
+        and role is None
+        and max_projects is db.UNSET
+        and max_tasks is db.UNSET
+    ):
         raise HTTPException(422, "没有可更新字段")
 
     try:
@@ -1777,6 +1833,8 @@ async def update_user(user_id: str, body: UserUpdateRequest, admin: dict = Depen
             username=username,
             password=password,
             role=role,
+            max_projects=max_projects,
+            max_tasks=max_tasks,
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -1868,6 +1926,7 @@ async def workspace_cleanup_sweep(
 
 @app.post("/projects", status_code=201)
 async def create_project(body: ProjectCreate, user: dict = Depends(require_user)):
+    _enforce_project_quota(user)
     path = Path(body.path).expanduser().resolve()
     all_projects = db.list_projects()
     if any(p["path"] == str(path) for p in all_projects):
@@ -2053,6 +2112,8 @@ async def create_task(body: TaskCreate, principal: dict = Depends(require_agent_
     if STRICT_CLAIM_SCOPE and not str(body.project_id or "").strip():
         raise HTTPException(422, "启用项目隔离后，创建任务必须提供 project_id")
     is_user = str(principal.get("auth_type") or "").strip().lower() == "user"
+    if is_user:
+        _enforce_task_quota(principal)
     if is_user and body.project_id and not db.user_can_access_project(
         body.project_id,
         principal["id"],

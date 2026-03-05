@@ -164,6 +164,120 @@ class TaskActionsApiTest(unittest.TestCase):
         del_res = self.client.delete(f"/users/{target['id']}", headers=user_headers)
         self.assertEqual(del_res.status_code, 403)
 
+    def test_admin_can_set_and_clear_user_quota(self):
+        created = self.client.post(
+            "/users",
+            json={
+                "username": "quota01",
+                "password": "quotapass1",
+                "max_projects": 1,
+                "max_tasks": 2,
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        user = created.json()
+        self.assertEqual(user["max_projects"], 1)
+        self.assertEqual(user["max_tasks"], 2)
+
+        updated = self.client.patch(
+            f"/users/{user['id']}",
+            json={"max_projects": 3, "max_tasks": None},
+            headers=self._headers,
+        )
+        self.assertEqual(updated.status_code, 200)
+        payload = updated.json()
+        self.assertEqual(payload["max_projects"], 3)
+        self.assertIsNone(payload["max_tasks"])
+
+    def test_user_project_quota_blocks_create_project(self):
+        created = self.client.post(
+            "/users",
+            json={
+                "username": "quota_project_user",
+                "password": "devpass1",
+                "max_projects": 1,
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "quota_project_user", "password": "devpass1"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        project_a = Path(self._tmp.name) / "quota-project-a"
+        project_b = Path(self._tmp.name) / "quota-project-b"
+
+        first = self.client.post(
+            "/projects",
+            json={"name": "quota-a", "path": str(project_a)},
+            headers=user_headers,
+        )
+        self.assertEqual(first.status_code, 201)
+
+        second = self.client.post(
+            "/projects",
+            json={"name": "quota-b", "path": str(project_b)},
+            headers=user_headers,
+        )
+        self.assertEqual(second.status_code, 403)
+        self.assertIn("项目创建上限", second.json().get("detail", ""))
+
+    def test_user_task_quota_blocks_create_task(self):
+        created = self.client.post(
+            "/users",
+            json={
+                "username": "quota_task_user",
+                "password": "devpass2",
+                "max_tasks": 1,
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "quota_task_user", "password": "devpass2"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        project_path = Path(self._tmp.name) / "quota-task-project"
+        created_project = self.client.post(
+            "/projects",
+            json={"name": "quota-task", "path": str(project_path)},
+            headers=user_headers,
+        )
+        self.assertEqual(created_project.status_code, 201)
+        project_id = created_project.json()["id"]
+
+        first = self.client.post(
+            "/tasks",
+            json={
+                "title": "quota-task-1",
+                "description": "first",
+                "project_id": project_id,
+            },
+            headers=user_headers,
+        )
+        self.assertEqual(first.status_code, 201)
+
+        second = self.client.post(
+            "/tasks",
+            json={
+                "title": "quota-task-2",
+                "description": "second",
+                "project_id": project_id,
+            },
+            headers=user_headers,
+        )
+        self.assertEqual(second.status_code, 403)
+        self.assertIn("任务创建上限", second.json().get("detail", ""))
+
     def test_login_lockout_backoff_after_five_failures(self):
         username = "admin"
         for _ in range(4):
