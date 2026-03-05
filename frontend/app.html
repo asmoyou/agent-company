@@ -13,15 +13,60 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <style>
-    body { background: #0f172a; color: #e2e8f0; }
-    .card { transition: transform 0.15s, box-shadow 0.15s; }
-    .card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.4); }
+    :root{
+      --surface-0:#020617;
+      --surface-1:#0a1222;
+      --surface-2:#111c33;
+      --panel-border:rgba(148,163,184,.24);
+      --panel-soft:rgba(15,23,42,.68);
+      --text-main:#e2e8f0;
+      --text-soft:#94a3b8;
+      --accent:#7c89ff;
+      --accent-strong:#5d6df8;
+      --accent-cool:#38bdf8;
+      --accent-glow:rgba(124,137,255,.34);
+      --success:#34d399;
+      --danger:#fb7185;
+      --ease-smooth:cubic-bezier(.22,.61,.36,1);
+      --elev-1:0 12px 30px rgba(2,6,23,.36);
+      --elev-2:0 20px 44px rgba(2,6,23,.46);
+    }
+    body {
+      background:
+        radial-gradient(1240px 600px at 4% -16%, rgba(56,189,248,.18), transparent 65%),
+        radial-gradient(980px 520px at 104% -10%, rgba(124,137,255,.22), transparent 70%),
+        linear-gradient(165deg, var(--surface-0), var(--surface-1) 54%, var(--surface-2));
+      color:var(--text-main);
+      font-family:"Space Grotesk","IBM Plex Sans","PingFang SC","Microsoft YaHei",sans-serif;
+      -webkit-font-smoothing:antialiased;
+      text-rendering:optimizeLegibility;
+    }
+    ::selection{background:rgba(124,137,255,.32);color:#eef2ff;}
+    .card{
+      transition:
+        transform .22s var(--ease-smooth),
+        box-shadow .24s var(--ease-smooth),
+        border-color .24s var(--ease-smooth),
+        background-color .24s var(--ease-smooth);
+      box-shadow:0 8px 20px rgba(2,6,23,.22);
+    }
+    .card:hover{
+      transform:translateY(-3px);
+      box-shadow:var(--elev-2);
+      border-color:rgba(99,102,241,.45);
+      background-color:rgba(30,41,59,.96);
+    }
     .badge { font-size: 0.58rem; font-weight: 700; letter-spacing: 0.03em; }
-    #panel { transition: transform 0.25s; }
+    #panel {
+      transition: transform .28s var(--ease-smooth);
+      background:linear-gradient(180deg, rgba(15,23,42,.96), rgba(15,23,42,.9));
+      border-left:1px solid var(--panel-border);
+      box-shadow:-18px 0 42px rgba(2,6,23,.42);
+    }
     #panel.hidden-panel { transform: translateX(100%); }
     .ws-dot { width:8px;height:8px;border-radius:50%;display:inline-block; }
-    .ws-dot.connected { background:#22c55e; }
-    .ws-dot.disconnected { background:#ef4444; }
+    .ws-dot.connected { background:var(--success); box-shadow:0 0 0 3px rgba(52,211,153,.15),0 0 12px rgba(52,211,153,.5); }
+    .ws-dot.disconnected { background:var(--danger); box-shadow:0 0 0 3px rgba(251,113,133,.14),0 0 10px rgba(251,113,133,.42); }
     .log-entry { border-left:3px solid #334155;padding-left:8px;margin-bottom:6px; }
     .terminal {
       background:#060910;border:1px solid #1e293b;border-radius:6px;
@@ -140,16 +185,132 @@
     .term-hide-md,.term-hide-sm{display:inline-flex;}
     .agent-busy .badge-dot{animation:blink 1s infinite;}
     @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
-    #terminal-panel{transition:height 0.2s ease;overflow:hidden;}
+    #terminal-panel{transition:height .24s var(--ease-smooth);overflow:hidden;}
     #terminal-panel.collapsed{height:0!important;}
-    ::-webkit-scrollbar{width:5px;height:5px;}
-    ::-webkit-scrollbar-track{background:#1e293b;}
-    ::-webkit-scrollbar-thumb{background:#475569;border-radius:3px;}
+    *{scrollbar-width:thin;scrollbar-color:#475569 #0f172a;}
+    ::-webkit-scrollbar{width:4px;height:4px;}
+    ::-webkit-scrollbar-track{background:#0f172a;}
+    ::-webkit-scrollbar-thumb{
+      background:linear-gradient(180deg, rgba(100,116,139,.8), rgba(71,85,105,.85));
+      border-radius:999px;
+      transition:background-color .2s var(--ease-smooth);
+    }
+    ::-webkit-scrollbar-thumb:hover{
+      background:linear-gradient(180deg, rgba(148,163,184,.82), rgba(100,116,139,.92));
+    }
     .archived-card{opacity:0.45;}
+    .app-header{
+      background:linear-gradient(120deg, rgba(15,23,42,.94), rgba(14,24,46,.82));
+      border-bottom:1px solid var(--panel-border);
+      box-shadow:0 10px 26px rgba(2,6,23,.36), inset 0 1px 0 rgba(148,163,184,.1);
+      backdrop-filter:blur(10px);
+      scrollbar-width:thin;
+      scrollbar-color:rgba(100,116,139,.58) transparent;
+    }
+    .app-header::-webkit-scrollbar{height:3px;}
+    .app-header::-webkit-scrollbar-track{background:transparent;}
+    .app-header::-webkit-scrollbar-thumb{
+      background:rgba(100,116,139,.48);
+      border-radius:999px;
+      transition:background-color .22s var(--ease-smooth), opacity .22s var(--ease-smooth);
+      opacity:.65;
+    }
+    .app-header:hover::-webkit-scrollbar-thumb{opacity:.95;}
+    .app-header::-webkit-scrollbar-thumb:hover{background:rgba(148,163,184,.64);}
+    .app-header button,
+    .app-header select,
+    .app-header #auth-user-badge,
+    .app-header input[type="checkbox"]{
+      transition:
+        color .22s var(--ease-smooth),
+        background-color .22s var(--ease-smooth),
+        border-color .22s var(--ease-smooth),
+        box-shadow .22s var(--ease-smooth),
+        transform .22s var(--ease-smooth);
+    }
+    .app-header .header-btn{
+      background:linear-gradient(180deg, rgba(51,65,85,.72), rgba(30,41,59,.84));
+      border:1px solid rgba(100,116,139,.6);
+      color:#d1d5db;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.08), 0 8px 16px rgba(2,6,23,.24);
+    }
+    .app-header .header-btn:hover:not(:disabled){
+      background:linear-gradient(180deg, rgba(71,85,105,.76), rgba(30,41,59,.92));
+      border-color:rgba(148,163,184,.72);
+      color:#f1f5f9;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.1), 0 10px 20px rgba(2,6,23,.32);
+    }
+    .app-header .header-btn:disabled{
+      opacity:.42;
+      box-shadow:none;
+      cursor:not-allowed;
+    }
+    .app-header .workspace-trigger{
+      background:linear-gradient(180deg, rgba(14,116,144,.2), rgba(30,41,59,.9));
+      border-color:rgba(103,232,249,.5);
+      color:#bae6fd;
+      box-shadow:inset 0 1px 0 rgba(224,242,254,.12), 0 10px 18px rgba(14,116,144,.18);
+    }
+    .app-header .workspace-trigger:hover:not(:disabled){
+      background:linear-gradient(180deg, rgba(8,145,178,.26), rgba(30,41,59,.96));
+      border-color:rgba(125,211,252,.74);
+      color:#ecfeff;
+      box-shadow:inset 0 1px 0 rgba(224,242,254,.16), 0 12px 22px rgba(14,116,144,.26);
+    }
+    .app-header #project-select{
+      background:linear-gradient(180deg, rgba(30,41,59,.74), rgba(15,23,42,.9));
+      border-color:rgba(100,116,139,.65);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.08), 0 6px 14px rgba(2,6,23,.24);
+    }
+    .app-header #project-select:hover{
+      border-color:rgba(148,163,184,.72);
+      color:#f1f5f9;
+    }
+    .app-header #project-select:focus{
+      border-color:rgba(129,140,248,.86);
+      box-shadow:0 0 0 3px rgba(99,102,241,.22), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    .app-header input[type="checkbox"]{accent-color:var(--accent);}
+    .app-header #btn-create-task{
+      background:linear-gradient(135deg, var(--accent-strong), var(--accent));
+      border:1px solid rgba(129,140,248,.45);
+      box-shadow:0 10px 22px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.22);
+    }
+    .app-header #btn-create-task:hover{
+      background:linear-gradient(135deg, #5467f6, #8a95ff);
+      box-shadow:0 12px 26px rgba(124,137,255,.42), inset 0 1px 0 rgba(255,255,255,.24);
+    }
+    .app-header #btn-logout:hover:not(:disabled){
+      background:linear-gradient(180deg, rgba(127,29,29,.8), rgba(69,10,10,.95));
+      border-color:rgba(251,113,133,.64);
+      color:#ffe4e6;
+    }
+    .app-header button:not(:disabled):hover{transform:translateY(-1px);}
+    .app-header button:not(:disabled):active{transform:translateY(0);}
+    main{
+      background:linear-gradient(180deg, rgba(2,6,23,.22), rgba(2,6,23,.08));
+    }
+    #board{padding:2px 2px 12px;}
+    #agent-terminal-shell{
+      background:linear-gradient(180deg, rgba(15,23,42,.94), rgba(2,6,23,.95));
+      border-top:1px solid rgba(148,163,184,.22);
+      box-shadow:0 -10px 24px rgba(2,6,23,.28);
+    }
     /* Project workspace */
-    #file-panel{transition:transform 0.25s ease;transform:translateX(-100%);width:min(95vw,980px);max-width:100vw;}
+    #file-panel{
+      transition:transform .28s var(--ease-smooth);
+      transform:translateX(-100%);
+      width:min(95vw,980px);max-width:100vw;
+      background:linear-gradient(180deg, rgba(15,23,42,.97), rgba(15,23,42,.92));
+      border-right:1px solid var(--panel-border);
+      box-shadow:18px 0 40px rgba(2,6,23,.46);
+    }
     #file-panel.open{transform:translateX(0);}
-    #file-overlay{transition:opacity 0.2s;opacity:0;pointer-events:none;}
+    #file-overlay{
+      transition:opacity .22s var(--ease-smooth);
+      opacity:0;pointer-events:none;
+      backdrop-filter:blur(2px);
+    }
     #file-overlay.open{opacity:1;pointer-events:auto;}
     .fb-shell{position:relative;display:flex;flex:1 1 auto;min-height:0;}
     .fb-nav{width:44%;min-width:320px;display:flex;flex-direction:column;border-right:1px solid #334155;min-height:0;}
@@ -165,6 +326,47 @@
     .fb-action-btn{font-size:11px;color:#94a3b8;background:#0b1220;border:1px solid #334155;border-radius:4px;padding:2px 6px;line-height:1.4;transition:all 0.12s;}
     .fb-action-btn:hover{color:#e2e8f0;border-color:#475569;background:#111827;}
     .fb-action-btn.danger:hover{color:#fecaca;border-color:#7f1d1d;background:#450a0a;}
+    .fb-head{background:linear-gradient(180deg, rgba(15,23,42,.9), rgba(15,23,42,.72));}
+    .fb-head-title{
+      font-weight:600;color:#f1f5f9;font-size:13px;
+      letter-spacing:.01em;
+    }
+    .fb-head-path-wrap{
+      margin-top:8px;display:flex;align-items:center;gap:6px;min-width:0;
+    }
+    .fb-head-path{
+      flex:1 1 auto;min-width:0;
+      background:rgba(2,6,23,.5);
+      border:1px solid rgba(71,85,105,.74);
+      border-radius:7px;
+      padding:3px 8px;
+      color:#cbd5e1;
+      font-size:11px;
+      font-family:"SF Mono","Monaco","Menlo",monospace;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .fb-head-copy{
+      flex:0 0 auto;
+      border:1px solid rgba(71,85,105,.8);
+      border-radius:7px;
+      padding:3px 8px;
+      font-size:11px;
+      color:#cbd5e1;
+      background:rgba(15,23,42,.72);
+      transition:all .2s var(--ease-smooth);
+    }
+    .fb-head-copy:hover{
+      color:#eef2ff;
+      border-color:rgba(124,137,255,.72);
+      background:rgba(124,137,255,.14);
+    }
+    .fb-head-copy:disabled{
+      opacity:.46;
+      cursor:not-allowed;
+      transform:none;
+    }
     .fb-preview-body{flex:1;min-height:0;overflow:auto;padding:12px;background:#020617;}
     .fb-preview-placeholder{height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:12px;text-align:center;padding:12px;}
     .fb-preview-pre{margin:0;white-space:pre;font-family:'SF Mono','Monaco','Menlo',monospace;font-size:12px;line-height:1.6;color:#d1d5db;}
@@ -225,8 +427,13 @@
       pointer-events:none;max-width:min(460px,calc(100vw - 28px));
     }
     .toast{
-      pointer-events:auto;background:#111827;border:1px solid #334155;border-left:4px solid #475569;
-      border-radius:8px;padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.35);
+      pointer-events:auto;
+      background:linear-gradient(180deg, rgba(17,24,39,.94), rgba(15,23,42,.88));
+      border:1px solid rgba(71,85,105,.72);
+      border-left:4px solid #475569;
+      border-radius:8px;padding:10px 12px;
+      box-shadow:0 14px 30px rgba(2,6,23,.42);
+      backdrop-filter:blur(6px);
       animation:toast-in .16s ease-out;
     }
     .toast.error{border-left-color:#ef4444;}
@@ -284,8 +491,10 @@
     }
     .msg-dialog{
       width:min(620px,calc(100vw - 32px));
-      background:#0f172a;border:1px solid #334155;border-radius:12px;
-      box-shadow:0 20px 50px rgba(2,6,23,.65);
+      background:linear-gradient(170deg, rgba(15,23,42,.95), rgba(15,23,42,.86));
+      border:1px solid rgba(100,116,139,.58);
+      border-radius:12px;
+      box-shadow:0 20px 50px rgba(2,6,23,.65), inset 0 1px 0 rgba(148,163,184,.08);
       display:flex;flex-direction:column;max-height:min(78vh,760px);
     }
     .msg-dialog-head{
@@ -325,11 +534,22 @@
     .msg-btn:hover{color:#e2e8f0;border-color:#475569;}
     .msg-btn.primary{background:#4f46e5;border-color:#4338ca;color:#eef2ff;}
     .msg-btn.primary:hover{background:#6366f1;border-color:#4f46e5;}
+    #modal-agents > div,
+    #modal-project > div,
+    #modal-dir-picker > div,
+    #modal-users > div,
+    #modal-user-edit > div,
+    #modal-task > div{
+      background:linear-gradient(165deg, rgba(15,23,42,.96), rgba(15,23,42,.88));
+      border-color:rgba(100,116,139,.58)!important;
+      box-shadow:0 24px 62px rgba(2,6,23,.56);
+      backdrop-filter:blur(8px);
+    }
     @keyframes toast-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
     .lane {
       width: var(--lane-normal-width, 12rem);
       min-width: var(--lane-normal-width, 12rem);
-      transition: width .18s ease, min-width .18s ease;
+      transition: width .26s var(--ease-smooth), min-width .26s var(--ease-smooth);
     }
     .lane.compact {
       width: var(--lane-compact-width, 3.75rem);
@@ -340,15 +560,23 @@
     .lane.compact .lane-head { justify-content: center; }
     .lane.compact .lane-count { margin-left: 0; color: #64748b; }
     .lane-head {
-      border-radius: 0.6rem;
-      transition: background-color .12s ease, color .12s ease;
+      border-radius: 0.72rem;
+      transition: background-color .2s var(--ease-smooth), color .2s var(--ease-smooth), box-shadow .2s var(--ease-smooth);
     }
     .lane-head[data-col-tip] { cursor: help; }
-    .lane-head:hover { background: rgba(51,65,85,.34); }
+    .lane-head:hover { background: rgba(51,65,85,.3); box-shadow: inset 0 0 0 1px rgba(100,116,139,.32); }
     .lane-head:hover .lane-label,
     .lane-head:hover .lane-count { color: #cbd5e1; }
-    .lane-dot { transition: transform .12s ease, filter .12s ease; }
+    .lane-dot { transition: transform .2s var(--ease-smooth), filter .2s var(--ease-smooth); }
     .lane-head:hover .lane-dot { transform: scale(1.15); filter: brightness(1.15); }
+    .lane-body{
+      border:1px solid rgba(51,65,85,.52);
+      background:
+        linear-gradient(180deg, rgba(15,23,42,.72), rgba(15,23,42,.48)),
+        linear-gradient(90deg, rgba(59,130,246,.05), transparent 42%);
+      box-shadow: inset 0 1px 0 rgba(148,163,184,.06);
+      backdrop-filter: blur(1px);
+    }
     .col-tooltip {
       position: fixed;
       z-index: 80;
@@ -424,7 +652,7 @@
 <body class="min-h-screen font-sans flex flex-col">
 
 <!-- Header -->
-<header class="bg-slate-900 border-b border-slate-700 px-4 py-2.5 flex items-center gap-3 sticky top-0 z-10 flex-nowrap overflow-x-auto overflow-y-hidden whitespace-nowrap">
+<header class="app-header bg-slate-900 border-b border-slate-700 px-4 py-2.5 flex items-center gap-3 sticky top-0 z-10 flex-nowrap overflow-x-auto overflow-y-hidden whitespace-nowrap">
   <div class="w-7 h-7 bg-indigo-500 rounded-lg flex items-center justify-center text-xs font-bold shrink-0">AI</div>
 
   <!-- Project selector -->
@@ -435,11 +663,11 @@
       <option value="">— 选择项目 —</option>
     </select>
     <button onclick="openNewProjectModal()"
-      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition">
+      class="header-btn text-xs px-3 py-1.5 rounded-lg transition">
       + 新建项目
     </button>
     <button onclick="syncProjects()" id="btn-sync"
-      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      class="header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="检测并清理已删除目录的项目">
       ↻ 同步
     </button>
@@ -454,6 +682,12 @@
       disabled>
       + 创建任务
     </button>
+    <button id="btn-open-workspace" onclick="openFileBrowser()"
+      class="header-btn workspace-trigger text-xs px-3 py-1.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed ml-0.5"
+      title="打开项目办公区"
+      disabled>
+      📁 办公区
+    </button>
   </div>
 
   <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1 shrink-0">
@@ -461,14 +695,7 @@
     <span id="ws-label">连接中...</span>
   </div>
 
-  <div class="ml-auto flex items-center gap-2 shrink-0">
-    <!-- Project path indicator -->
-    <div id="project-path-indicator" class="hidden flex items-center gap-1.5 text-xs shrink-0">
-      <span class="text-slate-500 shrink-0">项目办公区</span>
-      <button onclick="openFileBrowser()" class="flex items-center gap-1 text-slate-300 hover:text-indigo-400 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono transition truncate" style="max-width:240px" id="project-path-text" title="点击打开项目办公区"></button>
-      <button onclick="copyProjectPath()" class="text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 transition" title="复制路径">📋</button>
-      <span class="text-slate-700">|</span>
-    </div>
+  <div class="ml-auto flex items-center gap-2.5 shrink-0">
     <!-- Archive toggle -->
     <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
       <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
@@ -480,18 +707,18 @@
     </label>
     <!-- Agent management -->
     <button onclick="openAgentsModal()"
-      class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      class="header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="管理 Agent 类型">
       🤖 Agents
     </button>
     <button id="btn-user-admin" onclick="openUsersModal()"
-      class="hidden bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      class="hidden header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="管理用户">
       👤 用户
     </button>
     <div id="auth-user-badge" class="hidden text-xs text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 whitespace-nowrap shrink-0"></div>
     <button id="btn-logout" onclick="logout()"
-      class="hidden bg-slate-700 hover:bg-red-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg transition"
+      class="hidden header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="退出登录">
       退出
     </button>
@@ -634,9 +861,15 @@
 <div id="file-overlay" onclick="closeFileBrowser()" class="fixed inset-0 bg-black/40 z-10"></div>
 <div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl">
   <!-- Header -->
-  <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700 shrink-0">
-    <span class="font-semibold text-white text-sm">📁 项目办公区</span>
-    <div class="flex items-center gap-1.5">
+  <div class="fb-head flex items-start justify-between gap-3 px-4 py-3 border-b border-slate-700 shrink-0">
+    <div class="min-w-0 flex-1">
+      <div class="fb-head-title">📁 项目办公区</div>
+      <div id="fb-project-path-wrap" class="fb-head-path-wrap hidden">
+        <div id="fb-project-path-text" class="fb-head-path" title=""></div>
+        <button id="fb-project-path-copy" type="button" onclick="copyProjectPath()" class="fb-head-copy" title="复制项目路径">复制</button>
+      </div>
+    </div>
+    <div class="flex items-center gap-1.5 shrink-0">
       <button onclick="fbDownloadCurrentPath()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="打包下载当前目录">⬇ 当前目录</button>
       <button onclick="fbCreateFolder()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="新建文件夹">+📁</button>
       <label class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition cursor-pointer" title="上传文件">
@@ -1934,6 +2167,8 @@ function updateProjectUI() {
   const hasProject = !!currentProjectId;
   document.getElementById("btn-create-task").disabled = !hasProject;
   document.getElementById("btn-delete-project").disabled = !hasProject;
+  const workspaceBtn = document.getElementById("btn-open-workspace");
+  if (workspaceBtn) workspaceBtn.disabled = !hasProject;
   document.getElementById("no-project-hint").classList.toggle("hidden", hasProject || Object.keys(projects).length > 0);
   document.getElementById("board").classList.toggle("hidden", !hasProject);
   if (!hasProject && Object.keys(projects).length === 0) {
@@ -4872,28 +5107,52 @@ function escAttr(s) {
   return String(s||"").replace(/'/g, "\\'").replace(/"/g, "&quot;");
 }
 
-// ── Project Path Indicator ───────────────────────────────────────────────────
+// ── Project Workspace Path ───────────────────────────────────────────────────
 function updateProjectPath() {
-  const indicator = document.getElementById("project-path-indicator");
-  const textEl = document.getElementById("project-path-text");
+  const wrapEl = document.getElementById("fb-project-path-wrap");
+  const textEl = document.getElementById("fb-project-path-text");
+  const copyBtn = document.getElementById("fb-project-path-copy");
+  const workspaceBtn = document.getElementById("btn-open-workspace");
   const proj = projects[currentProjectId];
+  if (workspaceBtn) workspaceBtn.disabled = !proj;
   if (proj) {
-    indicator.classList.remove("hidden");
-    textEl.textContent = "📁 " + proj.path;
-    textEl.title = proj.path + " — 点击打开项目办公区";
+    if (wrapEl) wrapEl.classList.remove("hidden");
+    if (textEl) {
+      textEl.textContent = proj.path;
+      textEl.title = proj.path;
+    }
+    if (copyBtn) {
+      copyBtn.disabled = false;
+      copyBtn.textContent = "复制";
+      copyBtn.title = "复制项目路径";
+    }
   } else {
-    indicator.classList.add("hidden");
+    if (wrapEl) wrapEl.classList.add("hidden");
+    if (textEl) {
+      textEl.textContent = "";
+      textEl.title = "";
+    }
+    if (copyBtn) {
+      copyBtn.disabled = true;
+      copyBtn.textContent = "复制";
+      copyBtn.title = "未选择项目";
+    }
   }
 }
 
 function copyProjectPath() {
   const proj = projects[currentProjectId];
   if (!proj) return;
+  const btn = document.getElementById("fb-project-path-copy");
   navigator.clipboard.writeText(proj.path).then(() => {
-    const btn = document.querySelector('[onclick="copyProjectPath()"]');
-    const orig = btn.textContent;
-    btn.textContent = "✓";
-    setTimeout(() => btn.textContent = orig, 1200);
+    if (!btn) return;
+    const orig = btn.textContent || "复制";
+    btn.textContent = "已复制";
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.disabled = false;
+    }, 1200);
   }).catch(() => uiAlert("复制失败", "操作失败", "error"));
 }
 
