@@ -47,14 +47,14 @@ REVIEW_DIFF_PREVIEW_CHARS = int(os.getenv("REVIEW_DIFF_PREVIEW_CHARS", "12000"))
 class ReviewerAgent(BaseAgent):
     name = "reviewer"
     poll_statuses = ["in_review"]
-    cli_name = "claude"
+    cli_name = "codex"
     working_status = "reviewing"
 
     def __init__(self, shutdown_event=None, config: dict | None = None):
         super().__init__(shutdown_event)
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["in_review"])
-        self.cli_name = str(cfg.get("cli") or "claude")
+        self.cli_name = str(cfg.get("cli") or "codex")
         self.prompt_template = str(cfg.get("prompt") or REVIEWER_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "reviewing")
 

@@ -27,14 +27,14 @@ MANAGER_PROMPT_DEFAULT = (
 class ManagerAgent(BaseAgent):
     name = "manager"
     poll_statuses = ["approved"]
-    cli_name = "claude"
+    cli_name = "codex"
     working_status = "merging"
 
     def __init__(self, shutdown_event=None, config: dict | None = None):
         super().__init__(shutdown_event)
         cfg = config or {}
         self.poll_statuses = parse_status_list(cfg.get("poll_statuses"), ["approved"])
-        self.cli_name = str(cfg.get("cli") or "claude")
+        self.cli_name = str(cfg.get("cli") or "codex")
         self.prompt_template = str(cfg.get("prompt") or MANAGER_PROMPT_DEFAULT)
         self.working_status = str(cfg.get("working_status") or "merging")
 

@@ -19,7 +19,7 @@ class GenericAgent(BaseAgent):
         self.next_status    = config.get("next_status") or "in_review"
         self._working_status = config.get("working_status") or "in_progress"
         self._prompt_tpl    = config.get("prompt") or ""
-        self.cli_name       = config.get("cli") or "claude"
+        self.cli_name       = config.get("cli") or "codex"
 
     async def process_task(self, task: dict):
         task_id = task["id"]
