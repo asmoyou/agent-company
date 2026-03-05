@@ -771,6 +771,10 @@
     .support-chat-reasoning summary::-webkit-details-marker{display:none;}
     .support-chat-reasoning[open] summary{border-bottom-color:rgba(71,85,105,.68);}
     .support-chat-reasoning.streaming summary{color:#bfdbfe;}
+    .support-chat-reasoning.streaming .support-chat-reasoning-body{
+      max-height:none;
+      overflow:visible;
+    }
     .support-chat-reasoning-body{
       padding:8px 9px 9px;
       max-height:220px;
@@ -1192,10 +1196,10 @@
   </div>
 </div>
 <div id="support-chat" class="support-chat" aria-live="polite">
-  <div id="support-chat-panel" class="support-chat-panel hidden" role="dialog" aria-modal="false" aria-label="智能客服">
+  <div id="support-chat-panel" class="support-chat-panel hidden" role="dialog" aria-modal="false" aria-label="小白客智能客服">
     <div class="support-chat-head">
       <div>
-        <div class="support-chat-title">智能客服</div>
+        <div class="support-chat-title">小白客 · 智能客服</div>
         <div class="support-chat-subtitle">
           <span>可解答平台使用问题，也可以闲聊</span>
           <span id="support-chat-health" class="support-chat-health checking" title="启动后自动自检">模型自检: 待检查</span>
@@ -1215,14 +1219,14 @@
         rows="3"
         placeholder="输入你的问题，Enter 发送，Shift+Enter 换行"></textarea>
       <div class="support-chat-actions">
-        <div class="support-chat-tip">客服基于本平台教程回答，必要时会先追问上下文。</div>
+        <div class="support-chat-tip">小白客基于平台知识回答，必要时会先追问上下文。</div>
         <div class="flex items-center gap-2">
           <button id="support-chat-send" type="button" class="support-chat-btn send">发送</button>
         </div>
       </div>
     </div>
   </div>
-  <button id="support-chat-fab" type="button" class="support-chat-fab" aria-label="打开智能客服" title="智能客服">💬</button>
+  <button id="support-chat-fab" type="button" class="support-chat-fab" aria-label="打开小白客智能客服" title="小白客智能客服">💬</button>
 </div>
 <div id="onboarding-overlay" class="hidden" role="dialog" aria-modal="true" aria-hidden="true">
   <div class="onboarding-mask"></div>
@@ -3523,7 +3527,9 @@ function showToast(title, message, kind = "error") {
 // ── Support Chat ──────────────────────────────────────────────────────────────
 const SUPPORT_CHAT_STORAGE_KEY = "opc_support_chat_messages_v1";
 const SUPPORT_CHAT_MAX_MESSAGES = 30;
-const SUPPORT_CHAT_DEFAULT_GREETING = "你好，我是 LinX协作平台简易演示网络版智能客服。可以问我平台使用、任务流转、状态含义、常见报错，也可以闲聊。";
+const SUPPORT_CHAT_DEFAULT_GREETING = "你好，我是小白客。可以问我平台使用、任务流转、状态含义、常见报错，也可以闲聊。";
+const SUPPORT_CHAT_REASONING_CLIENT_MAX_CHARS = 1200;
+const SUPPORT_CHAT_AUTO_FOLLOW_GAP_PX = 36;
 const supportChatState = {
   refs: null,
   open: false,
@@ -3534,6 +3540,7 @@ const supportChatState = {
   seq: 0,
   bottomObserver: null,
   bottomRaf: 0,
+  autoFollow: true,
   bound: false,
 };
 
@@ -3568,7 +3575,7 @@ function supportChatNormalizeHistory(rows) {
       id: String(raw?.id || `sc-history-${out.length + 1}`),
       role,
       content: content.slice(0, 20000),
-      reasoning: reasoning.slice(0, 30000),
+      reasoning: reasoning.slice(0, SUPPORT_CHAT_REASONING_CLIENT_MAX_CHARS),
       created_at: String(raw?.created_at || ""),
     });
   }
@@ -3610,7 +3617,7 @@ function supportChatReplaceMessageContent(messageId, nextContent) {
   if (!msg) return;
   msg.content = String(nextContent || "");
   supportChatPersistHistory();
-  supportChatRenderMessages(true);
+  supportChatRenderMessages();
 }
 
 function supportChatAppendMessageContent(messageId, delta) {
@@ -3618,15 +3625,16 @@ function supportChatAppendMessageContent(messageId, delta) {
   if (!msg) return;
   msg.content = `${msg.content || ""}${String(delta || "")}`;
   supportChatPersistHistory();
-  supportChatRenderMessages(true);
+  supportChatRenderMessages();
 }
 
 function supportChatAppendMessageReasoning(messageId, delta) {
   const msg = supportChatGetMessageById(messageId);
   if (!msg) return;
-  msg.reasoning = `${msg.reasoning || ""}${String(delta || "")}`;
+  const merged = `${msg.reasoning || ""}${String(delta || "")}`;
+  msg.reasoning = merged.slice(0, SUPPORT_CHAT_REASONING_CLIENT_MAX_CHARS);
   supportChatPersistHistory();
-  supportChatRenderMessages(true);
+  supportChatRenderMessages();
 }
 
 function supportChatCanSubmit() {
@@ -3689,11 +3697,19 @@ function supportChatAutoResizeInput() {
   input.style.height = `${next}px`;
 }
 
+function supportChatIsNearBottom(threshold = SUPPORT_CHAT_AUTO_FOLLOW_GAP_PX) {
+  const body = supportChatState.refs?.body;
+  if (!body) return true;
+  const gap = body.scrollHeight - body.scrollTop - body.clientHeight;
+  return gap <= threshold;
+}
+
 function supportChatScrollToBottom(force = false) {
   const body = supportChatState.refs?.body;
   if (!body) return;
   const gap = body.scrollHeight - body.scrollTop - body.clientHeight;
-  if (force || gap < 80) body.scrollTop = body.scrollHeight;
+  if (!force && !supportChatState.autoFollow && gap > SUPPORT_CHAT_AUTO_FOLLOW_GAP_PX) return;
+  body.scrollTop = body.scrollHeight;
 }
 
 function supportChatRenderMessages(scrollToBottom = false) {
@@ -3710,7 +3726,7 @@ function supportChatRenderMessages(scrollToBottom = false) {
     const content = String(item.content || "");
     const reasoning = String(item.reasoning || "");
     const isTailStreaming = supportChatState.streaming && item.id === tailId;
-    const shouldOpenReasoning = role === "assistant" && !!reasoning.trim() && isTailStreaming && !content.trim();
+    const shouldOpenReasoning = role === "assistant" && !!reasoning.trim() && isTailStreaming;
     const reasoningSummary = shouldOpenReasoning ? "思考中（自动展开）" : "思考过程（点击展开）";
     const reasoningHtml = (role === "assistant" && reasoning.trim())
       ? `<details class="support-chat-reasoning ${isTailStreaming ? "streaming" : ""}" ${shouldOpenReasoning ? "open" : ""}>
@@ -3737,6 +3753,7 @@ function supportChatRenderMessages(scrollToBottom = false) {
 function supportChatSetStreaming(next) {
   const refs = supportChatState.refs;
   supportChatState.streaming = !!next;
+  if (supportChatState.streaming) supportChatState.autoFollow = true;
   if (!refs) return;
   if (refs.clearBtn) refs.clearBtn.disabled = supportChatState.streaming;
   supportChatUpdatePrimaryButton();
@@ -3750,6 +3767,7 @@ function supportChatSetOpen(nextOpen) {
   refs.fab.classList.toggle("open", supportChatState.open);
   supportChatScheduleBottomOffset();
   if (supportChatState.open) {
+    supportChatState.autoFollow = true;
     supportChatAutoResizeInput();
     supportChatScrollToBottom(true);
     setTimeout(() => refs.input?.focus(), 0);
@@ -3847,6 +3865,7 @@ async function supportChatClearHistory() {
 async function supportChatStreamReply(assistantMessageId) {
   const controller = new AbortController();
   supportChatState.abortController = controller;
+  supportChatState.autoFollow = true;
   supportChatSetStreaming(true);
   supportChatRenderMessages(true);
 
@@ -4034,6 +4053,9 @@ function initSupportChat() {
     supportChatSendInput();
   });
   refs.healthBtn.addEventListener("click", () => { refreshSupportChatHealth(); });
+  refs.body.addEventListener("scroll", () => {
+    supportChatState.autoFollow = supportChatIsNearBottom();
+  }, { passive: true });
   refs.input.addEventListener("input", () => {
     supportChatAutoResizeInput();
     supportChatUpdatePrimaryButton();
