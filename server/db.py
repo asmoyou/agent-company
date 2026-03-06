@@ -61,11 +61,15 @@ DEVELOPER_PROMPT_DEFAULT = (
     "2. **质量标准**\n"
     "   - 代码需有适当注释，边界情况需处理\n"
     "   - 文档需完整、结构清晰\n\n"
-    "3. **分支与交接约束**\n"
+    "3. **完成定义（必须自检）**\n"
+    "   - 任务描述中的“交付物”“验收标准”“关键约束”同样是本轮实现的完成定义\n"
+    "   - 提交前逐项核对；缺任何一项都不能算完成\n"
+    "   - TODO 步骤只是执行路径，最终以交付物和验收标准是否满足为准\n\n"
+    "4. **分支与交接约束**\n"
     "   - 在当前工作分支完成实现并提交，不要自行合并 main\n"
     "   - 提交后由 reviewer/manager 继续流程，不要跳过审查与合并环节\n"
     "   - 不要伪造“已合并/已发布”结论\n\n"
-    "4. 直接开始实现，不需要解释计划"
+    "5. 直接开始实现，不需要解释计划"
 )
 
 REVIEWER_PROMPT_DEFAULT = (
@@ -78,6 +82,11 @@ REVIEWER_PROMPT_DEFAULT = (
     "```\n"
     "{diff}\n"
     "```\n\n"
+    "## 审查职责\n\n"
+    "- 任务描述中的“交付物”“验收标准”“关键约束”同样是你的独立核查清单\n"
+    "- 只有所有验收项都有代码、测试、文档或行为证据时，才能 approve\n"
+    "- TODO 步骤只用于理解实现路径，不能替代验收标准\n"
+    "- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向\n\n"
     "## 审查要点\n\n"
     "- 是否完整实现了需求描述中的所有要求\n"
     "- 代码/内容是否正确，有无明显错误或遗漏\n"
@@ -472,6 +481,7 @@ def init_db():
             poll_statuses  TEXT NOT NULL DEFAULT '["todo"]',
             next_status    TEXT NOT NULL DEFAULT 'in_review',
             working_status TEXT NOT NULL DEFAULT 'in_progress',
+            runtime_profile TEXT NOT NULL DEFAULT '',
             cli            TEXT NOT NULL DEFAULT 'codex',
             is_builtin     INTEGER NOT NULL DEFAULT 0,
             created_at     TEXT NOT NULL
@@ -574,6 +584,7 @@ def init_db():
         ("poll_statuses", "TEXT NOT NULL DEFAULT '[\"todo\"]'"),
         ("next_status", "TEXT NOT NULL DEFAULT 'in_review'"),
         ("working_status", "TEXT NOT NULL DEFAULT 'in_progress'"),
+        ("runtime_profile", "TEXT NOT NULL DEFAULT ''"),
         ("cli", "TEXT NOT NULL DEFAULT 'codex'"),
         ("is_builtin", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
@@ -657,6 +668,7 @@ def _seed_builtin_agents(conn):
             "poll_statuses": '["todo","needs_changes"]',
             "next_status": "in_review",
             "working_status": "in_progress",
+            "runtime_profile": "developer",
         },
         {
             "key": "reviewer",
@@ -809,11 +821,11 @@ def _seed_builtin_agents(conn):
         if not exists:
             conn.execute(
                 """INSERT INTO agent_types
-                   (id,key,name,description,prompt,poll_statuses,next_status,working_status,cli,is_builtin,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
+                   (id,key,name,description,prompt,poll_statuses,next_status,working_status,runtime_profile,cli,is_builtin,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,1,?)""",
                 (str(uuid.uuid4()), b["key"], b["name"], b["description"],
                  b.get("prompt", ""),
-                 b["poll_statuses"], b["next_status"], b["working_status"], "codex", now),
+                 b["poll_statuses"], b["next_status"], b["working_status"], b.get("runtime_profile", ""), "codex", now),
             )
     # Keep built-in agents aligned with current default CLI.
     conn.execute(
@@ -901,6 +913,16 @@ def _seed_builtin_agents(conn):
              AND INSTR(prompt, '分支与交接约束') = 0""",
         (BUILTIN_PROMPTS["developer"],),
     )
+    # Migrate built-in developer prompt to include completion-definition guidance.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='developer' AND is_builtin=1
+             AND INSTR(prompt, '你是一名专业软件工程师，负责实现以下任务。') > 0
+             AND INSTR(prompt, '完成定义（必须自检）') = 0
+             AND INSTR(prompt, '分支与交接约束') > 0""",
+        (BUILTIN_PROMPTS["developer"],),
+    )
     # Migrate strict built-in developer line that required creating at least one file.
     conn.execute(
         """UPDATE agent_types
@@ -921,6 +943,16 @@ def _seed_builtin_agents(conn):
              AND INSTR(prompt, 'commit_hash') = 0""",
         (BUILTIN_PROMPTS["manager"],),
     )
+    # Migrate built-in reviewer prompt to spell out independent acceptance responsibility.
+    conn.execute(
+        """UPDATE agent_types
+           SET prompt=?
+           WHERE key='reviewer' AND is_builtin=1
+             AND INSTR(prompt, '你是资深代码/文档审查工程师，负责审查以下变更。') > 0
+             AND INSTR(prompt, '任务描述中的“交付物”“验收标准”“关键约束”同样是你的独立核查清单') = 0
+             AND INSTR(prompt, '## 审查要点') > 0""",
+        (BUILTIN_PROMPTS["reviewer"],),
+    )
     # Migrate outdated built-in descriptions.
     conn.execute(
         """UPDATE agent_types
@@ -928,6 +960,12 @@ def _seed_builtin_agents(conn):
            WHERE key='developer' AND is_builtin=1
              AND (INSTR(description, 'dev 分支') > 0 OR INSTR(description, '提交到 dev') > 0)""",
         ("实现任务需求，在 agent/<agent> 工作分支提交并交接审查",),
+    )
+    conn.execute(
+        """UPDATE agent_types
+           SET runtime_profile='developer'
+           WHERE key='developer' AND is_builtin=1
+             AND LOWER(TRIM(COALESCE(runtime_profile, ''))) != 'developer'""",
     )
     conn.execute(
         """UPDATE agent_types
@@ -3626,16 +3664,17 @@ def get_agent_type(key: str) -> dict | None:
 
 def create_agent_type(key: str, name: str, description: str, prompt: str,
                       poll_statuses: list, next_status: str,
-                      working_status: str, cli: str) -> dict:
+                      working_status: str, cli: str,
+                      runtime_profile: str = "") -> dict:
     conn = get_conn()
     aid = str(uuid.uuid4())
     now = _now()
     conn.execute(
         """INSERT INTO agent_types
-           (id,key,name,description,prompt,poll_statuses,next_status,working_status,cli,is_builtin,created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,0,?)""",
+           (id,key,name,description,prompt,poll_statuses,next_status,working_status,runtime_profile,cli,is_builtin,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,?)""",
         (aid, key, name, description, prompt,
-         json.dumps(poll_statuses), next_status, working_status, cli, now),
+         json.dumps(poll_statuses), next_status, working_status, runtime_profile, cli, now),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM agent_types WHERE id=?", (aid,)).fetchone()

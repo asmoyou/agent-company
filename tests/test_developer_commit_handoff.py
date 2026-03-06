@@ -10,7 +10,7 @@ AGENTS_DIR = ROOT / "agents"
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-import developer as developer_module  # noqa: E402
+import generic as generic_module  # noqa: E402
 
 
 class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
@@ -20,7 +20,18 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.worktree = self.root / ".worktrees" / "developer"
         self.worktree.mkdir(parents=True, exist_ok=True)
 
-        self.agent = developer_module.DeveloperAgent()
+        self.agent = generic_module.GenericAgent(
+            {
+                "key": "developer",
+                "name": "开发者",
+                "prompt": "do work: {task_title}",
+                "poll_statuses": "[\"todo\",\"needs_changes\"]",
+                "next_status": "in_review",
+                "working_status": "in_progress",
+                "cli": "codex",
+                "runtime_profile": "developer",
+            }
+        )
         self.agent.ensure_agent_workspace = mock.AsyncMock(
             return_value=(self.root, self.worktree, "agent/developer")
         )
@@ -127,6 +138,46 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["handoff"]["stage"], "dev_to_approved")
         self.assertEqual(call.kwargs["handoff"]["to_agent"], "manager")
         self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
+
+    async def test_prompt_includes_execution_contract_from_structured_description(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, "任务实现完成"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-3",
+            "title": "补全接口测试覆盖",
+            "description": (
+                "## 子任务目标\n- 补全 claim 接口的鉴权与异常分支测试\n\n"
+                "## TODO 步骤\n- [ ] 新增失败路径用例\n- [ ] 跑通目标测试\n\n"
+                "## 交付物\n- tests/test_task_actions_api.py 中的新增测试\n\n"
+                "## 验收标准\n- [ ] 新增测试全部通过\n- [ ] 不影响现有测试"
+            ),
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("## 执行基线（必须遵守）", prompt)
+        self.assertIn("tests/test_task_actions_api.py 中的新增测试", prompt)
+        self.assertIn("新增测试全部通过", prompt)
+        self.assertIn("不影响现有测试", prompt)
 
 
 if __name__ == "__main__":

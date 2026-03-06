@@ -16,6 +16,11 @@ REVIEWER_PROMPT_DEFAULT = (
     "```\n"
     "{diff}\n"
     "```\n\n"
+    "## 审查职责\n\n"
+    "- 任务描述中的“交付物”“验收标准”“关键约束”同样是你的独立核查清单\n"
+    "- 只有所有验收项都有代码、测试、文档或行为证据时，才能 approve\n"
+    "- TODO 步骤只用于理解实现路径，不能替代验收标准\n"
+    "- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向\n\n"
     "## 审查要点\n\n"
     "- 是否完整实现了需求描述中的所有要求\n"
     "- 代码/内容是否正确，有无明显错误或遗漏\n"
@@ -357,6 +362,9 @@ class ReviewerAgent(BaseAgent):
                 f"- 完整 diff 文件位于：{diff_file}\n"
                 "- 必须基于完整 diff 给出结论，不可只依据预览片段。"
             )
+        review_contract = self.build_review_contract_block(task)
+        if review_contract:
+            prompt += f"\n\n{review_contract}\n"
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"

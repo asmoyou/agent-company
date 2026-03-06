@@ -49,6 +49,56 @@ INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(press\s+enter(?:\s+to\s+continue)?|hit\s+enter(?:\s+to\s+continue)?|"
     r"请按回车(?:继续)?|按下回车键|按回车继续|回车继续)"
 )
+TASK_SECTION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+TASK_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|(?:\d+\.))\s+(?:\[[ xX]\]\s*)?")
+TASK_SECTION_ALIAS_MAP = {
+    "goal": (
+        "任务目标",
+        "子任务目标",
+        "目标",
+        "需求目标",
+        "objective",
+    ),
+    "parent_refs": (
+        "关联父需求编号",
+        "父需求编号",
+        "需求编号",
+    ),
+    "scope": (
+        "实施范围",
+        "实现范围",
+        "范围",
+    ),
+    "non_scope": (
+        "非范围",
+        "不在范围",
+        "不包含",
+    ),
+    "constraints": (
+        "关键约束",
+        "约束",
+        "限制",
+    ),
+    "todo_steps": (
+        "todo步骤",
+        "todo",
+        "实施步骤",
+        "执行步骤",
+        "步骤",
+    ),
+    "deliverables": (
+        "交付物",
+        "可交付物",
+    ),
+    "acceptance": (
+        "验收标准",
+        "完成标准",
+        "acceptancecriteria",
+    ),
+}
+TASK_PROMPT_LIST_MAX_ITEMS = 8
+TASK_PROMPT_ITEM_MAX_CHARS = 180
+TASK_PROMPT_TEXT_MAX_CHARS = 360
 
 
 def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
@@ -163,6 +213,156 @@ class BaseAgent:
         self._active_lease_lost: bool = False
         self._active_phase: str = ""
         self._active_cli_pid: int | None = None
+
+    def _clip_prompt_text(self, text: str, limit: int = TASK_PROMPT_TEXT_MAX_CHARS) -> str:
+        compact = re.sub(r"\s+", " ", str(text or "").strip())
+        if len(compact) <= limit:
+            return compact
+        return compact[: max(0, limit - 12)].rstrip() + " ..."
+
+    def _normalize_task_section_name(self, raw: str) -> str:
+        cleaned = re.sub(r"[\s:：()（）/_-]+", "", str(raw or "")).strip().lower()
+        for key, aliases in TASK_SECTION_ALIAS_MAP.items():
+            for alias in aliases:
+                alias_clean = re.sub(r"[\s:：()（）/_-]+", "", alias).strip().lower()
+                if cleaned == alias_clean:
+                    return key
+        return cleaned
+
+    def _parse_task_description_sections(self, description: str) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        current_key = ""
+        buf: list[str] = []
+        for raw_line in str(description or "").splitlines():
+            line = raw_line.rstrip()
+            match = TASK_SECTION_HEADING_RE.match(line)
+            if match:
+                if current_key:
+                    body = "\n".join(buf).strip()
+                    if body:
+                        prev = sections.get(current_key)
+                        sections[current_key] = f"{prev}\n{body}".strip() if prev else body
+                current_key = self._normalize_task_section_name(match.group(1))
+                buf = []
+                continue
+            if current_key:
+                buf.append(line)
+        if current_key:
+            body = "\n".join(buf).strip()
+            if body:
+                prev = sections.get(current_key)
+                sections[current_key] = f"{prev}\n{body}".strip() if prev else body
+        return sections
+
+    def _section_items(
+        self,
+        body: str,
+        *,
+        max_items: int = TASK_PROMPT_LIST_MAX_ITEMS,
+        item_limit: int = TASK_PROMPT_ITEM_MAX_CHARS,
+    ) -> list[str]:
+        items: list[str] = []
+        current = ""
+        for raw_line in str(body or "").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("```"):
+                continue
+            is_item = bool(TASK_LIST_PREFIX_RE.match(stripped))
+            content = TASK_LIST_PREFIX_RE.sub("", stripped).strip() if is_item else stripped
+            if not content:
+                continue
+            if is_item:
+                if current:
+                    items.append(self._clip_prompt_text(current, limit=item_limit))
+                    if len(items) >= max_items:
+                        return items
+                current = content
+                continue
+            if current:
+                current = f"{current} {content}".strip()
+            else:
+                current = content
+        if current and len(items) < max_items:
+            items.append(self._clip_prompt_text(current, limit=item_limit))
+        return items
+
+    def _extract_task_contract(self, task: dict | None) -> dict[str, object]:
+        description = str((task or {}).get("description") or "").strip()
+        if not description:
+            return {}
+        sections = self._parse_task_description_sections(description)
+        if not sections:
+            return {}
+        goal_items = self._section_items(sections.get("goal", ""), max_items=3, item_limit=TASK_PROMPT_TEXT_MAX_CHARS)
+        return {
+            "goal": self._clip_prompt_text(" ".join(goal_items), limit=TASK_PROMPT_TEXT_MAX_CHARS) if goal_items else "",
+            "parent_refs": self._section_items(sections.get("parent_refs", ""), max_items=6),
+            "scope": self._section_items(sections.get("scope", ""), max_items=6),
+            "non_scope": self._section_items(sections.get("non_scope", ""), max_items=6),
+            "constraints": self._section_items(sections.get("constraints", ""), max_items=6),
+            "todo_steps": self._section_items(sections.get("todo_steps", ""), max_items=8),
+            "deliverables": self._section_items(sections.get("deliverables", ""), max_items=8),
+            "acceptance": self._section_items(sections.get("acceptance", ""), max_items=8),
+        }
+
+    def _append_prompt_list_section(
+        self,
+        lines: list[str],
+        title: str,
+        items: list[str] | None,
+        *,
+        checkbox: bool = False,
+    ) -> None:
+        cleaned = [str(item or "").strip() for item in (items or []) if str(item or "").strip()]
+        if not cleaned:
+            return
+        lines.append(title)
+        prefix = "- [ ] " if checkbox else "- "
+        lines.extend(f"{prefix}{item}" for item in cleaned)
+
+    def build_execution_contract_block(self, task: dict | None) -> str:
+        contract = self._extract_task_contract(task)
+        if not contract or not any(contract.values()):
+            return ""
+        lines = [
+            "## 执行基线（必须遵守）",
+            "- 下面的交付物和验收标准也是执行 agent 的完成定义，不是只给 reviewer 的参考清单。",
+            "- 提交前必须按这些条目自检；不要擅自扩展非范围内容。",
+        ]
+        goal = str(contract.get("goal") or "").strip()
+        if goal:
+            lines.append(f"- 任务目标: {goal}")
+        self._append_prompt_list_section(lines, "### 关联父需求编号", contract.get("parent_refs"))
+        self._append_prompt_list_section(lines, "### 实施范围", contract.get("scope"))
+        self._append_prompt_list_section(lines, "### 非范围", contract.get("non_scope"))
+        self._append_prompt_list_section(lines, "### TODO 步骤", contract.get("todo_steps"), checkbox=True)
+        self._append_prompt_list_section(lines, "### 必须产出的交付物", contract.get("deliverables"))
+        self._append_prompt_list_section(lines, "### 提交前必须满足的验收标准", contract.get("acceptance"), checkbox=True)
+        self._append_prompt_list_section(lines, "### 关键约束", contract.get("constraints"))
+        return "\n".join(lines)
+
+    def build_review_contract_block(self, task: dict | None) -> str:
+        contract = self._extract_task_contract(task)
+        if not contract or not any(contract.values()):
+            return ""
+        lines = [
+            "## 独立验收基线（必须据此审查）",
+            "- 以下条目既是开发完成定义，也是 reviewer 的独立核查清单；不要只接受开发自述。",
+            "- 只要任一验收项缺少证据、交付物缺失、或实现违反约束，就不能 approve。",
+        ]
+        goal = str(contract.get("goal") or "").strip()
+        if goal:
+            lines.append(f"- 任务目标: {goal}")
+        self._append_prompt_list_section(lines, "### 应覆盖的范围", contract.get("scope"))
+        self._append_prompt_list_section(lines, "### 不应被扩写的非范围", contract.get("non_scope"))
+        self._append_prompt_list_section(lines, "### 应存在的交付物", contract.get("deliverables"))
+        self._append_prompt_list_section(lines, "### 必须逐项核验的验收标准", contract.get("acceptance"), checkbox=True)
+        self._append_prompt_list_section(lines, "### 不得违反的约束", contract.get("constraints"))
+        lines.append("### 审查判定规则")
+        lines.append("- 仅当所有验收项都有代码、测试、文档或行为证据支撑时，才能 approve。")
+        lines.append("- TODO 步骤只是实现路径参考，不能替代验收标准本身。")
+        lines.append("- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向。")
+        return "\n".join(lines)
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 

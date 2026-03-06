@@ -64,7 +64,7 @@ class TaskActionsApiTest(unittest.TestCase):
             status=status,
         )
 
-    def _create_custom_agent(self, key: str = "asmo-dev") -> None:
+    def _create_custom_agent(self, key: str = "asmo-dev", runtime_profile: str = "generic") -> None:
         res = self.client.post(
             "/agent-types",
             json={
@@ -75,6 +75,7 @@ class TaskActionsApiTest(unittest.TestCase):
                 "poll_statuses": ["todo", "needs_changes"],
                 "next_status": "in_review",
                 "working_status": "coding",
+                "runtime_profile": runtime_profile,
                 "cli": "claude",
             },
             headers=self._headers,
@@ -1310,6 +1311,29 @@ class TaskActionsApiTest(unittest.TestCase):
             headers=self._agent_headers,
         )
         self.assertEqual(status.status_code, 404)
+
+    def test_agent_type_api_exposes_runtime_class_metadata(self):
+        self._create_custom_agent("asmo-dev", runtime_profile="developer")
+
+        listed = self.client.get("/agent-types", headers=self._headers)
+        self.assertEqual(listed.status_code, 200)
+        items = {row["key"]: row for row in listed.json()}
+
+        self.assertEqual(items["developer"]["runtime_class"], "GenericAgent")
+        self.assertEqual(items["developer"]["runtime_family"], "generic")
+        self.assertEqual(items["developer"]["runtime_profile"], "developer")
+        self.assertEqual(items["product_manager"]["runtime_class"], "GenericAgent")
+        self.assertEqual(items["product_manager"]["runtime_family"], "generic")
+        self.assertEqual(items["asmo-dev"]["runtime_class"], "GenericAgent")
+        self.assertEqual(items["asmo-dev"]["runtime_family"], "generic")
+        self.assertEqual(items["asmo-dev"]["runtime_profile"], "developer")
+        self.assertIn("developer 策略", items["asmo-dev"]["runtime_summary"])
+
+        detail = self.client.get("/agent-types/developer", headers=self._headers)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["runtime_class"], "GenericAgent")
+        self.assertEqual(detail.json()["runtime_profile"], "developer")
+        self.assertIn("developer 策略", detail.json()["runtime_summary"])
 
     def test_alert_accepts_agent_token(self):
         res = self.client.post(
