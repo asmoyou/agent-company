@@ -1558,11 +1558,6 @@
       <div id="panel-handoffs" class="space-y-2 text-xs"></div>
     </div>
 
-    <!-- Logs -->
-    <div>
-      <div class="text-xs text-slate-400 mb-2">操作日志</div>
-      <div id="panel-logs" class="space-y-2 text-xs"></div>
-    </div>
   </div>
 </div>
 <div id="panel-overlay" onclick="closePanel()" class="hidden fixed inset-0 bg-black/40 z-10"></div>
@@ -3460,53 +3455,6 @@ function formatLocalDateTime(ts) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
-function parseHeartbeatElapsed(message) {
-  const msg = String(message || "").trim();
-  let m = msg.match(/^⏳\s*仍在工作中\.\.\.\s*已运行\s*(\d+)s$/);
-  if (m) return Number(m[1]);
-  m = msg.match(/^⏳\s*still working\.\.\.\s*(?:elapsed|running)\s*(\d+)s$/i);
-  if (m) return Number(m[1]);
-  return null;
-}
-
-function collapseHeartbeatLogs(logs) {
-  const out = [];
-  let group = null;
-  const flush = () => {
-    if (!group) return;
-    if (group.items.length === 1) {
-      out.push(group.items[0]);
-    } else {
-      const latest = group.elapseds[group.elapseds.length - 1];
-      const first = group.elapseds[0];
-      const omitted = group.items.length - 1;
-      out.push({
-        ...group.items[group.items.length - 1],
-        message: `⏳ 仍在工作中（省略 ${omitted} 条心跳，${first}s → ${latest}s）`,
-      });
-    }
-    group = null;
-  };
-  for (const log of logs || []) {
-    const elapsed = parseHeartbeatElapsed(log?.message);
-    if (elapsed === null) {
-      flush();
-      out.push(log);
-      continue;
-    }
-    const sameAgent = group && String(group.agent || "") === String(log?.agent || "");
-    if (!group || !sameAgent) {
-      flush();
-      group = { agent: log?.agent, items: [log], elapseds: [elapsed] };
-      continue;
-    }
-    group.items.push(log);
-    group.elapseds.push(elapsed);
-  }
-  flush();
-  return out;
-}
-
 function showToast(title, message, kind = "error") {
   const wrap = document.getElementById("toast-wrap");
   if (!wrap) return;
@@ -4584,10 +4532,37 @@ function openPanelArtifactDirectory() {
   openFileBrowser(path);
 }
 
+function hasTaskDetail(task) {
+  if (!task || typeof task !== "object") return false;
+  return (
+    Object.prototype.hasOwnProperty.call(task, "description") &&
+    Object.prototype.hasOwnProperty.call(task, "review_feedback_history")
+  );
+}
+
+async function fetchTaskDetail(taskId) {
+  try {
+    const res = await apiFetch(`${API}/tasks/${taskId}`);
+    if (!res.ok) throw new Error(await res.text());
+    const row = await res.json();
+    if (row && row.id) {
+      tasks[row.id] = {...(tasks[row.id] || {}), ...row};
+      return tasks[row.id];
+    }
+  } catch {
+    // Keep panel usable even if detail request fails.
+  }
+  return tasks[String(taskId || "")] || null;
+}
+
 async function openPanel(id) {
   currentTaskId = id;
-  const task = tasks[id];
+  let task = tasks[id];
   if (!task) return;
+  if (!hasTaskDetail(task)) {
+    const detailed = await fetchTaskDetail(id);
+    if (detailed) task = detailed;
+  }
 
   document.getElementById("panel-title").textContent = task.title;
   setRichContent("panel-desc", task.description, "(无描述)");
@@ -4668,14 +4643,13 @@ async function openPanel(id) {
     document.getElementById("panel-commit").textContent = task.commit_hash;
   } else { cmWrap.classList.add("hidden"); }
 
-  await loadTaskFiles(id, task.status);
-  await loadTaskDependencies(id);
-  await loadTaskHandoffs(id);
-
-  await loadTaskLogs(id);
-
   document.getElementById("panel").classList.remove("hidden-panel");
   document.getElementById("panel-overlay").classList.remove("hidden");
+
+  // Heavy panels are loaded lazily in parallel to keep opening snappy.
+  loadTaskFiles(id, task.status);
+  loadTaskDependencies(id);
+  loadTaskHandoffs(id);
 }
 
 function parseFeedbackHistory(raw) {
@@ -4868,31 +4842,6 @@ async function loadTaskDependencies(taskId) {
   }
 }
 
-async function loadTaskLogs(taskId, scrollToBottom = false) {
-  const el = document.getElementById("panel-logs");
-  if (!el) return;
-  try {
-    const res = await apiFetch(`${API}/tasks/${taskId}/logs`);
-    if (!res.ok) throw new Error(await res.text());
-    renderLogs(await res.json());
-    if (scrollToBottom) el.scrollTop = el.scrollHeight;
-  } catch {
-    el.innerHTML = "<div class='text-slate-500'>无法加载</div>";
-  }
-}
-
-function renderLogs(logs) {
-  const el=document.getElementById("panel-logs");
-  const merged = collapseHeartbeatLogs(logs || []);
-  if (!merged.length){el.innerHTML="<div class='text-slate-500'>暂无日志</div>";return;}
-  el.innerHTML=merged.map(log=>`
-    <div class="log-entry">
-      <div class="text-indigo-400 font-medium">${escHtml(log.agent)}</div>
-      <div class="text-slate-300 mt-0.5 msg-rich">${renderRichMsg(log.message)}</div>
-      <div class="text-slate-600 mt-0.5">${formatLocalDateTime(log.created_at)}</div>
-    </div>`).join("");
-}
-
 async function loadTaskHandoffs(taskId) {
   const el = document.getElementById("panel-handoffs");
   if (!el) return;
@@ -4914,6 +4863,33 @@ function fmtPayload(payload) {
   }
 }
 
+function normalizeTextForCompare(value) {
+  return normalizeMsgText(value).replace(/\s+/g, " ").trim();
+}
+
+function dedupeHandoffRows(rows) {
+  const out = [];
+  const seen = new Set();
+  for (const row of (rows || [])) {
+    if (!row || typeof row !== "object") continue;
+    const key = [
+      row.stage || "",
+      row.from_agent || "",
+      row.to_agent || "",
+      row.status_from || "",
+      row.status_to || "",
+      row.commit_hash || row?.payload?.commit_hash || "",
+      normalizeTextForCompare(row.conclusion || row?.payload?.conclusion || ""),
+      normalizeTextForCompare(row.summary || ""),
+      String(row.created_at || "").slice(0, 19),
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
 function renderHandoffs(handoffs) {
   const el = document.getElementById("panel-handoffs");
   if (!el) return;
@@ -4921,17 +4897,26 @@ function renderHandoffs(handoffs) {
     el.innerHTML = "<div class='text-slate-500'>暂无交接记录</div>";
     return;
   }
-  el.innerHTML = handoffs.map(h => {
+  const deduped = dedupeHandoffRows(handoffs);
+  const duplicateCount = Math.max(0, (handoffs?.length || 0) - deduped.length);
+  const duplicateHint = duplicateCount
+    ? `<div class="text-[11px] text-slate-500 mb-1">已折叠重复交接 ${duplicateCount} 条</div>`
+    : "";
+  el.innerHTML = duplicateHint + deduped.map(h => {
     const from = escHtml(h.from_agent || "-");
     const to = escHtml(h.to_agent || "-");
     const title = escHtml(h.title || h.stage || "交接");
-    const summary = renderRichMsg(h.summary || "");
+    const summaryRaw = normalizeMsgText(h.summary || "");
+    const summaryNorm = normalizeTextForCompare(summaryRaw);
     const stage = escHtml(h.stage || "");
     const sFrom = escHtml(h.status_from || "-");
     const sTo = escHtml(h.status_to || "-");
     const commitHash = escHtml(h.commit_hash || h.payload?.commit_hash || "");
     const sourceBranch = escHtml(h.payload?.source_branch || "");
-    const conclusion = renderRichMsg(h.conclusion || h.payload?.conclusion || "");
+    const conclusionRaw = normalizeMsgText(h.conclusion || h.payload?.conclusion || "");
+    const conclusionNorm = normalizeTextForCompare(conclusionRaw);
+    const conclusion = renderRichMsg(conclusionRaw);
+    const summary = summaryNorm && summaryNorm !== conclusionNorm ? renderRichMsg(summaryRaw) : "";
     const relatedHistory = Array.isArray(h.payload?.related_history_commits)
       ? h.payload.related_history_commits
       : [];
@@ -5613,18 +5598,7 @@ function connectWS() {
         renderSubtaskList(msg.task.parent_task_id);
       }
     } else if (msg.event==="log_added") {
-      if (currentTaskId===msg.log.task_id) {
-        if (parseHeartbeatElapsed(msg.log.message) !== null) {
-          loadTaskLogs(currentTaskId, true);
-        } else {
-          const el=document.getElementById("panel-logs");
-          const d=document.createElement("div");d.className="log-entry";
-          d.innerHTML=`<div class="text-indigo-400 font-medium">${escHtml(msg.log.agent)}</div>
-            <div class="text-slate-300 mt-0.5 msg-rich">${renderRichMsg(msg.log.message)}</div>
-            <div class="text-slate-600 mt-0.5">${formatLocalDateTime(msg.log.created_at)}</div>`;
-          el.appendChild(d); el.scrollTop=el.scrollHeight;
-        }
-      }
+      // 操作日志面板已移除，保留事件以兼容历史消息类型。
     } else if (msg.event==="agent_output") {
       if (ensureAgentTerminal(msg.agent, msg.output || msg)) {
         appendTermLine(msg.agent, msg.output || msg.line);

@@ -2370,20 +2370,34 @@ def get_task(task_id: str, user_id: str | None = None, is_admin: bool = True) ->
     return task
 
 
-def list_tasks(project_id: str | None = None, user_id: str | None = None, is_admin: bool = True) -> list[dict]:
+def list_tasks(
+    project_id: str | None = None,
+    user_id: str | None = None,
+    is_admin: bool = True,
+    compact: bool = False,
+) -> list[dict]:
     conn = get_conn()
+    select_cols = "t.*"
+    if compact:
+        # Lightweight shape for board/init payloads; keep only card-level fields.
+        select_cols = (
+            "t.id, t.title, t.status, t.assignee, t.commit_hash, t.project_id, "
+            "t.parent_task_id, t.subtask_order, t.assigned_agent, t.dev_agent, "
+            "t.review_enabled, SUBSTR(COALESCE(t.review_feedback, ''), 1, 240) AS review_feedback, "
+            "t.created_at, t.updated_at, t.archived, t.priority"
+        )
     if user_id and not is_admin:
         if project_id:
             rows = conn.execute(
                 _join_project(
                     """
-                    SELECT t.*
+                    SELECT {select_cols}
                       FROM tasks t
                       JOIN projects p ON p.id = t.project_id
                      WHERE t.project_id=?
                        AND p.created_by_user_id=?
                      ORDER BY t.created_at DESC
-                    """
+                    """.format(select_cols=select_cols)
                 ),
                 (project_id, user_id),
             ).fetchall()
@@ -2391,24 +2405,26 @@ def list_tasks(project_id: str | None = None, user_id: str | None = None, is_adm
             rows = conn.execute(
                 _join_project(
                     """
-                    SELECT t.*
+                    SELECT {select_cols}
                       FROM tasks t
                       JOIN projects p ON p.id = t.project_id
                      WHERE p.created_by_user_id=?
                      ORDER BY t.created_at DESC
-                    """
+                    """.format(select_cols=select_cols)
                 ),
                 (user_id,),
             ).fetchall()
     else:
         if project_id:
             rows = conn.execute(
-                _join_project("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC"),
+                _join_project(
+                    f"SELECT {select_cols} FROM tasks t WHERE t.project_id=? ORDER BY t.created_at DESC"
+                ),
                 (project_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                _join_project("SELECT * FROM tasks ORDER BY created_at DESC")
+                _join_project(f"SELECT {select_cols} FROM tasks t ORDER BY t.created_at DESC")
             ).fetchall()
     out = [dict(r) for r in rows]
     _attach_dependency_state_to_tasks_in_conn(conn, out)
