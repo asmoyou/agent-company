@@ -1,12 +1,16 @@
 import asyncio
+import errno
+import fcntl
 import contextlib
 import hashlib
 import json
 import os
+import pty
 import re
 import signal
 import shutil
 import tempfile
+import termios
 import time
 from pathlib import Path
 
@@ -28,6 +32,9 @@ TASK_LEASE_RENEW_FAIL_HARD_AFTER_ERRORS = int(
 TASK_STATUS_POLL_FAILURE_MAX = int(os.getenv("TASK_STATUS_POLL_FAILURE_MAX", "30"))
 OUTPUT_POST_MAX_INFLIGHT = int(os.getenv("OUTPUT_POST_MAX_INFLIGHT", "12"))
 AGENT_API_TOKEN = str(os.getenv("AGENT_API_TOKEN", "opc-agent-internal")).strip()
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
+)
 
 CLI_TEMPLATES = {
     "claude": ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
@@ -107,6 +114,15 @@ TASK_PROMPT_TEXT_MAX_CHARS = 360
 def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
     template = CLI_TEMPLATES.get(cli_name, [cli_name, "-p", "{prompt}"])
     return [arg.replace("{prompt}", prompt) for arg in template]
+
+
+def _prepare_tty_child(slave_fd: int) -> None:
+    os.setsid()
+    if hasattr(termios, "TIOCSCTTY"):
+        try:
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        except OSError:
+            pass
 
 
 def parse_status_list(raw, default: list[str]) -> list[str]:
@@ -1649,6 +1665,9 @@ class BaseAgent:
         with contextlib.suppress(ProcessLookupError, Exception):
             proc.kill()
 
+    def _cli_uses_pty(self) -> bool:
+        return self.cli_name == "claude"
+
     # ── Git ───────────────────────────────────────────────────────────────────
 
     async def git(self, *args: str, cwd: Path, task_id: str | None = None) -> str:
@@ -1728,16 +1747,47 @@ class BaseAgent:
         # Hint CLIs to avoid interactive flows.
         env.setdefault("CI", "1")
         env.setdefault("NONINTERACTIVE", "1")
+        use_pty = self._cli_uses_pty()
+        if use_pty:
+            env.setdefault("TERM", "xterm-256color")
 
+        master_fd: int | None = None
+        slave_fd: int | None = None
         self._active_phase = "cli_spawning"
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(cwd),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
+        try:
+            if use_pty:
+                master_fd, slave_fd = pty.openpty()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(cwd),
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env=env,
+                    preexec_fn=lambda: _prepare_tty_child(slave_fd),
+                    close_fds=True,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(cwd),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                    start_new_session=True,
+                )
+        except Exception:
+            for fd in (master_fd, slave_fd):
+                if fd is None:
+                    continue
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            raise
+        finally:
+            if slave_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(slave_fd)
         self._active_cli_pid = int(proc.pid) if proc.pid is not None else None
         self._active_phase = "cli_running"
         self._post_output_bg(
@@ -1754,42 +1804,109 @@ class BaseAgent:
         idle_reply_output_marker: float | None = None
         auto_reply_lock = asyncio.Lock()
 
+        async def emit_output_line(line: str, stream_kind: str):
+            nonlocal last_output_at
+            clean = ANSI_ESCAPE_RE.sub("", line).rstrip("\r\n")
+            if not clean:
+                return
+            last_output_at = time.monotonic()
+            lines.append(clean)
+            self._post_output_bg(clean, kind=stream_kind)
+            if INTERACTIVE_PROMPT_RE.search(clean):
+                await auto_reply(f"检测到交互提示: {clean}")
+
+        async def write_cli_input(text: str) -> bool:
+            if proc.returncode is not None:
+                return False
+            payload = text.encode("utf-8", errors="ignore")
+            if use_pty:
+                if master_fd is None:
+                    return False
+                try:
+                    await asyncio.to_thread(os.write, master_fd, payload)
+                    return True
+                except Exception:
+                    return False
+            if proc.stdin is None:
+                return False
+            try:
+                proc.stdin.write(payload)
+                await proc.stdin.drain()
+                return True
+            except Exception:
+                return False
+
         async def auto_reply(reason: str):
             nonlocal auto_reply_count, idle_reply_output_marker
             if AUTO_REPLY_MAX <= 0:
                 return
-            if proc.stdin is None or proc.returncode is not None:
-                return
             if auto_reply_count >= AUTO_REPLY_MAX:
                 return
             async with auto_reply_lock:
-                if proc.stdin is None or proc.returncode is not None:
-                    return
                 if auto_reply_count >= AUTO_REPLY_MAX:
                     return
-                try:
-                    proc.stdin.write(AUTO_REPLY_TEXT.encode("utf-8", errors="ignore"))
-                    await proc.stdin.drain()
-                    auto_reply_count += 1
-                    idle_reply_output_marker = last_output_at
-                    msg = f"↩ 自动应答({auto_reply_count}/{AUTO_REPLY_MAX}) ENTER [{reason[:80]}]"
-                    lines.append(msg)
-                    self._post_output_bg(msg, kind="meta")
-                    if task_id:
-                        await self.add_log(task_id, msg)
-                except Exception:
-                    pass
+                if not await write_cli_input(AUTO_REPLY_TEXT):
+                    return
+                auto_reply_count += 1
+                idle_reply_output_marker = last_output_at
+                msg = f"↩ 自动应答({auto_reply_count}/{AUTO_REPLY_MAX}) ENTER [{reason[:80]}]"
+                lines.append(msg)
+                self._post_output_bg(msg, kind="meta")
+                if task_id:
+                    await self.add_log(task_id, msg)
 
         async def drain(stream, stream_kind: str):
-            nonlocal last_output_at
             async for raw in stream:
                 line = raw.decode(errors="replace").rstrip("\n")
-                if line:
-                    last_output_at = time.monotonic()
-                    lines.append(line)
-                    self._post_output_bg(line, kind=stream_kind)
-                    if INTERACTIVE_PROMPT_RE.search(line):
-                        await auto_reply(f"检测到交互提示: {line}")
+                await emit_output_line(line, stream_kind)
+
+        async def drain_pty(fd: int, stream_kind: str):
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+            pending = ""
+
+            def on_readable():
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError as exc:
+                    item: bytes | BaseException | None
+                    item = None if exc.errno == errno.EIO else exc
+                    with contextlib.suppress(Exception):
+                        loop.remove_reader(fd)
+                    queue.put_nowait(item)
+                    return
+                if not chunk:
+                    with contextlib.suppress(Exception):
+                        loop.remove_reader(fd)
+                    queue.put_nowait(None)
+                    return
+                queue.put_nowait(chunk)
+
+            async def flush_pending(*, final: bool = False):
+                nonlocal pending
+                normalized = pending.replace("\r\n", "\n").replace("\r", "\n")
+                parts = normalized.split("\n")
+                pending = "" if final else parts.pop()
+                for part in parts:
+                    await emit_output_line(part, stream_kind)
+                if final and pending:
+                    await emit_output_line(pending, stream_kind)
+                    pending = ""
+
+            loop.add_reader(fd, on_readable)
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        await flush_pending(final=True)
+                        return
+                    if isinstance(item, BaseException):
+                        raise item
+                    pending += item.decode(errors="replace")
+                    await flush_pending()
+            finally:
+                with contextlib.suppress(Exception):
+                    loop.remove_reader(fd)
 
         async def heartbeat():
             while True:
@@ -1886,11 +2003,13 @@ class BaseAgent:
         iar = asyncio.create_task(idle_auto_reply())
         cwatch = asyncio.create_task(cancel_watcher())
         try:
+            drain_tasks = (
+                [drain_pty(master_fd, "stdout")]
+                if use_pty and master_fd is not None
+                else [drain(proc.stdout, "stdout"), drain(proc.stderr, "stderr")]
+            )
             await asyncio.wait_for(
-                asyncio.gather(
-                    drain(proc.stdout, "stdout"),
-                    drain(proc.stderr, "stderr"),
-                ),
+                asyncio.gather(*drain_tasks),
                 timeout=CLI_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -1931,6 +2050,9 @@ class BaseAgent:
                 p.unlink(missing_ok=True)
             except Exception:
                 pass
+        if master_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(master_fd)
 
         return proc.returncode, "\n".join(lines)
 
