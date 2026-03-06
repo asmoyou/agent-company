@@ -3284,13 +3284,7 @@ function renderCard(task) {
   return `
     <div class="card relative bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
          onclick="openPanel('${task.id}')">
-      <button type="button"
-        onclick="openTaskWorkspace(event, '${escAttr(task.id)}')"
-        class="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 border border-slate-600 text-slate-300 hover:text-indigo-300 hover:border-indigo-500 transition"
-        title="打开项目办公区">
-        办公区
-      </button>
-      <div class="text-[11px] font-medium text-white mb-1 leading-snug pr-14"
+      <div class="text-[11px] font-medium text-white mb-1 leading-snug"
            style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${escHtml(task.title)}</div>
       <div class="flex items-center gap-1 flex-wrap">
         ${priorityBadge}
