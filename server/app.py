@@ -2093,6 +2093,29 @@ def _resolve_blocked_retry(task: dict) -> tuple[str, str | None, str] | None:
             return ("decompose", resume_assignee, "重试分解")
         return ("triage", resume_assignee, "重试评估")
 
+    handoffs = db.get_handoffs(str(task.get("id") or "").strip())
+    for item in reversed(handoffs):
+        stage = str(item.get("stage") or "").strip()
+        if not stage.endswith("_delivery_blocked"):
+            continue
+        payload = item.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        resume_status = _norm_status(
+            payload.get("resume_status") or item.get("status_from") or "todo"
+        )
+        if not resume_status or resume_status == "blocked":
+            resume_status = "todo"
+        resume_assignee = str(
+            payload.get("resume_assigned_agent") or item.get("to_agent") or owner
+        ).strip() or None
+        return (resume_status, resume_assignee, "重试交付")
+
     return None
 
 
