@@ -1451,6 +1451,43 @@ def authenticate_user(username: str, password: str) -> dict:
         conn.close()
 
 
+def change_user_password(user_id: str, current_password: str, new_password: str) -> dict | None:
+    current = str(current_password or "")
+    new = str(new_password or "")
+    if not current:
+        raise ValueError("current_password 不能为空")
+    if not new:
+        raise ValueError("new_password 不能为空")
+    if current == new:
+        raise ValueError("新密码不能与当前密码相同")
+
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            return None
+        if not _verify_password(current, row["password_hash"]):
+            raise ValueError("当前密码错误")
+
+        conn.execute(
+            """
+            UPDATE users
+               SET password_hash=?,
+                   failed_login_attempts=0,
+                   lock_until=NULL,
+                   last_failed_login_at=NULL
+             WHERE id=?
+            """,
+            (_password_hash(new), user_id),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.commit()
+        refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return _public_user(refreshed) if refreshed else None
+    finally:
+        conn.close()
+
+
 def create_user(
     username: str,
     password: str,
