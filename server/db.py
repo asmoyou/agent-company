@@ -1710,10 +1710,24 @@ def _next_feedback_id(history: list[dict]) -> str:
     return f"FB{max_n + 1:04d}"
 
 
-def _resolve_open_feedback(history: list[dict], resolved_at: str, reason: str) -> bool:
+def _resolve_open_feedback(
+    history: list[dict],
+    resolved_at: str,
+    reason: str,
+    *,
+    source: str = "",
+    stage: str = "",
+    actor: str = "",
+) -> bool:
     changed = False
     for item in history:
         if bool(item.get("resolved")):
+            continue
+        if source and str(item.get("source") or "").strip() != source:
+            continue
+        if stage and str(item.get("stage") or "").strip() != stage:
+            continue
+        if actor and str(item.get("actor") or "").strip() != actor:
             continue
         item["resolved"] = True
         item["resolved_at"] = resolved_at
@@ -1735,7 +1749,18 @@ def _append_feedback_entry(
     if not text:
         return False
 
-    _resolve_open_feedback(history, created_at, "superseded")
+    # A new feedback item should only supersede unresolved items from the same
+    # review channel/stage. Cross-stage issues (for example manager merge
+    # feedback vs reviewer content feedback) must remain open until explicitly
+    # resolved by status advancement.
+    _resolve_open_feedback(
+        history,
+        created_at,
+        "superseded",
+        source=source[:40] or "system",
+        stage=stage[:80],
+        actor=actor[:80],
+    )
     history.append(
         {
             "id": _next_feedback_id(history),
