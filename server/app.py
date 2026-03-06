@@ -117,6 +117,14 @@ SUPPORT_CHAT_INCLUDE_REASONING = str(
     os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "1")
 ).strip().lower() in {"1", "true", "yes", "on"}
 SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "1200")).strip() or "1200")
+FEEDBACK_REVIEW_READ_TIMEOUT_SECS = float(
+    str(
+        os.getenv(
+            "FEEDBACK_REVIEW_READ_TIMEOUT_SECS",
+            str(max(SUPPORT_LLM_WRITE_TIMEOUT_SECS, 45.0)),
+        )
+    ).strip() or str(max(SUPPORT_LLM_WRITE_TIMEOUT_SECS, 45.0))
+)
 
 SUPPORT_TUTORIAL = """
 你正在服务的产品是 LinX协作平台简易演示网络版（多 Agent 协作任务看板）。
@@ -187,6 +195,24 @@ SUPPORT_SYSTEM_PROMPT = (
     "以下是平台教程知识，请优先据此解答：\n"
     f"{SUPPORT_TUTORIAL}"
 )
+FEEDBACK_REVIEW_SYSTEM_PROMPT = """
+你是小白客的需求反馈审核助手，负责对用户提交的软件需求做自动初筛。
+
+审核原则：
+1. 通过：和软件/平台改进相关，目标基本清楚，可执行，风险可控。
+2. 拒绝：与软件需求无关、恶意/违法/危险、辱骂灌水、完全无法理解、明显不合理。
+3. 如果只是细节略少，但仍能看懂真实诉求，应尽量通过，并在 reason 中提醒后续补充点，不要过度拒绝。
+4. 不要提及“人工参与”“人工审核”“客服处理”等字样。
+
+输出必须是严格 JSON，不要代码块，不要额外说明：
+{"decision":"approve"|"reject","reason":"给用户看的简短中文原因","normalized_title":"整理后的标题","normalized_description":"整理后的需求描述"}
+
+补充要求：
+- decision 只能是 approve 或 reject
+- reason 使用简体中文，1-3 句话
+- normalized_title / normalized_description 必须保留原始需求意图，但表达更清晰
+- 如果拒绝，也要给出简明的 rejected reason，方便用户修改后重新提交
+""".strip()
 FRONTEND_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate",
     "Pragma": "no-cache",
@@ -1535,6 +1561,14 @@ class SupportChatRequest(BaseModel):
     presence_penalty: float = Field(default=1.5, ge=-2.0, le=2.0)
     repetition_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1024, ge=64, le=4096)
+
+class FeedbackRequestCreate(BaseModel):
+    title: str = Field(..., min_length=2, max_length=120)
+    description: str = Field(..., min_length=5, max_length=4000)
+
+class FeedbackRequestUpdate(BaseModel):
+    status: Literal["todo", "in_progress", "completed", "rejected"] | None = None
+    admin_feedback: str | None = Field(default=None, max_length=2000)
 
 class MkdirRequest(BaseModel):
     path: str
@@ -3660,6 +3694,107 @@ def _sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+
+    candidates: list[str] = []
+    fenced = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw, flags=re.IGNORECASE)
+    candidates.extend(fenced)
+    if raw.startswith("{") and raw.endswith("}"):
+        candidates.append(raw)
+
+    start = raw.find("{")
+    if start >= 0:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(raw)):
+            ch = raw[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(raw[start:idx + 1])
+                    break
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        blob = str(candidate or "").strip()
+        if not blob or blob in seen:
+            continue
+        seen.add(blob)
+        try:
+            parsed = json.loads(blob)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _normalize_feedback_review_decision(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"approve", "approved", "pass", "passed"}:
+        return "approve"
+    if raw in {"reject", "rejected", "deny", "denied"}:
+        return "reject"
+    if any(token in raw for token in {"拒绝", "不通过", "驳回"}):
+        return "reject"
+    if any(token in raw for token in {"通过", "批准", "同意"}):
+        return "approve"
+    return None
+
+
+def _format_feedback_request(item: dict[str, Any], *, viewer_is_admin: bool) -> dict[str, Any]:
+    data = dict(item or {})
+    status = str(data.get("status") or "").strip().lower()
+    ai_decision = str(data.get("ai_decision") or "").strip().lower()
+    rejected_detail = str(data.get("admin_feedback") or "").strip()
+    if not rejected_detail:
+        rejected_detail = (
+            str(data.get("ai_reason") or "").strip()
+            if ai_decision == "reject"
+            else "该需求已暂时移出自动排期队列，请根据最新反馈调整后重新提交。"
+        )
+    customer_label_map = {
+        db.FEEDBACK_REQUEST_STATUS_TODO: "AI自动排期中",
+        db.FEEDBACK_REQUEST_STATUS_IN_PROGRESS: "AI开发中",
+        db.FEEDBACK_REQUEST_STATUS_COMPLETED: "已完成",
+        db.FEEDBACK_REQUEST_STATUS_REJECTED: "未通过",
+    }
+    admin_label_map = {
+        db.FEEDBACK_REQUEST_STATUS_TODO: "待开发",
+        db.FEEDBACK_REQUEST_STATUS_IN_PROGRESS: "开发中",
+        db.FEEDBACK_REQUEST_STATUS_COMPLETED: "已完成",
+        db.FEEDBACK_REQUEST_STATUS_REJECTED: "已拒绝",
+    }
+    status_detail_map = {
+        db.FEEDBACK_REQUEST_STATUS_TODO: "需求已通过小白客 AI 审核，并已进入全 AI 自动排期队列。",
+        db.FEEDBACK_REQUEST_STATUS_IN_PROGRESS: "需求已通过小白客 AI 审核，当前显示为 AI 自动执行开发中。",
+        db.FEEDBACK_REQUEST_STATUS_COMPLETED: "需求已完成处理，后续可关注版本更新或管理员反馈。",
+        db.FEEDBACK_REQUEST_STATUS_REJECTED: rejected_detail,
+    }
+    data["status_label"] = customer_label_map.get(status, "处理中")
+    data["status_detail"] = status_detail_map.get(status, "需求正在处理中。")
+    data["admin_status_label"] = admin_label_map.get(status, "处理中")
+    data["can_edit"] = bool(viewer_is_admin)
+    data["queue_visible_to_customer"] = status != db.FEEDBACK_REQUEST_STATUS_REJECTED
+    return data
+
+
 def _support_llm_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if SUPPORT_LLM_API_KEY:
@@ -3745,6 +3880,78 @@ def _support_extract_stream_piece(payload: dict[str, Any]) -> tuple[str, str, st
     text = "".join(text_parts)
     reasoning = "".join(reasoning_parts)
     return text, reasoning, finish_reason
+
+
+async def _review_feedback_request(
+    *,
+    title: str,
+    description: str,
+) -> dict[str, str]:
+    user_prompt = (
+        "需求范围：LinX 协作平台整个平台\n"
+        f"需求标题：{title}\n"
+        f"需求描述：{description}"
+    )
+    upstream_payload = {
+        "model": SUPPORT_LLM_MODEL,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": FEEDBACK_REVIEW_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "top_p": 0.2,
+        "max_tokens": 800,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    timeout = httpx.Timeout(
+        connect=SUPPORT_LLM_CONNECT_TIMEOUT_SECS,
+        write=SUPPORT_LLM_WRITE_TIMEOUT_SECS,
+        read=FEEDBACK_REVIEW_READ_TIMEOUT_SECS,
+        pool=SUPPORT_LLM_POOL_TIMEOUT_SECS,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{SUPPORT_LLM_BASE_URL}/chat/completions",
+            json=upstream_payload,
+            headers=_support_llm_headers(),
+        )
+    if resp.status_code >= 400:
+        detail = str(resp.text or "").strip()[:320] or f"HTTP {resp.status_code}"
+        raise RuntimeError(f"审核服务请求失败: {detail}")
+    try:
+        raw_payload = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"审核服务返回了无效 JSON: {exc}") from exc
+    text, reasoning, _finish_reason = _support_extract_stream_piece(
+        raw_payload if isinstance(raw_payload, dict) else {}
+    )
+    merged_text = str(text or "").strip() or str(reasoning or "").strip()
+    parsed = _extract_first_json_object(merged_text)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("审核结果格式异常，未返回可解析的 JSON")
+
+    decision = _normalize_feedback_review_decision(parsed.get("decision"))
+    if not decision:
+        decision = _normalize_feedback_review_decision(merged_text)
+    if not decision:
+        raise RuntimeError("审核结果缺少有效 decision")
+
+    reason = str(parsed.get("reason") or "").strip()
+    if not reason:
+        reason = (
+            "需求已通过自动审核，已进入后续排期。"
+            if decision == "approve"
+            else "需求未通过自动审核，请补充更明确的软件需求说明后重新提交。"
+        )
+    normalized_title = str(parsed.get("normalized_title") or "").strip() or title
+    normalized_description = str(parsed.get("normalized_description") or "").strip() or description
+    return {
+        "decision": decision,
+        "reason": reason[:600],
+        "normalized_title": normalized_title[:120],
+        "normalized_description": normalized_description[:4000],
+    }
 
 
 @app.get("/runtime/support-chat/health")
@@ -4013,6 +4220,85 @@ async def support_chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/feedback-requests")
+async def list_feedback_requests(
+    status: str | None = None,
+    user: dict = Depends(require_user),
+):
+    is_admin = _is_admin(user)
+    rows = db.list_feedback_requests(
+        user_id=user["id"],
+        is_admin=is_admin,
+        status=status,
+    )
+    return [_format_feedback_request(item, viewer_is_admin=is_admin) for item in rows]
+
+
+@app.post("/feedback-requests", status_code=201)
+async def create_feedback_request(
+    body: FeedbackRequestCreate,
+    user: dict = Depends(require_user),
+):
+    if _is_admin(user):
+        raise HTTPException(403, "管理员无需提交需求反馈，请直接在审核清单处理")
+    title = str(body.title or "").strip()
+    description = str(body.description or "").strip()
+    if len(title) < 2:
+        raise HTTPException(422, "标题至少 2 个字符")
+    if len(description) < 5:
+        raise HTTPException(422, "需求描述至少 5 个字符")
+
+    is_admin = _is_admin(user)
+    try:
+        review = await _review_feedback_request(
+            title=title,
+            description=description,
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"小白客审核暂时不可用，请稍后重试：{exc}") from exc
+
+    status_value = (
+        db.FEEDBACK_REQUEST_STATUS_REJECTED
+        if review["decision"] == "reject"
+        else db.FEEDBACK_REQUEST_STATUS_TODO
+    )
+    created = db.create_feedback_request(
+        submitter_user_id=user["id"],
+        title=title,
+        description=description,
+        normalized_title=review["normalized_title"],
+        normalized_description=review["normalized_description"],
+        status=status_value,
+        ai_decision=review["decision"],
+        ai_reason=review["reason"],
+        updated_by_user_id=user["id"],
+    )
+    return _format_feedback_request(created, viewer_is_admin=is_admin)
+
+
+@app.patch("/feedback-requests/{feedback_id}")
+async def update_feedback_request(
+    feedback_id: str,
+    body: FeedbackRequestUpdate,
+    admin: dict = Depends(require_admin),
+):
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(422, "至少提供一个可更新字段")
+    try:
+        updated = db.update_feedback_request(
+            feedback_id,
+            status=fields.get("status", db.UNSET),
+            admin_feedback=fields.get("admin_feedback", db.UNSET),
+            updated_by_user_id=admin["id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not updated:
+        raise HTTPException(404, "Feedback request not found")
+    return _format_feedback_request(updated, viewer_is_admin=True)
 
 
 # ── Agent Types ────────────────────────────────────────────────────────────────

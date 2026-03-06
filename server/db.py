@@ -53,6 +53,16 @@ ALLOWED_DEPENDENCY_STATES = {
 }
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
+FEEDBACK_REQUEST_STATUS_TODO = "todo"
+FEEDBACK_REQUEST_STATUS_IN_PROGRESS = "in_progress"
+FEEDBACK_REQUEST_STATUS_COMPLETED = "completed"
+FEEDBACK_REQUEST_STATUS_REJECTED = "rejected"
+ALLOWED_FEEDBACK_REQUEST_STATUSES = {
+    FEEDBACK_REQUEST_STATUS_TODO,
+    FEEDBACK_REQUEST_STATUS_IN_PROGRESS,
+    FEEDBACK_REQUEST_STATUS_COMPLETED,
+    FEEDBACK_REQUEST_STATUS_REJECTED,
+}
 UNSET = object()
 SESSION_TTL_DAYS = 30
 LOGIN_MAX_ATTEMPTS = max(1, int(str(os.getenv("LOGIN_MAX_ATTEMPTS", "5")).strip() or "5"))
@@ -429,6 +439,26 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS feedback_requests (
+            id                     TEXT PRIMARY KEY,
+            project_id             TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            submitter_user_id      TEXT NOT NULL,
+            title                  TEXT NOT NULL,
+            description            TEXT NOT NULL DEFAULT '',
+            normalized_title       TEXT NOT NULL DEFAULT '',
+            normalized_description TEXT NOT NULL DEFAULT '',
+            status                 TEXT NOT NULL DEFAULT 'todo',
+            ai_decision            TEXT NOT NULL DEFAULT '',
+            ai_reason              TEXT NOT NULL DEFAULT '',
+            admin_feedback         TEXT NOT NULL DEFAULT '',
+            updated_by_user_id     TEXT,
+            created_at             TEXT NOT NULL,
+            updated_at             TEXT NOT NULL,
+            reviewed_at            TEXT,
+            FOREIGN KEY (submitter_user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             id              TEXT PRIMARY KEY,
             project_id      TEXT REFERENCES projects(id),
@@ -580,6 +610,22 @@ def init_db():
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
         ("expires_at", "TEXT NOT NULL DEFAULT ''"),
     ])
+    _ensure_columns(conn, "feedback_requests", [
+        ("project_id", "TEXT"),
+        ("submitter_user_id", "TEXT NOT NULL DEFAULT ''"),
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("normalized_title", "TEXT NOT NULL DEFAULT ''"),
+        ("normalized_description", "TEXT NOT NULL DEFAULT ''"),
+        ("status", "TEXT NOT NULL DEFAULT 'todo'"),
+        ("ai_decision", "TEXT NOT NULL DEFAULT ''"),
+        ("ai_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("admin_feedback", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_by_user_id", "TEXT"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("reviewed_at", "TEXT"),
+    ])
     _ensure_columns(conn, "tasks", [
         ("project_id", "TEXT"),
         ("title", "TEXT NOT NULL DEFAULT ''"),
@@ -687,6 +733,18 @@ def init_db():
     ])
 
     # Build indexes after column backfill to keep old DBs migration-safe.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_requests_submitter_created "
+        "ON feedback_requests(submitter_user_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_requests_status_updated "
+        "ON feedback_requests(status, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_requests_project "
+        "ON feedback_requests(project_id)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent_id ON agent_outputs(agent, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at)")
@@ -2187,6 +2245,247 @@ def project_has_claimed_tasks(project_id: str) -> bool:
     ).fetchone()
     conn.close()
     return bool(row)
+
+
+def _normalize_feedback_request_status(
+    status: str | None,
+    *,
+    default: str = FEEDBACK_REQUEST_STATUS_TODO,
+) -> str:
+    raw = str(status or "").strip().lower()
+    if raw in ALLOWED_FEEDBACK_REQUEST_STATUSES:
+        return raw
+    return default
+
+
+def _join_feedback_requests(base_sql: str) -> str:
+    return f"""
+        SELECT
+            fr.*,
+            p.name AS project_name,
+            p.path AS project_path,
+            submitter.username AS submitter_username,
+            updater.username AS updated_by_username
+        FROM ({base_sql}) fr
+        LEFT JOIN projects p ON p.id = fr.project_id
+        LEFT JOIN users submitter ON submitter.id = fr.submitter_user_id
+        LEFT JOIN users updater ON updater.id = fr.updated_by_user_id
+    """
+
+
+def _public_feedback_request(row) -> dict:
+    data = dict(row)
+    return {
+        "id": data["id"],
+        "project_id": data.get("project_id"),
+        "project_name": data.get("project_name"),
+        "project_path": data.get("project_path"),
+        "submitter_user_id": data.get("submitter_user_id"),
+        "submitter_username": data.get("submitter_username"),
+        "title": data.get("title") or "",
+        "description": data.get("description") or "",
+        "normalized_title": data.get("normalized_title") or "",
+        "normalized_description": data.get("normalized_description") or "",
+        "status": _normalize_feedback_request_status(data.get("status")),
+        "ai_decision": str(data.get("ai_decision") or "").strip().lower(),
+        "ai_reason": data.get("ai_reason") or "",
+        "admin_feedback": data.get("admin_feedback") or "",
+        "updated_by_user_id": data.get("updated_by_user_id"),
+        "updated_by_username": data.get("updated_by_username"),
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+        "reviewed_at": data.get("reviewed_at"),
+    }
+
+
+def create_feedback_request(
+    *,
+    submitter_user_id: str,
+    title: str,
+    description: str,
+    normalized_title: str = "",
+    normalized_description: str = "",
+    project_id: str | None = None,
+    status: str = FEEDBACK_REQUEST_STATUS_TODO,
+    ai_decision: str = "",
+    ai_reason: str = "",
+    updated_by_user_id: str | None = None,
+) -> dict:
+    conn = get_conn()
+    rid = str(uuid.uuid4())
+    now = _now()
+    normalized_status = _normalize_feedback_request_status(status)
+    normalized_ai_decision = str(ai_decision or "").strip().lower()
+    if not normalized_ai_decision:
+        normalized_ai_decision = (
+            "reject" if normalized_status == FEEDBACK_REQUEST_STATUS_REJECTED else "approve"
+        )
+    updater = str(updated_by_user_id or submitter_user_id or "").strip() or None
+    try:
+        conn.execute(
+            """
+            INSERT INTO feedback_requests (
+                id,
+                project_id,
+                submitter_user_id,
+                title,
+                description,
+                normalized_title,
+                normalized_description,
+                status,
+                ai_decision,
+                ai_reason,
+                admin_feedback,
+                updated_by_user_id,
+                created_at,
+                updated_at,
+                reviewed_at
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                rid,
+                project_id,
+                submitter_user_id,
+                title,
+                description,
+                normalized_title,
+                normalized_description,
+                normalized_status,
+                normalized_ai_decision,
+                ai_reason,
+                "",
+                updater,
+                now,
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(
+            _join_feedback_requests("SELECT * FROM feedback_requests WHERE id=?"),
+            (rid,),
+        ).fetchone()
+        conn.commit()
+        return _public_feedback_request(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_feedback_request(
+    feedback_id: str,
+    user_id: str | None = None,
+    is_admin: bool = True,
+) -> dict | None:
+    conn = get_conn()
+    try:
+        if user_id and not is_admin:
+            row = conn.execute(
+                _join_feedback_requests(
+                    """
+                    SELECT fr.*
+                      FROM feedback_requests fr
+                     WHERE fr.id=?
+                       AND fr.submitter_user_id=?
+                    """
+                ),
+                (feedback_id, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                _join_feedback_requests("SELECT * FROM feedback_requests WHERE id=?"),
+                (feedback_id,),
+            ).fetchone()
+        return _public_feedback_request(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_feedback_requests(
+    project_id: str | None = None,
+    user_id: str | None = None,
+    is_admin: bool = True,
+    status: str | None = None,
+) -> list[dict]:
+    conn = get_conn()
+    try:
+        where: list[str] = []
+        params: list[str] = []
+        if project_id:
+            where.append("fr.project_id=?")
+            params.append(project_id)
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status:
+            if normalized_status not in ALLOWED_FEEDBACK_REQUEST_STATUSES:
+                return []
+            where.append("fr.status=?")
+            params.append(normalized_status)
+        if user_id and not is_admin:
+            where.append("fr.submitter_user_id=?")
+            params.append(user_id)
+        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = conn.execute(
+            _join_feedback_requests(
+                f"""
+                SELECT fr.*
+                  FROM feedback_requests fr
+                  {where_clause}
+                 ORDER BY fr.updated_at DESC, fr.created_at DESC, fr.id DESC
+                """
+            ),
+            tuple(params),
+        ).fetchall()
+        return [_public_feedback_request(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def update_feedback_request(
+    feedback_id: str,
+    *,
+    status=UNSET,
+    admin_feedback=UNSET,
+    updated_by_user_id: str | None = None,
+) -> dict | None:
+    conn = get_conn()
+    try:
+        current = conn.execute(
+            "SELECT id FROM feedback_requests WHERE id=?",
+            (feedback_id,),
+        ).fetchone()
+        if not current:
+            return None
+
+        fields: dict[str, object] = {}
+        if status is not UNSET:
+            normalized_status = str(status or "").strip().lower()
+            if normalized_status not in ALLOWED_FEEDBACK_REQUEST_STATUSES:
+                raise ValueError("feedback request status 不合法")
+            fields["status"] = normalized_status
+        if admin_feedback is not UNSET:
+            fields["admin_feedback"] = str(admin_feedback or "").strip()
+        if updated_by_user_id is not None:
+            fields["updated_by_user_id"] = str(updated_by_user_id or "").strip() or None
+        if not fields:
+            row = conn.execute(
+                _join_feedback_requests("SELECT * FROM feedback_requests WHERE id=?"),
+                (feedback_id,),
+            ).fetchone()
+            return _public_feedback_request(row) if row else None
+
+        fields["updated_at"] = _now()
+        set_clause = ", ".join(f"{key}=?" for key in fields)
+        conn.execute(
+            f"UPDATE feedback_requests SET {set_clause} WHERE id=?",
+            (*fields.values(), feedback_id),
+        )
+        row = conn.execute(
+            _join_feedback_requests("SELECT * FROM feedback_requests WHERE id=?"),
+            (feedback_id,),
+        ).fetchone()
+        conn.commit()
+        return _public_feedback_request(row) if row else None
+    finally:
+        conn.close()
 
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────

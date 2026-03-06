@@ -548,6 +548,35 @@
       pointer-events:none;
     }
     .support-chat *{pointer-events:auto;}
+    .support-chat-fabs{
+      display:flex;
+      flex-direction:column;
+      align-items:flex-end;
+      gap:10px;
+    }
+    .rqf-fab{
+      min-width:92px;
+      height:36px;
+      padding:0 12px;
+      border-radius:999px;
+      border:1px solid rgba(45,212,191,.46);
+      background:linear-gradient(145deg, rgba(15,118,110,.96), rgba(8,145,178,.92));
+      color:#ecfeff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:7px;
+      font-size:11px;
+      font-weight:600;
+      letter-spacing:.02em;
+      box-shadow:0 12px 28px rgba(15,118,110,.28), inset 0 1px 0 rgba(255,255,255,.18);
+      transition:transform .2s var(--ease-smooth), box-shadow .2s var(--ease-smooth), filter .2s var(--ease-smooth);
+    }
+    .rqf-fab:hover{transform:translateY(-2px);filter:brightness(1.05);}
+    .rqf-fab.open{
+      transform:scale(.96);
+      box-shadow:0 8px 18px rgba(15,118,110,.24), inset 0 1px 0 rgba(255,255,255,.12);
+    }
     .support-chat-fab{
       width:54px;
       height:54px;
@@ -579,6 +608,418 @@
       display:flex;
       flex-direction:column;
       backdrop-filter:blur(8px);
+    }
+    .rqf-panel{
+      width:min(460px, calc(100vw - 24px));
+      height:min(76vh, 700px);
+      min-height:500px;
+      background:
+        radial-gradient(520px 240px at 0% 0%, rgba(45,212,191,.1), transparent 72%),
+        radial-gradient(540px 260px at 100% 100%, rgba(56,189,248,.1), transparent 74%),
+        linear-gradient(180deg, rgba(15,23,42,.98), rgba(2,6,23,.96));
+      border:1px solid rgba(45,212,191,.28);
+      border-radius:16px;
+      box-shadow:0 28px 58px rgba(2,6,23,.64), inset 0 1px 0 rgba(255,255,255,.06);
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      backdrop-filter:blur(10px);
+    }
+    .rqf-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:14px 15px 12px;
+      border-bottom:1px solid rgba(51,65,85,.8);
+      background:linear-gradient(180deg, rgba(15,23,42,.92), rgba(15,23,42,.76));
+    }
+    .rqf-title{
+      font-size:15px;
+      line-height:1.2;
+      font-weight:700;
+      color:#f8fafc;
+    }
+    .rqf-subtitle{
+      margin-top:5px;
+      font-size:11px;
+      line-height:1.55;
+      color:#94a3b8;
+      max-width:310px;
+    }
+    .rqf-close{
+      border:0;
+      background:transparent;
+      color:#94a3b8;
+      font-size:22px;
+      line-height:1;
+      padding:0 3px;
+      cursor:pointer;
+    }
+    .rqf-close:hover{color:#e2e8f0;}
+    .rqf-tabs{
+      display:flex;
+      gap:8px;
+      padding:10px 14px 0;
+    }
+    .rqf-tab{
+      border:1px solid rgba(71,85,105,.82);
+      background:rgba(15,23,42,.52);
+      color:#94a3b8;
+      border-radius:999px;
+      padding:6px 12px;
+      font-size:12px;
+      line-height:1;
+      cursor:pointer;
+      transition:all .18s ease;
+    }
+    .rqf-tab:hover{color:#e2e8f0;border-color:rgba(45,212,191,.52);}
+    .rqf-tab.active{
+      background:linear-gradient(135deg, rgba(15,118,110,.9), rgba(8,145,178,.92));
+      border-color:rgba(45,212,191,.72);
+      color:#f0fdfa;
+      box-shadow:0 10px 18px rgba(13,148,136,.18);
+    }
+    .rqf-body{
+      flex:1 1 auto;
+      min-height:0;
+      display:flex;
+      flex-direction:column;
+      padding:12px 14px 14px;
+      gap:12px;
+    }
+    .rqf-pane{
+      flex:1 1 auto;
+      min-height:0;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .rqf-pane-list{
+      position:relative;
+    }
+    .rqf-note{
+      border:1px solid rgba(45,212,191,.18);
+      background:rgba(15,118,110,.12);
+      border-radius:12px;
+      padding:10px 11px;
+      font-size:12px;
+      line-height:1.6;
+      color:#ccfbf1;
+    }
+    .rqf-project-badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      align-self:flex-start;
+      max-width:100%;
+      border-radius:999px;
+      border:1px solid rgba(125,211,252,.28);
+      background:rgba(15,23,42,.58);
+      padding:4px 10px;
+      font-size:11px;
+      color:#bae6fd;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .rqf-field{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    .rqf-label{
+      font-size:11px;
+      letter-spacing:.04em;
+      color:#94a3b8;
+    }
+    .rqf-input,.rqf-textarea,.rqf-select{
+      width:100%;
+      border-radius:12px;
+      border:1px solid rgba(71,85,105,.82);
+      background:rgba(2,6,23,.64);
+      color:#f8fafc;
+      padding:10px 11px;
+      font-size:13px;
+      line-height:1.5;
+      outline:none;
+      transition:border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+    }
+    .rqf-input:focus,.rqf-textarea:focus,.rqf-select:focus{
+      border-color:rgba(45,212,191,.82);
+      box-shadow:0 0 0 2px rgba(45,212,191,.18);
+    }
+    .rqf-input:disabled,.rqf-textarea:disabled,.rqf-select:disabled{
+      opacity:.62;
+      cursor:not-allowed;
+    }
+    .rqf-textarea{
+      min-height:118px;
+      resize:vertical;
+    }
+    .rqf-submit-row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-top:auto;
+    }
+    .rqf-hint{
+      font-size:11px;
+      line-height:1.55;
+      color:#64748b;
+    }
+    .rqf-submit-btn{
+      border:1px solid rgba(45,212,191,.58);
+      background:linear-gradient(135deg, rgba(13,148,136,.96), rgba(8,145,178,.96));
+      color:#ecfeff;
+      border-radius:10px;
+      padding:10px 14px;
+      font-size:12px;
+      font-weight:600;
+      cursor:pointer;
+      white-space:nowrap;
+      box-shadow:0 10px 18px rgba(13,148,136,.18);
+    }
+    .rqf-submit-btn:hover:not(:disabled){filter:brightness(1.05);}
+    .rqf-submit-btn:disabled{
+      opacity:.46;
+      cursor:not-allowed;
+      box-shadow:none;
+    }
+    .rqf-list-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .rqf-list-head .rqf-select{min-width:118px;}
+    .rqf-list-scope{
+      font-size:11px;
+      color:#94a3b8;
+      line-height:1.5;
+    }
+    .rqf-list{
+      flex:1 1 auto;
+      min-height:0;
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      padding-right:2px;
+    }
+    .rqf-empty{
+      margin:auto;
+      max-width:320px;
+      text-align:center;
+      font-size:12px;
+      color:#64748b;
+      line-height:1.7;
+    }
+    .rqf-card{
+      border:1px solid rgba(71,85,105,.74);
+      border-radius:14px;
+      background:linear-gradient(180deg, rgba(15,23,42,.82), rgba(2,6,23,.8));
+      padding:12px;
+      box-shadow:0 12px 22px rgba(2,6,23,.24);
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .rqf-card-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .rqf-card-title{
+      font-size:14px;
+      line-height:1.4;
+      font-weight:600;
+      color:#f8fafc;
+    }
+    .rqf-card-meta{
+      margin-top:4px;
+      font-size:11px;
+      color:#64748b;
+      line-height:1.5;
+    }
+    .rqf-summary-card{
+      gap:8px;
+    }
+    .rqf-summary-preview{
+      font-size:12px;
+      line-height:1.65;
+      color:#cbd5e1;
+      display:-webkit-box;
+      -webkit-box-orient:vertical;
+      -webkit-line-clamp:2;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .rqf-summary-foot{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .rqf-summary-note{
+      flex:1 1 auto;
+      min-width:0;
+      font-size:11px;
+      line-height:1.55;
+      color:#94a3b8;
+      display:-webkit-box;
+      -webkit-box-orient:vertical;
+      -webkit-line-clamp:2;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .rqf-card-link{
+      flex:0 0 auto;
+      border:1px solid rgba(45,212,191,.3);
+      background:rgba(13,148,136,.08);
+      color:#ccfbf1;
+      border-radius:999px;
+      padding:5px 10px;
+      font-size:11px;
+      line-height:1;
+      cursor:pointer;
+      transition:all .18s ease;
+    }
+    .rqf-card-link:hover{
+      border-color:rgba(45,212,191,.56);
+      background:rgba(13,148,136,.16);
+    }
+    .rqf-status{
+      display:inline-flex;
+      align-items:center;
+      border-radius:999px;
+      padding:4px 9px;
+      font-size:11px;
+      line-height:1;
+      white-space:nowrap;
+      border:1px solid transparent;
+    }
+    .rqf-status.todo{background:rgba(59,130,246,.12);color:#93c5fd;border-color:rgba(96,165,250,.3);}
+    .rqf-status.in_progress{background:rgba(245,158,11,.12);color:#fde68a;border-color:rgba(245,158,11,.34);}
+    .rqf-status.completed{background:rgba(16,185,129,.12);color:#86efac;border-color:rgba(16,185,129,.34);}
+    .rqf-status.rejected{background:rgba(244,63,94,.12);color:#fecdd3;border-color:rgba(244,63,94,.32);}
+    .rqf-card-block{
+      border-radius:12px;
+      border:1px solid rgba(51,65,85,.72);
+      background:rgba(2,6,23,.34);
+      padding:9px 10px;
+    }
+    .rqf-card-label{
+      font-size:10px;
+      letter-spacing:.05em;
+      color:#64748b;
+      text-transform:uppercase;
+      margin-bottom:6px;
+    }
+    .rqf-card-body{
+      font-size:12px;
+      line-height:1.65;
+      color:#dbeafe;
+    }
+    .rqf-card-body p{margin:0 0 6px;}
+    .rqf-card-body p:last-child{margin-bottom:0;}
+    .rqf-admin{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      border-top:1px dashed rgba(71,85,105,.64);
+      padding-top:10px;
+    }
+    .rqf-admin-row{
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .rqf-admin-row .rqf-select{flex:1 1 auto;padding-top:9px;padding-bottom:9px;}
+    .rqf-admin-save{
+      border:1px solid rgba(45,212,191,.44);
+      background:rgba(15,118,110,.18);
+      color:#ccfbf1;
+      border-radius:10px;
+      padding:9px 12px;
+      font-size:12px;
+      cursor:pointer;
+      white-space:nowrap;
+    }
+    .rqf-admin-save:hover:not(:disabled){border-color:rgba(45,212,191,.72);color:#f0fdfa;}
+    .rqf-admin-save:disabled{
+      opacity:.5;
+      cursor:not-allowed;
+    }
+    .rqf-admin .rqf-textarea{
+      min-height:90px;
+      background:rgba(2,6,23,.42);
+    }
+    .rqf-detail{
+      position:absolute;
+      inset:0;
+      z-index:2;
+      border:1px solid rgba(71,85,105,.82);
+      border-radius:14px;
+      background:linear-gradient(180deg, rgba(15,23,42,.98), rgba(2,6,23,.96));
+      box-shadow:0 20px 42px rgba(2,6,23,.46);
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+      overflow:hidden;
+    }
+    .rqf-detail-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:14px 14px 12px;
+      border-bottom:1px solid rgba(51,65,85,.8);
+      background:linear-gradient(180deg, rgba(15,23,42,.96), rgba(15,23,42,.82));
+    }
+    .rqf-detail-main{
+      min-width:0;
+      flex:1 1 auto;
+    }
+    .rqf-detail-title{
+      font-size:14px;
+      line-height:1.45;
+      font-weight:700;
+      color:#f8fafc;
+    }
+    .rqf-detail-meta{
+      margin-top:6px;
+      font-size:11px;
+      line-height:1.55;
+      color:#64748b;
+    }
+    .rqf-detail-side{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex:0 0 auto;
+    }
+    .rqf-detail-close{
+      border:0;
+      background:transparent;
+      color:#94a3b8;
+      font-size:20px;
+      line-height:1;
+      padding:0 3px;
+      cursor:pointer;
+    }
+    .rqf-detail-close:hover{color:#e2e8f0;}
+    .rqf-detail-body{
+      flex:1 1 auto;
+      min-height:0;
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      padding:12px;
     }
     .support-chat-head{
       display:flex;
@@ -869,6 +1310,31 @@
       .support-chat{
         right:10px;
         --support-chat-base-bottom:10px;
+      }
+      .support-chat-fabs{gap:8px;}
+      .rqf-fab{
+        min-width:auto;
+        height:34px;
+        padding:0 12px;
+      }
+      .rqf-panel{
+        width:min(100vw - 16px, 460px);
+        height:min(80vh, 720px);
+        min-height:420px;
+      }
+      .rqf-submit-row{
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .rqf-admin-row{
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .rqf-summary-foot,
+      .rqf-detail-head,
+      .rqf-detail-side{
+        flex-direction:column;
+        align-items:stretch;
       }
       .support-chat-panel{
         width:min(100vw - 16px, 440px);
@@ -1205,6 +1671,67 @@
   </div>
 </div>
 <div id="support-chat" class="support-chat" aria-live="polite">
+  <div id="rqf-panel" class="rqf-panel hidden" role="dialog" aria-modal="false" aria-label="需求反馈清单">
+    <div class="rqf-head">
+      <div>
+        <div class="rqf-title">需求反馈清单</div>
+        <div class="rqf-subtitle">提交后先由小白客 AI 自动预审。通过的需求会进入全 AI 自动排期队列，并在这里持续同步状态。</div>
+      </div>
+      <button id="rqf-close" type="button" class="rqf-close" aria-label="关闭需求反馈清单">&times;</button>
+    </div>
+    <div id="rqf-tabs" class="rqf-tabs">
+      <button id="rqf-tab-submit" type="button" class="rqf-tab active">提交需求</button>
+      <button id="rqf-tab-list" type="button" class="rqf-tab">历史记录</button>
+    </div>
+    <div class="rqf-body">
+      <div id="rqf-pane-submit" class="rqf-pane">
+        <div id="rqf-project-badge" class="rqf-project-badge">适用范围：整个平台</div>
+        <div class="rqf-note">客户侧展示采用全 AI 自动排期文案。AI 预审通过后会直接进入排期队列；若不通过，会给出拒绝原因方便你修改后重新提交。</div>
+        <div class="rqf-field">
+          <label for="rqf-title" class="rqf-label">需求标题</label>
+          <input id="rqf-title" type="text" class="rqf-input" maxlength="120" placeholder="例如：需求反馈清单支持导出 CSV" />
+        </div>
+        <div class="rqf-field">
+          <label for="rqf-description" class="rqf-label">需求说明</label>
+          <textarea id="rqf-description" class="rqf-textarea" maxlength="4000" placeholder="写清楚目标、使用场景、希望解决的问题，AI 会先做自动预审。"></textarea>
+        </div>
+        <div class="rqf-submit-row">
+          <div id="rqf-submit-hint" class="rqf-hint">提交的是整个平台的软件需求，AI 会先做自动预审并同步排期结果。</div>
+          <button id="rqf-submit" type="button" class="rqf-submit-btn">提交给小白客 AI 审核</button>
+        </div>
+        <div id="rqf-submit-result" class="rqf-card hidden"></div>
+      </div>
+      <div id="rqf-pane-list" class="rqf-pane rqf-pane-list hidden">
+        <div class="rqf-list-head">
+          <div id="rqf-list-scope" class="rqf-list-scope">当前显示历史提交记录</div>
+          <div class="flex items-center gap-2">
+            <select id="rqf-status-filter" class="rqf-select text-xs py-2 px-3">
+              <option value="">全部状态</option>
+              <option value="todo">待开发</option>
+              <option value="in_progress">开发中</option>
+              <option value="completed">已完成</option>
+              <option value="rejected">已拒绝</option>
+            </select>
+            <button id="rqf-refresh" type="button" class="support-chat-health-btn">刷新</button>
+          </div>
+        </div>
+        <div id="rqf-list" class="rqf-list"></div>
+        <div id="rqf-detail" class="rqf-detail hidden" role="dialog" aria-modal="false" aria-label="需求详情">
+          <div class="rqf-detail-head">
+            <div class="rqf-detail-main">
+              <div id="rqf-detail-title" class="rqf-detail-title">需求详情</div>
+              <div id="rqf-detail-meta" class="rqf-detail-meta"></div>
+            </div>
+            <div class="rqf-detail-side">
+              <span id="rqf-detail-status" class="rqf-status"></span>
+              <button id="rqf-detail-close" type="button" class="rqf-detail-close" aria-label="关闭需求详情">&times;</button>
+            </div>
+          </div>
+          <div id="rqf-detail-body" class="rqf-detail-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="support-chat-panel" class="support-chat-panel hidden" role="dialog" aria-modal="false" aria-label="小白客智能客服">
     <div class="support-chat-head">
       <div>
@@ -1235,7 +1762,13 @@
       </div>
     </div>
   </div>
-  <button id="support-chat-fab" type="button" class="support-chat-fab" aria-label="打开小白客智能客服" title="小白客智能客服">💬</button>
+  <div class="support-chat-fabs">
+    <button id="rqf-fab" type="button" class="rqf-fab" aria-label="打开需求反馈清单" title="需求反馈清单">
+      <span aria-hidden="true">🗂</span>
+      <span>需求反馈</span>
+    </button>
+    <button id="support-chat-fab" type="button" class="support-chat-fab" aria-label="打开小白客智能客服" title="小白客智能客服">💬</button>
+  </div>
 </div>
 <div id="onboarding-overlay" class="hidden" role="dialog" aria-modal="true" aria-hidden="true">
   <div class="onboarding-mask"></div>
@@ -1984,6 +2517,7 @@ function setAuthUser(user) {
     btnAdmin.classList.add("hidden");
     closeProfileModal();
     closeUsersModal();
+    if (typeof feedbackRequestHandleAuthChange === "function") feedbackRequestHandleAuthChange();
     return;
   }
   const role = currentUser.role === "admin" ? "管理员" : "普通用户";
@@ -1994,6 +2528,7 @@ function setAuthUser(user) {
   refreshProfileModal();
   if (!isAdminUser()) closeUsersModal();
   if (typeof updateProjectModeAvailability === "function") updateProjectModeAvailability();
+  if (typeof feedbackRequestHandleAuthChange === "function") feedbackRequestHandleAuthChange();
 }
 
 function onboardingStorageKey(user = currentUser) {
@@ -3430,6 +3965,7 @@ function updateProjectUI() {
     document.getElementById("no-project-hint").classList.remove("hidden");
   }
   updateProjectPath();
+  if (typeof feedbackRequestHandleProjectChange === "function") feedbackRequestHandleProjectChange();
 }
 
 function applyTerminalOnlyMode() {
@@ -3951,6 +4487,566 @@ function showToast(title, message, kind = "error") {
   }, 5200);
 }
 
+// ── Feedback Requests ────────────────────────────────────────────────────────
+const feedbackRequestState = {
+  refs: null,
+  open: false,
+  activeTab: "submit",
+  bound: false,
+  loading: false,
+  submitting: false,
+  savingId: "",
+  rows: [],
+  error: "",
+  filter: "",
+  lastResult: null,
+  detailId: "",
+};
+
+function feedbackRequestStatusClass(status) {
+  const key = String(status || "").trim().toLowerCase();
+  if (key === "in_progress") return "in_progress";
+  if (key === "completed") return "completed";
+  if (key === "rejected") return "rejected";
+  return "todo";
+}
+
+function feedbackRequestStatusLabel(status, admin = false) {
+  const key = String(status || "").trim().toLowerCase();
+  const labels = admin
+    ? { todo: "待开发", in_progress: "开发中", completed: "已完成", rejected: "已拒绝" }
+    : { todo: "AI自动排期中", in_progress: "AI开发中", completed: "已完成", rejected: "未通过" };
+  return labels[key] || "处理中";
+}
+
+function feedbackRequestComparableText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function feedbackRequestReviewText(item) {
+  const status = String(item?.status || "").trim().toLowerCase();
+  const aiReason = String(item?.ai_reason || "").trim();
+  const statusDetail = String(item?.status_detail || "").trim();
+  if (status === "rejected") {
+    return aiReason || statusDetail || "该需求未通过当前审核。";
+  }
+  return "已通过小白客 AI 自动预审。";
+}
+
+function feedbackRequestShouldShowStatusDetail(item) {
+  const detail = feedbackRequestComparableText(item?.status_detail);
+  const review = feedbackRequestComparableText(feedbackRequestReviewText(item));
+  if (!detail) return false;
+  return detail !== review;
+}
+
+function feedbackRequestPreviewText(value, maxLength = 88) {
+  const text = feedbackRequestComparableText(value);
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+}
+
+function feedbackRequestMetaParts(item) {
+  const parts = ["平台级需求"];
+  const submitter = String(item?.submitter_username || "").trim();
+  if (isAdminUser() && submitter) parts.push(`提交人：${submitter}`);
+  parts.push(`提交：${formatLocalDateTime(item?.created_at || item?.updated_at || "")}`);
+  parts.push(`更新：${formatLocalDateTime(item?.updated_at || item?.created_at || "")}`);
+  return parts;
+}
+
+function feedbackRequestGetItem(feedbackId) {
+  const targetId = String(feedbackId || "").trim();
+  if (!targetId) return null;
+  return feedbackRequestState.rows.find((item) => String(item?.id || "").trim() === targetId) || null;
+}
+
+function feedbackRequestSyncFilterOptions() {
+  const select = feedbackRequestState.refs?.statusFilter;
+  if (!select) return;
+  const labels = {
+    "": "全部状态",
+    todo: feedbackRequestStatusLabel("todo", isAdminUser()),
+    in_progress: feedbackRequestStatusLabel("in_progress", isAdminUser()),
+    completed: feedbackRequestStatusLabel("completed", isAdminUser()),
+    rejected: feedbackRequestStatusLabel("rejected", isAdminUser()),
+  };
+  Array.from(select.options || []).forEach((option) => {
+    const key = String(option.value || "");
+    if (Object.prototype.hasOwnProperty.call(labels, key)) {
+      option.textContent = labels[key];
+    }
+  });
+  select.value = feedbackRequestState.filter;
+}
+
+function feedbackRequestRefreshProjectScope() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  refs.projectBadge.textContent = "适用范围：整个平台";
+  refs.submitHint.textContent = "提交的是整个平台的软件需求，AI 会先做自动预审；通过后会进入全 AI 自动排期队列。";
+  const scopeStatus = String(feedbackRequestState.filter || "").trim();
+  const scopeLabel = scopeStatus ? feedbackRequestStatusLabel(scopeStatus, isAdminUser()) : "全部状态";
+  const listScope = isAdminUser()
+    ? `当前查看全平台的 ${scopeLabel}需求清单`
+    : `当前查看你提交过的历史记录（${scopeLabel}）`;
+  refs.listScope.textContent = listScope;
+}
+
+function feedbackRequestUpdateSubmitButton() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  const title = String(refs.title.value || "").trim();
+  const description = String(refs.description.value || "").trim();
+  const ready = !isAdminUser() && !!title && !!description && !feedbackRequestState.submitting;
+  refs.submitBtn.disabled = !ready;
+  refs.submitBtn.textContent = feedbackRequestState.submitting
+    ? "审核中..."
+    : "提交给小白客 AI 审核";
+  refs.title.disabled = feedbackRequestState.submitting;
+  refs.description.disabled = feedbackRequestState.submitting;
+}
+
+function feedbackRequestApplyTabState() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  const showList = feedbackRequestState.activeTab === "list";
+  refs.tabSubmit.classList.toggle("active", !showList);
+  refs.tabList.classList.toggle("active", showList);
+  refs.paneSubmit.classList.toggle("hidden", showList);
+  refs.paneList.classList.toggle("hidden", !showList);
+}
+
+function feedbackRequestSyncRoleUI() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  const adminView = isAdminUser();
+  refs.tabList.textContent = adminView ? "审核清单" : "历史记录";
+  refs.tabSubmit.classList.toggle("hidden", adminView);
+  refs.tabs.classList.toggle("hidden", adminView);
+  if (adminView) feedbackRequestState.activeTab = "list";
+  feedbackRequestState.filter = isAdminUser() ? (feedbackRequestState.filter || "todo") : "";
+  feedbackRequestSyncFilterOptions();
+  feedbackRequestApplyTabState();
+  feedbackRequestRefreshProjectScope();
+}
+
+function feedbackRequestVisibleRows() {
+  const rows = Array.isArray(feedbackRequestState.rows) ? feedbackRequestState.rows.slice() : [];
+  const filter = String(feedbackRequestState.filter || "").trim().toLowerCase();
+  return filter ? rows.filter((item) => String(item?.status || "").trim().toLowerCase() === filter) : rows;
+}
+
+function feedbackRequestRenderSubmitResult() {
+  const refs = feedbackRequestState.refs;
+  if (!refs?.submitResult) return;
+  const item = feedbackRequestState.lastResult;
+  if (!item) {
+    refs.submitResult.classList.add("hidden");
+    refs.submitResult.innerHTML = "";
+    return;
+  }
+  const status = String(item.status || "").trim().toLowerCase();
+  const statusLabel = String(item.status_label || "").trim() || feedbackRequestStatusLabel(status, false);
+  const reviewText = feedbackRequestReviewText(item);
+  const showStatusDetail = feedbackRequestShouldShowStatusDetail(item);
+  refs.submitResult.classList.remove("hidden");
+  refs.submitResult.innerHTML = `
+    <div class="rqf-card-head">
+      <div>
+        <div class="rqf-card-title">${escHtml(item.normalized_title || item.title || "最新提交")}</div>
+        <div class="rqf-card-meta">提交时间：${escHtml(formatLocalDateTime(item.created_at || new Date().toISOString()))}</div>
+      </div>
+      <span class="rqf-status ${feedbackRequestStatusClass(status)}">${escHtml(statusLabel)}</span>
+    </div>
+    <div class="rqf-card-block">
+      <div class="rqf-card-label">AI 审核结果</div>
+      <div class="rqf-card-body msg-rich">${renderRichMsg(reviewText)}</div>
+    </div>
+    ${showStatusDetail ? `
+      <div class="rqf-card-block">
+        <div class="rqf-card-label">当前进度</div>
+        <div class="rqf-card-body msg-rich">${renderRichMsg(item.status_detail)}</div>
+      </div>` : ""}
+  `;
+}
+
+function feedbackRequestRenderDetail() {
+  const refs = feedbackRequestState.refs;
+  if (!refs?.detail || !refs.detailBody) return;
+  let item = feedbackRequestGetItem(feedbackRequestState.detailId);
+  const activeFilter = String(feedbackRequestState.filter || "").trim().toLowerCase();
+  if (item && activeFilter && String(item.status || "").trim().toLowerCase() !== activeFilter) {
+    feedbackRequestState.detailId = "";
+    item = null;
+  }
+  if (!feedbackRequestState.open || feedbackRequestState.activeTab !== "list" || !item) {
+    refs.detail.classList.add("hidden");
+    refs.detailBody.innerHTML = "";
+    refs.detailMeta.textContent = "";
+    refs.detailTitle.textContent = "需求详情";
+    refs.detailStatus.className = "rqf-status";
+    refs.detailStatus.textContent = "";
+    return;
+  }
+  const status = String(item.status || "").trim().toLowerCase();
+  const title = String(item.normalized_title || item.title || "未命名需求").trim() || "未命名需求";
+  const description = String(item.normalized_description || item.description || "").trim();
+  const statusLabel = isAdminUser()
+    ? (String(item.admin_status_label || "").trim() || feedbackRequestStatusLabel(status, true))
+    : (String(item.status_label || "").trim() || feedbackRequestStatusLabel(status, false));
+  const statusDetail = String(item.status_detail || "").trim();
+  const adminFeedback = String(item.admin_feedback || "").trim();
+  const reviewText = feedbackRequestReviewText(item);
+  const showStatusDetail = feedbackRequestShouldShowStatusDetail(item);
+  const showUserFeedback = !isAdminUser()
+    && !!adminFeedback
+    && feedbackRequestComparableText(adminFeedback) !== feedbackRequestComparableText(statusDetail);
+  const saveDisabled = feedbackRequestState.savingId === String(item.id || "").trim() ? "disabled" : "";
+  refs.detail.classList.remove("hidden");
+  refs.detailTitle.textContent = title;
+  refs.detailMeta.textContent = feedbackRequestMetaParts(item).join(" · ");
+  refs.detailStatus.className = `rqf-status ${feedbackRequestStatusClass(status)}`;
+  refs.detailStatus.textContent = statusLabel;
+  refs.detailBody.innerHTML = `
+    <div class="rqf-card-block">
+      <div class="rqf-card-label">需求内容</div>
+      <div class="rqf-card-body msg-rich">${renderRichMsg(description || item.description || "暂无说明")}</div>
+    </div>
+    <div class="rqf-card-block">
+      <div class="rqf-card-label">AI 审核结果</div>
+      <div class="rqf-card-body msg-rich">${renderRichMsg(reviewText)}</div>
+    </div>
+    ${showStatusDetail ? `<div class="rqf-card-block">
+      <div class="rqf-card-label">${isAdminUser() ? "客户侧进度文案" : "当前进度"}</div>
+      <div class="rqf-card-body msg-rich">${renderRichMsg(statusDetail || "需求正在处理中。")}</div>
+    </div>` : ""}
+    ${showUserFeedback ? `<div class="rqf-card-block">
+      <div class="rqf-card-label">反馈信息</div>
+      <div class="rqf-card-body msg-rich">${renderRichMsg(adminFeedback)}</div>
+    </div>` : ""}
+    ${isAdminUser() ? `<div class="rqf-admin">
+      <div class="rqf-admin-row">
+        <select class="rqf-select" data-feedback-field="status">
+          <option value="todo" ${status === "todo" ? "selected" : ""}>待开发</option>
+          <option value="in_progress" ${status === "in_progress" ? "selected" : ""}>开发中</option>
+          <option value="completed" ${status === "completed" ? "selected" : ""}>已完成</option>
+          <option value="rejected" ${status === "rejected" ? "selected" : ""}>已拒绝</option>
+        </select>
+        <button type="button" class="rqf-admin-save" data-feedback-action="save" data-feedback-id="${escHtmlAttr(item.id || "")}" ${saveDisabled}>${feedbackRequestState.savingId === String(item.id || "").trim() ? "保存中..." : "保存"}</button>
+      </div>
+      <textarea class="rqf-textarea" data-feedback-field="admin_feedback" placeholder="给客户的进度反馈或说明...">${escHtml(adminFeedback)}</textarea>
+    </div>` : ""}
+  `;
+}
+
+function feedbackRequestSetDetail(feedbackId) {
+  feedbackRequestState.detailId = String(feedbackId || "").trim();
+  feedbackRequestRenderDetail();
+}
+
+function feedbackRequestRenderList() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  feedbackRequestRefreshProjectScope();
+  if (feedbackRequestState.loading) {
+    refs.list.innerHTML = '<div class="rqf-empty">正在同步最新需求反馈...</div>';
+    feedbackRequestRenderDetail();
+    return;
+  }
+  if (feedbackRequestState.error) {
+    refs.list.innerHTML = `<div class="rqf-empty">${escHtml(feedbackRequestState.error)}</div>`;
+    feedbackRequestRenderDetail();
+    return;
+  }
+  const rows = feedbackRequestVisibleRows();
+  if (!rows.length) {
+    refs.list.innerHTML = `<div class="rqf-empty">${
+      isAdminUser()
+        ? "当前筛选条件下没有需求反馈。"
+        : "你还没有提交过需求反馈。"
+    }</div>`;
+    feedbackRequestRenderDetail();
+    return;
+  }
+  refs.list.innerHTML = rows.map((item) => {
+    const id = String(item.id || "").trim();
+    const status = String(item.status || "").trim().toLowerCase();
+    const title = String(item.normalized_title || item.title || "未命名需求").trim() || "未命名需求";
+    const description = String(item.normalized_description || item.description || "").trim();
+    const metaParts = feedbackRequestMetaParts(item);
+    const statusLabel = isAdminUser()
+      ? (String(item.admin_status_label || "").trim() || feedbackRequestStatusLabel(status, true))
+      : (String(item.status_label || "").trim() || feedbackRequestStatusLabel(status, false));
+    const statusDetail = String(item.status_detail || "").trim();
+    const reviewText = feedbackRequestReviewText(item);
+    const summaryPreview = feedbackRequestPreviewText(description || item.description || "暂无说明", 92);
+    const summaryNote = feedbackRequestPreviewText(
+      status === "rejected" ? reviewText : (statusDetail || reviewText || "需求正在处理中。"),
+      76,
+    );
+    const summaryLabel = status === "rejected" ? "审核结果" : "当前进度";
+    return `<div class="rqf-card rqf-summary-card" data-feedback-id="${escHtmlAttr(id)}">
+      <div class="rqf-card-head">
+        <div>
+          <div class="rqf-card-title">${escHtml(title)}</div>
+          <div class="rqf-card-meta">${escHtml(metaParts.join(" · "))}</div>
+        </div>
+        <span class="rqf-status ${feedbackRequestStatusClass(status)}">${escHtml(statusLabel)}</span>
+      </div>
+      <div class="rqf-summary-preview">${escHtml(summaryPreview)}</div>
+      <div class="rqf-summary-foot">
+        <div class="rqf-summary-note">${escHtml(summaryLabel)}：${escHtml(summaryNote || "点击查看详情")}</div>
+        <button type="button" class="rqf-card-link" data-feedback-action="open" data-feedback-id="${escHtmlAttr(id)}">查看详情</button>
+      </div>
+    </div>`;
+  }).join("");
+  feedbackRequestRenderDetail();
+}
+
+async function feedbackRequestLoadList() {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  feedbackRequestState.loading = true;
+  feedbackRequestState.error = "";
+  feedbackRequestRenderList();
+  try {
+    const res = await apiFetch(`${API}/feedback-requests`);
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    feedbackRequestState.rows = Array.isArray(payload) ? payload : [];
+  } catch (err) {
+    feedbackRequestState.rows = [];
+    feedbackRequestState.error = normalizeMsgText(err?.message || err || "获取需求反馈失败");
+  } finally {
+    feedbackRequestState.loading = false;
+    feedbackRequestRenderList();
+  }
+}
+
+function feedbackRequestSetTab(tab) {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  feedbackRequestState.activeTab = isAdminUser() ? "list" : (tab === "list" ? "list" : "submit");
+  if (feedbackRequestState.activeTab !== "list") feedbackRequestState.detailId = "";
+  feedbackRequestApplyTabState();
+  const showList = feedbackRequestState.activeTab === "list";
+  if (showList) {
+    feedbackRequestLoadList();
+  } else {
+    feedbackRequestRenderDetail();
+    feedbackRequestRenderSubmitResult();
+    setTimeout(() => refs.title?.focus(), 0);
+  }
+}
+
+function feedbackRequestSetOpen(nextOpen) {
+  const refs = feedbackRequestState.refs;
+  if (!refs) return;
+  feedbackRequestState.open = !!nextOpen;
+  if (!feedbackRequestState.open) feedbackRequestState.detailId = "";
+  refs.panel.classList.toggle("hidden", !feedbackRequestState.open);
+  refs.fab.classList.toggle("open", feedbackRequestState.open);
+  if (feedbackRequestState.open) {
+    if (typeof supportChatSetOpen === "function") supportChatSetOpen(false);
+    feedbackRequestSyncRoleUI();
+    feedbackRequestRefreshProjectScope();
+    if (typeof supportChatScheduleBottomOffset === "function") supportChatScheduleBottomOffset();
+    if (feedbackRequestState.activeTab === "list") feedbackRequestLoadList();
+    else {
+      feedbackRequestRenderDetail();
+      feedbackRequestRenderSubmitResult();
+      setTimeout(() => refs.title?.focus(), 0);
+    }
+  } else {
+    feedbackRequestRenderDetail();
+  }
+}
+
+function feedbackRequestToggleOpen() {
+  feedbackRequestSetOpen(!feedbackRequestState.open);
+}
+
+async function feedbackRequestSubmit() {
+  const refs = feedbackRequestState.refs;
+  if (!refs || feedbackRequestState.submitting) return;
+  const title = String(refs.title.value || "").trim();
+  const description = String(refs.description.value || "").trim();
+  if (isAdminUser()) {
+    await uiAlert("管理员账号不提供需求提交入口，请直接在审核清单处理。", "不可提交", "warning");
+    return;
+  }
+  if (!title || !description) {
+    feedbackRequestUpdateSubmitButton();
+    return;
+  }
+  feedbackRequestState.submitting = true;
+  feedbackRequestUpdateSubmitButton();
+  try {
+    const res = await apiFetch(`${API}/feedback-requests`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, description }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const created = await res.json();
+    refs.title.value = "";
+    refs.description.value = "";
+    feedbackRequestState.lastResult = created || null;
+    feedbackRequestState.rows = [created, ...feedbackRequestState.rows.filter((item) => item?.id !== created?.id)];
+    if (String(created?.status || "").trim().toLowerCase() === "rejected") {
+      showToast("AI 审核未通过", created?.ai_reason || created?.status_detail || "请调整需求后重试。", "warning");
+    } else {
+      showToast("已进入 AI 排期", created?.status_detail || "需求已进入全 AI 自动排期队列。", "info");
+    }
+    feedbackRequestSetTab("list");
+  } catch (err) {
+    await uiAlert(`提交失败: ${normalizeMsgText(err?.message || err || "请求失败")}`, "操作失败", "error");
+  } finally {
+    feedbackRequestState.submitting = false;
+    feedbackRequestUpdateSubmitButton();
+  }
+}
+
+async function feedbackRequestSave(feedbackId) {
+  const refs = feedbackRequestState.refs;
+  if (!refs || !feedbackId || feedbackRequestState.savingId) return;
+  const statusEl = refs.detailBody?.querySelector('[data-feedback-field="status"]');
+  const feedbackEl = refs.detailBody?.querySelector('[data-feedback-field="admin_feedback"]');
+  if (!statusEl || !feedbackEl) return;
+  const status = String(statusEl?.value || "").trim();
+  const adminFeedback = String(feedbackEl?.value || "").trim();
+  feedbackRequestState.savingId = String(feedbackId);
+  try {
+    const res = await apiFetch(`${API}/feedback-requests/${encodeURIComponent(feedbackId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, admin_feedback: adminFeedback }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    showToast("已更新", "需求状态和反馈信息已保存。", "info");
+    await feedbackRequestLoadList();
+  } catch (err) {
+    await uiAlert(`保存失败: ${normalizeMsgText(err?.message || err || "请求失败")}`, "操作失败", "error");
+  } finally {
+    feedbackRequestState.savingId = "";
+    feedbackRequestRenderDetail();
+  }
+}
+
+function feedbackRequestHandleAuthChange() {
+  if (!feedbackRequestState.bound) return;
+  feedbackRequestSyncRoleUI();
+  if (!currentUser) {
+    feedbackRequestState.rows = [];
+    feedbackRequestState.error = "";
+    feedbackRequestState.lastResult = null;
+    feedbackRequestSetOpen(false);
+  } else if (feedbackRequestState.open && feedbackRequestState.activeTab === "list") {
+    feedbackRequestLoadList();
+  }
+  feedbackRequestRenderSubmitResult();
+  feedbackRequestRenderList();
+  feedbackRequestUpdateSubmitButton();
+}
+
+function feedbackRequestHandleProjectChange() {
+  if (!feedbackRequestState.bound) return;
+  feedbackRequestRefreshProjectScope();
+}
+
+function initFeedbackRequests() {
+  if (feedbackRequestState.bound) return;
+  const refs = {
+    panel: document.getElementById("rqf-panel"),
+    tabs: document.getElementById("rqf-tabs"),
+    fab: document.getElementById("rqf-fab"),
+    closeBtn: document.getElementById("rqf-close"),
+    tabSubmit: document.getElementById("rqf-tab-submit"),
+    tabList: document.getElementById("rqf-tab-list"),
+    paneSubmit: document.getElementById("rqf-pane-submit"),
+    paneList: document.getElementById("rqf-pane-list"),
+    projectBadge: document.getElementById("rqf-project-badge"),
+    title: document.getElementById("rqf-title"),
+    description: document.getElementById("rqf-description"),
+    submitHint: document.getElementById("rqf-submit-hint"),
+    submitBtn: document.getElementById("rqf-submit"),
+    submitResult: document.getElementById("rqf-submit-result"),
+    listScope: document.getElementById("rqf-list-scope"),
+    list: document.getElementById("rqf-list"),
+    detail: document.getElementById("rqf-detail"),
+    detailTitle: document.getElementById("rqf-detail-title"),
+    detailMeta: document.getElementById("rqf-detail-meta"),
+    detailStatus: document.getElementById("rqf-detail-status"),
+    detailBody: document.getElementById("rqf-detail-body"),
+    detailCloseBtn: document.getElementById("rqf-detail-close"),
+    refreshBtn: document.getElementById("rqf-refresh"),
+    statusFilter: document.getElementById("rqf-status-filter"),
+  };
+  if (Object.values(refs).some((item) => !item)) return;
+  feedbackRequestState.refs = refs;
+  feedbackRequestState.bound = true;
+
+  feedbackRequestSyncRoleUI();
+  feedbackRequestRenderSubmitResult();
+  feedbackRequestRenderList();
+  feedbackRequestUpdateSubmitButton();
+  feedbackRequestSetOpen(false);
+
+  refs.fab.addEventListener("click", feedbackRequestToggleOpen);
+  refs.closeBtn.addEventListener("click", () => feedbackRequestSetOpen(false));
+  refs.tabSubmit.addEventListener("click", () => feedbackRequestSetTab("submit"));
+  refs.tabList.addEventListener("click", () => feedbackRequestSetTab("list"));
+  refs.refreshBtn.addEventListener("click", () => feedbackRequestLoadList());
+  refs.detailCloseBtn.addEventListener("click", () => feedbackRequestSetDetail(""));
+  refs.submitBtn.addEventListener("click", () => feedbackRequestSubmit());
+  refs.title.addEventListener("input", feedbackRequestUpdateSubmitButton);
+  refs.description.addEventListener("input", feedbackRequestUpdateSubmitButton);
+  refs.statusFilter.addEventListener("change", () => {
+    feedbackRequestState.filter = String(refs.statusFilter.value || "").trim().toLowerCase();
+    feedbackRequestState.detailId = "";
+    feedbackRequestRenderList();
+  });
+  refs.description.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || (!event.metaKey && !event.ctrlKey)) return;
+    event.preventDefault();
+    feedbackRequestSubmit();
+  });
+  refs.list.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-feedback-action]");
+    if (!btn) return;
+    const feedbackId = String(
+      btn.getAttribute("data-feedback-id")
+      || btn.closest("[data-feedback-id]")?.getAttribute("data-feedback-id")
+      || "",
+    ).trim();
+    const action = String(btn.getAttribute("data-feedback-action") || "").trim();
+    if (!feedbackId) return;
+    if (action === "open") {
+      feedbackRequestSetDetail(feedbackId);
+      return;
+    }
+  });
+  refs.detailBody.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-feedback-action]");
+    if (!btn) return;
+    const feedbackId = String(btn.getAttribute("data-feedback-id") || feedbackRequestState.detailId || "").trim();
+    const action = String(btn.getAttribute("data-feedback-action") || "").trim();
+    if (!feedbackId) return;
+    if (action === "save") feedbackRequestSave(feedbackId);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!feedbackRequestState.open || feedbackRequestState.submitting || feedbackRequestState.savingId) return;
+    if (feedbackRequestState.detailId) {
+      feedbackRequestSetDetail("");
+      return;
+    }
+    feedbackRequestSetOpen(false);
+  });
+}
+
 // ── Support Chat ──────────────────────────────────────────────────────────────
 const SUPPORT_CHAT_STORAGE_KEY = "opc_support_chat_messages_v1";
 const SUPPORT_CHAT_MAX_MESSAGES = 30;
@@ -4194,6 +5290,7 @@ function supportChatSetOpen(nextOpen) {
   refs.fab.classList.toggle("open", supportChatState.open);
   supportChatScheduleBottomOffset();
   if (supportChatState.open) {
+    if (typeof feedbackRequestSetOpen === "function") feedbackRequestSetOpen(false);
     supportChatState.autoFollow = true;
     supportChatAutoResizeInput();
     supportChatScrollToBottom(true);
@@ -7286,6 +8383,7 @@ async function initApp() {
   try {
     await ensureAuthenticated();
     buildBoard();
+    initFeedbackRequests();
     initSupportChat();
     applyTerminalOnlyMode();
     updateBoardLaneWidths();
