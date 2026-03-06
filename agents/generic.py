@@ -70,6 +70,28 @@ class GenericAgent(BaseAgent):
     def _post_commit_sync_stage(self) -> str:
         return "developer_post_commit_sync" if self._uses_developer_profile() else f"{self.name}_post_commit_sync"
 
+    def _dirty_patchset_transition_spec(
+        self,
+        *,
+        commit_display: str,
+        dirty_status: str,
+    ) -> dict[str, str]:
+        if self._uses_developer_profile():
+            return {
+                "stage": "dev_dirty_patchset",
+                "to_agent": self.name,
+                "title": "开发交付未冻结",
+                "summary": f"CLI 已提交 commit {commit_display}，但工作区仍有未提交改动，未进入审查",
+                "conclusion": "检测到提交后工作区不干净；请在 CLI 内整理并提交剩余改动后再送审",
+            }
+        return {
+            "stage": f"{self.name}_dirty_patchset",
+            "to_agent": self.name,
+            "title": f"{self._display_name} 交付未冻结",
+            "summary": f"检测到 CLI 已提交 commit {commit_display}，但工作区仍有未提交改动，保持在 {dirty_status}",
+            "conclusion": f"{self._display_name} 需先清理工作区并完成提交，再继续推进",
+        }
+
     def _post_commit_transition_spec(
         self,
         *,
@@ -219,12 +241,70 @@ class GenericAgent(BaseAgent):
         if cli_created_commit and head_after:
             diff_stat = diff.strip()
             commit_hash, commit_display = await self._resolve_commit_hash(worktree_dev, head_after)
+            patchset = await self.build_patchset_snapshot(
+                worktree_dev,
+                source_branch=branch,
+                head_sha=head_after,
+            )
             await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_display}")
             if diff_stat:
                 await self.add_log(
                     task_id,
-                    "检测到额外未提交改动；按最新 commit 推进流转，剩余改动保留在工作区。",
+                    "检测到提交后工作区仍有未提交改动；本轮不会进入审查/合并，需先清理工作区。",
                 )
+                if await self.stop_if_task_cancelled(task_id, "检测到 dirty patchset 回退前"):
+                    return
+                dirty_status = "needs_changes" if self._uses_developer_profile() else prev_status
+                dirty_spec = self._dirty_patchset_transition_spec(
+                    commit_display=commit_display,
+                    dirty_status=dirty_status,
+                )
+                update_fields = {
+                    "status": dirty_status,
+                    "assignee": None,
+                    "commit_hash": commit_hash,
+                    "current_patchset_id": str(patchset.get("id") or "").strip() or None,
+                    "current_patchset_status": "draft",
+                }
+                if self._uses_developer_profile():
+                    update_fields["review_feedback"] = (
+                        "检测到提交后工作区仍有未提交改动；本轮未送审，请在 CLI 内整理并提交剩余改动后重试。"
+                    )
+                if str(dirty_status or "").strip().lower() in {"todo", "needs_changes"}:
+                    update_fields["assigned_agent"] = self.name
+                    update_fields["dev_agent"] = self.name
+                await self.transition_task(
+                    task_id,
+                    fields=update_fields,
+                    handoff={
+                        "stage": dirty_spec["stage"],
+                        "to_agent": dirty_spec["to_agent"],
+                        "status_from": prev_status,
+                        "status_to": dirty_status,
+                        "title": dirty_spec["title"],
+                        "summary": dirty_spec["summary"],
+                        "commit_hash": commit_hash,
+                        "conclusion": dirty_spec["conclusion"],
+                        "payload": {
+                            "commit_hash": commit_hash,
+                            "source_branch": branch,
+                            "committed_by_cli": True,
+                            "review_enabled": is_review_enabled(task),
+                            "has_commit": True,
+                            "has_uncommitted_changes": True,
+                            "requires_clean_worktree": True,
+                            "uncommitted_diff_stat": diff_stat[:1200],
+                            "patchset": {
+                                **patchset,
+                                "status": "draft",
+                                "summary": dirty_spec["conclusion"],
+                            },
+                        },
+                        "artifact_path": str(worktree_dev),
+                    },
+                    log_message=f"检测到 dirty patchset，回退到 {dirty_status}",
+                )
+                return
             if await self.stop_if_task_cancelled(task_id, "CLI 已提交后状态更新前"):
                 return
             effective_next_status = self.next_status
@@ -235,6 +315,10 @@ class GenericAgent(BaseAgent):
                 "status": effective_next_status,
                 "assignee": None,
                 "commit_hash": commit_hash,
+                "current_patchset_id": str(patchset.get("id") or "").strip() or None,
+                "current_patchset_status": (
+                    "approved" if effective_next_status == "approved" else "submitted"
+                ),
             }
             if effective_next_status == "in_review":
                 update_fields["assigned_agent"] = self.name
@@ -269,6 +353,11 @@ class GenericAgent(BaseAgent):
                                 "review_enabled": review_enabled,
                                 "has_uncommitted_changes": bool(diff_stat),
                                 "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
+                                "patchset": {
+                                    **patchset,
+                                    "status": "approved" if effective_next_status == "approved" else "submitted",
+                                    "summary": transition_spec["conclusion"],
+                                },
                             },
                             "artifact_path": str(worktree_dev),
                         },

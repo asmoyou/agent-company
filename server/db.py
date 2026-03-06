@@ -6,13 +6,42 @@ import re
 import secrets
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
 CANCELLED_STATUS = "cancelled"
 ACTIONABLE_FEEDBACK_STATUSES = {"needs_changes", "blocked"}
 FEEDBACK_RESOLVE_STATUSES = {"approved", "pending_acceptance", "completed", CANCELLED_STATUS}
+PATCHSET_STATUS_DRAFT = "draft"
+PATCHSET_STATUS_SUBMITTED = "submitted"
+PATCHSET_STATUS_APPROVED = "approved"
+PATCHSET_STATUS_REJECTED = "rejected"
+PATCHSET_STATUS_STALE = "stale"
+PATCHSET_STATUS_MERGED = "merged"
+PATCHSET_STATUS_SUPERSEDED = "superseded"
+PATCHSET_ALLOWED_STATUSES = {
+    PATCHSET_STATUS_DRAFT,
+    PATCHSET_STATUS_SUBMITTED,
+    PATCHSET_STATUS_APPROVED,
+    PATCHSET_STATUS_REJECTED,
+    PATCHSET_STATUS_STALE,
+    PATCHSET_STATUS_MERGED,
+    PATCHSET_STATUS_SUPERSEDED,
+}
+PATCHSET_QUEUE_QUEUED = "queued"
+PATCHSET_QUEUE_PROCESSING = "processing"
+PATCHSET_QUEUE_MERGED = "merged"
+PATCHSET_QUEUE_STALE = "stale"
+PATCHSET_QUEUE_FAILED = "failed"
+PATCHSET_ALLOWED_QUEUE_STATUSES = {
+    "",
+    PATCHSET_QUEUE_QUEUED,
+    PATCHSET_QUEUE_PROCESSING,
+    PATCHSET_QUEUE_MERGED,
+    PATCHSET_QUEUE_STALE,
+    PATCHSET_QUEUE_FAILED,
+}
 DEFAULT_TASK_PRIORITY = 2
 MIN_TASK_PRIORITY = 0
 MAX_TASK_PRIORITY = 3
@@ -100,9 +129,10 @@ REVIEWER_PROMPT_DEFAULT = (
 )
 
 MANAGER_PROMPT_DEFAULT = (
-    "你是发布合并管理者，负责把经审查通过的目标 commit 从开发分支精确合并到 main。\n\n"
+    "你是发布合并管理者，负责把经审查通过的交付版本合并到 main。\n\n"
     "任务标题：{task_title}\n"
-    "请确保只合并已审查的 commit_hash（不要直接合并分支 HEAD），并在冲突时停止自动流程。"
+    "请优先按 patchset(base..head) 做 deterministic squash merge；只有缺少 patchset 时才回退到已审查的 commit_hash。"
+    "不要直接合并分支 HEAD，遇到冲突时停止自动流程并回退开发修复。"
 )
 
 LEADER_PROMPT_DEFAULT = (
@@ -414,6 +444,9 @@ def init_db():
             review_feedback TEXT,
             review_feedback_history TEXT NOT NULL DEFAULT '[]',
             commit_hash     TEXT,
+            current_patchset_id TEXT,
+            current_patchset_status TEXT NOT NULL DEFAULT '',
+            merged_patchset_id TEXT,
             archived        INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL
@@ -470,6 +503,38 @@ def init_db():
             artifact_path TEXT,
             created_at   TEXT NOT NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_patchsets (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL,
+            source_branch   TEXT NOT NULL DEFAULT '',
+            base_sha        TEXT NOT NULL DEFAULT '',
+            head_sha        TEXT NOT NULL DEFAULT '',
+            commit_count    INTEGER NOT NULL DEFAULT 0,
+            commit_list     TEXT NOT NULL DEFAULT '[]',
+            changed_files   TEXT NOT NULL DEFAULT '[]',
+            artifact_manifest TEXT NOT NULL DEFAULT '{}',
+            diff_stat       TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'draft',
+            worktree_clean  INTEGER NOT NULL DEFAULT 1,
+            merge_strategy  TEXT NOT NULL DEFAULT '',
+            summary         TEXT NOT NULL DEFAULT '',
+            artifact_path   TEXT,
+            created_by_agent TEXT NOT NULL DEFAULT '',
+            queue_status    TEXT NOT NULL DEFAULT '',
+            queue_reason    TEXT NOT NULL DEFAULT '',
+            queued_at       TEXT,
+            queue_started_at TEXT,
+            queue_finished_at TEXT,
+            approved_at     TEXT,
+            merged_at       TEXT,
+            reviewed_main_sha TEXT NOT NULL DEFAULT '',
+            queue_main_sha  TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE (task_id, head_sha)
         );
 
         CREATE TABLE IF NOT EXISTS agent_types (
@@ -529,6 +594,9 @@ def init_db():
         ("review_feedback", "TEXT"),
         ("review_feedback_history", "TEXT NOT NULL DEFAULT '[]'"),
         ("commit_hash", "TEXT"),
+        ("current_patchset_id", "TEXT"),
+        ("current_patchset_status", "TEXT NOT NULL DEFAULT ''"),
+        ("merged_patchset_id", "TEXT"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("parent_task_id", "TEXT"),
         ("subtask_order", "INTEGER NOT NULL DEFAULT 0"),
@@ -575,6 +643,34 @@ def init_db():
         ("payload", "TEXT NOT NULL DEFAULT '{}'"),
         ("artifact_path", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "task_patchsets", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("source_branch", "TEXT NOT NULL DEFAULT ''"),
+        ("base_sha", "TEXT NOT NULL DEFAULT ''"),
+        ("head_sha", "TEXT NOT NULL DEFAULT ''"),
+        ("commit_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("commit_list", "TEXT NOT NULL DEFAULT '[]'"),
+        ("changed_files", "TEXT NOT NULL DEFAULT '[]'"),
+        ("artifact_manifest", "TEXT NOT NULL DEFAULT '{}'"),
+        ("diff_stat", "TEXT NOT NULL DEFAULT ''"),
+        ("status", "TEXT NOT NULL DEFAULT 'draft'"),
+        ("worktree_clean", "INTEGER NOT NULL DEFAULT 1"),
+        ("merge_strategy", "TEXT NOT NULL DEFAULT ''"),
+        ("summary", "TEXT NOT NULL DEFAULT ''"),
+        ("artifact_path", "TEXT"),
+        ("created_by_agent", "TEXT NOT NULL DEFAULT ''"),
+        ("queue_status", "TEXT NOT NULL DEFAULT ''"),
+        ("queue_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("queued_at", "TEXT"),
+        ("queue_started_at", "TEXT"),
+        ("queue_finished_at", "TEXT"),
+        ("approved_at", "TEXT"),
+        ("merged_at", "TEXT"),
+        ("reviewed_main_sha", "TEXT NOT NULL DEFAULT ''"),
+        ("queue_main_sha", "TEXT NOT NULL DEFAULT ''"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
     ])
     _ensure_columns(conn, "agent_types", [
         ("key", "TEXT"),
@@ -682,7 +778,7 @@ def _seed_builtin_agents(conn):
         {
             "key": "manager",
             "name": "合并管理者",
-            "description": "将审查通过的目标 commit 精确合并到 main",
+            "description": "优先基于 patchset 做 deterministic squash merge；缺少 patchset 时回退到 commit 路径",
             "prompt": BUILTIN_PROMPTS["manager"],
             "poll_statuses": '["approved"]',
             "next_status": "pending_acceptance",
@@ -934,13 +1030,16 @@ def _seed_builtin_agents(conn):
            WHERE key='developer' AND is_builtin=1
              AND INSTR(prompt, '至少创建一个文件，否则任务无法通过审查') > 0""",
     )
-    # Migrate outdated built-in manager prompt that did not require exact commit_hash merge.
+    # Migrate built-in manager prompt from commit-only wording to patchset-first merge guidance.
     conn.execute(
         """UPDATE agent_types
            SET prompt=?
            WHERE key='manager' AND is_builtin=1
-             AND INSTR(prompt, '合并到主分支') > 0
-             AND INSTR(prompt, 'commit_hash') = 0""",
+             AND (
+                (INSTR(prompt, '合并到主分支') > 0 AND INSTR(prompt, 'commit_hash') = 0)
+                OR (INSTR(prompt, '目标 commit') > 0 AND INSTR(prompt, 'patchset') = 0)
+                OR (INSTR(prompt, '只合并已审查的 commit_hash') > 0 AND INSTR(prompt, 'patchset') = 0)
+             )""",
         (BUILTIN_PROMPTS["manager"],),
     )
     # Migrate built-in reviewer prompt to spell out independent acceptance responsibility.
@@ -972,7 +1071,7 @@ def _seed_builtin_agents(conn):
            SET description=?
            WHERE key='manager' AND is_builtin=1
              AND INSTR(description, '合并到主分支') > 0""",
-        ("将审查通过的目标 commit 精确合并到 main",),
+        ("优先基于 patchset 做 deterministic squash merge；缺少 patchset 时回退到 commit 路径",),
     )
 
 
@@ -3532,11 +3631,606 @@ def add_handoff(
         conn.close()
 
 
+def _normalize_patchset_status(value: str | None, *, default: str = PATCHSET_STATUS_DRAFT) -> str:
+    text = str(value or "").strip().lower()
+    if text in PATCHSET_ALLOWED_STATUSES:
+        return text
+    return default
+
+
+def _normalize_patchset_queue_status(value: str | None, *, default: str = "") -> str:
+    text = str(value or "").strip().lower()
+    if text in PATCHSET_ALLOWED_QUEUE_STATUSES:
+        return text
+    return default
+
+
+def _infer_patchset_queue_status(status: str, *, default: str = "") -> str:
+    normalized = _normalize_patchset_status(status, default=PATCHSET_STATUS_DRAFT)
+    if normalized == PATCHSET_STATUS_APPROVED:
+        return PATCHSET_QUEUE_QUEUED
+    if normalized == PATCHSET_STATUS_MERGED:
+        return PATCHSET_QUEUE_MERGED
+    if normalized == PATCHSET_STATUS_STALE:
+        return PATCHSET_QUEUE_STALE
+    if normalized in {
+        PATCHSET_STATUS_DRAFT,
+        PATCHSET_STATUS_SUBMITTED,
+        PATCHSET_STATUS_REJECTED,
+        PATCHSET_STATUS_SUPERSEDED,
+    }:
+        return ""
+    return default
+
+
+def _coerce_patchset_commit_list(raw) -> list[dict]:
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            commit_hash = str(
+                item.get("hash")
+                or item.get("commit_hash")
+                or item.get("head_sha")
+                or ""
+            ).strip()
+            if not commit_hash:
+                continue
+            short = str(item.get("short") or commit_hash[:12]).strip()[:24]
+            subject = str(item.get("subject") or "").strip()[:240]
+            out.append({"hash": commit_hash[:120], "short": short, "subject": subject})
+        else:
+            commit_hash = str(item or "").strip()
+            if commit_hash:
+                out.append({"hash": commit_hash[:120], "short": commit_hash[:12], "subject": ""})
+        if len(out) >= 128:
+            break
+    return out
+
+
+def _coerce_patchset_changed_files(raw) -> list[dict]:
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("new_path") or "").strip()
+        if not path:
+            continue
+        normalized = {
+            "status": str(item.get("status") or "M").strip()[:16] or "M",
+            "path": path[:500],
+        }
+        old_path = str(item.get("old_path") or "").strip()
+        if old_path:
+            normalized["old_path"] = old_path[:500]
+        out.append(normalized)
+        if len(out) >= 256:
+            break
+    return out
+
+
+def _sanitize_patchset_manifest_value(value, *, depth: int = 0):
+    if depth >= 4:
+        return "..."
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, list):
+        return [_sanitize_patchset_manifest_value(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, dict):
+        out: dict[str, object] = {}
+        for key, item in list(value.items())[:40]:
+            out[str(key)[:120]] = _sanitize_patchset_manifest_value(item, depth=depth + 1)
+        return out
+    return str(value)[:500]
+
+
+def _coerce_patchset_artifact_manifest(raw) -> dict:
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        return {}
+    return _sanitize_patchset_manifest_value(data)
+
+
+def _patchset_identity(task_id: str, base_sha: str, head_sha: str) -> str:
+    digest = hashlib.sha1(f"{task_id}|{base_sha}|{head_sha}".encode("utf-8")).hexdigest()
+    return f"ps_{digest[:24]}"
+
+
+def _save_task_patchset_in_conn(
+    conn,
+    task_id: str,
+    patchset: dict | None,
+    *,
+    update_task_refs: bool = True,
+) -> dict | None:
+    payload = dict(patchset or {})
+    task_id = str(task_id or payload.get("task_id") or "").strip()
+    if not task_id:
+        return None
+
+    base_sha = str(payload.get("base_sha") or "").strip()[:120]
+    head_sha = str(
+        payload.get("head_sha")
+        or payload.get("commit_hash")
+        or ""
+    ).strip()[:120]
+    patchset_id = str(payload.get("id") or "").strip()[:80]
+    if not patchset_id:
+        if not head_sha:
+            return None
+        patchset_id = _patchset_identity(task_id, base_sha, head_sha)
+
+    existing_row = conn.execute(
+        "SELECT * FROM task_patchsets WHERE id=?",
+        (patchset_id,),
+    ).fetchone()
+    existing = dict(existing_row) if existing_row else {}
+
+    commit_list = _coerce_patchset_commit_list(payload.get("commit_list"))
+    changed_files = _coerce_patchset_changed_files(
+        payload.get("changed_files") if "changed_files" in payload else existing.get("changed_files")
+    )
+    try:
+        commit_count = int(payload.get("commit_count"))
+    except Exception:
+        commit_count = 0
+    if commit_count <= 0:
+        commit_count = len(commit_list)
+    if commit_count <= 0 and head_sha:
+        commit_count = 1
+
+    status = _normalize_patchset_status(payload.get("status"))
+    source_branch = str(payload.get("source_branch") or "").strip()[:255]
+    diff_stat = str(payload.get("diff_stat") or "").strip()[:4000]
+    merge_strategy = str(payload.get("merge_strategy") or "").strip()[:80]
+    summary = str(payload.get("summary") or payload.get("conclusion") or "").strip()[:1000]
+    artifact_path = str(payload.get("artifact_path") or "").strip()[:1000] or None
+    artifact_manifest = _coerce_patchset_artifact_manifest(
+        payload.get("artifact_manifest") if "artifact_manifest" in payload else existing.get("artifact_manifest")
+    )
+    created_by_agent = str(payload.get("created_by_agent") or "").strip()[:80]
+    worktree_clean = payload.get("worktree_clean")
+    if isinstance(worktree_clean, str):
+        worktree_clean = worktree_clean.strip().lower() not in {"0", "false", "off", "no"}
+    worktree_clean_flag = 1 if worktree_clean is not False else 0
+    queue_status = _normalize_patchset_queue_status(
+        payload.get("queue_status"),
+        default=str(existing.get("queue_status") or "").strip().lower(),
+    )
+    if not queue_status:
+        queue_status = _infer_patchset_queue_status(
+            status,
+            default=str(existing.get("queue_status") or "").strip().lower(),
+        )
+    queue_reason = str(payload.get("queue_reason") or existing.get("queue_reason") or "").strip()[:240]
+    reviewed_main_sha = str(payload.get("reviewed_main_sha") or existing.get("reviewed_main_sha") or "").strip()[:120]
+    queue_main_sha = str(payload.get("queue_main_sha") or existing.get("queue_main_sha") or "").strip()[:120]
+
+    now = _now()
+    approved_at = str(payload.get("approved_at") or existing.get("approved_at") or "").strip()
+    if status == PATCHSET_STATUS_APPROVED and not approved_at:
+        approved_at = now
+    queued_at = str(payload.get("queued_at") or existing.get("queued_at") or "").strip()
+    if queue_status == PATCHSET_QUEUE_QUEUED and not queued_at:
+        queued_at = approved_at or now
+    queue_started_at = str(payload.get("queue_started_at") or existing.get("queue_started_at") or "").strip()
+    if queue_status == PATCHSET_QUEUE_PROCESSING and not queue_started_at:
+        queue_started_at = now
+    queue_finished_at = str(payload.get("queue_finished_at") or existing.get("queue_finished_at") or "").strip()
+    if queue_status in {PATCHSET_QUEUE_MERGED, PATCHSET_QUEUE_STALE, PATCHSET_QUEUE_FAILED} and not queue_finished_at:
+        queue_finished_at = now
+    merged_at = str(payload.get("merged_at") or existing.get("merged_at") or "").strip()
+    if status == PATCHSET_STATUS_MERGED and not merged_at:
+        merged_at = now
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE task_patchsets
+               SET task_id=?,
+                   source_branch=?,
+                   base_sha=?,
+                   head_sha=?,
+                   commit_count=?,
+                   commit_list=?,
+                   changed_files=?,
+                   artifact_manifest=?,
+                   diff_stat=?,
+                   status=?,
+                   worktree_clean=?,
+                   merge_strategy=?,
+                   summary=?,
+                   artifact_path=?,
+                   created_by_agent=?,
+                   queue_status=?,
+                   queue_reason=?,
+                   queued_at=?,
+                   queue_started_at=?,
+                   queue_finished_at=?,
+                   approved_at=?,
+                   merged_at=?,
+                   reviewed_main_sha=?,
+                   queue_main_sha=?,
+                   updated_at=?
+             WHERE id=?
+            """,
+            (
+                task_id,
+                source_branch,
+                base_sha,
+                head_sha,
+                max(0, int(commit_count)),
+                json.dumps(commit_list, ensure_ascii=False),
+                json.dumps(changed_files, ensure_ascii=False),
+                json.dumps(artifact_manifest, ensure_ascii=False),
+                diff_stat,
+                status,
+                worktree_clean_flag,
+                merge_strategy,
+                summary,
+                artifact_path,
+                created_by_agent,
+                queue_status,
+                queue_reason,
+                queued_at or None,
+                queue_started_at or None,
+                queue_finished_at or None,
+                approved_at or None,
+                merged_at or None,
+                reviewed_main_sha,
+                queue_main_sha,
+                now,
+                patchset_id,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO task_patchsets
+            (id, task_id, source_branch, base_sha, head_sha, commit_count, commit_list, changed_files, artifact_manifest, diff_stat,
+             status, worktree_clean, merge_strategy, summary, artifact_path, created_by_agent,
+             queue_status, queue_reason, queued_at, queue_started_at, queue_finished_at, approved_at,
+             merged_at, reviewed_main_sha, queue_main_sha, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                patchset_id,
+                task_id,
+                source_branch,
+                base_sha,
+                head_sha,
+                max(0, int(commit_count)),
+                json.dumps(commit_list, ensure_ascii=False),
+                json.dumps(changed_files, ensure_ascii=False),
+                json.dumps(artifact_manifest, ensure_ascii=False),
+                diff_stat,
+                status,
+                worktree_clean_flag,
+                merge_strategy,
+                summary,
+                artifact_path,
+                created_by_agent,
+                queue_status,
+                queue_reason,
+                queued_at or None,
+                queue_started_at or None,
+                queue_finished_at or None,
+                approved_at or None,
+                merged_at or None,
+                reviewed_main_sha,
+                queue_main_sha,
+                now,
+                now,
+            ),
+        )
+
+    if update_task_refs:
+        if status in {PATCHSET_STATUS_SUBMITTED, PATCHSET_STATUS_APPROVED}:
+            conn.execute(
+                """
+                UPDATE task_patchsets
+                   SET status=?,
+                       queue_status='',
+                       queue_reason='superseded_by_newer_patchset',
+                       queue_finished_at=COALESCE(queue_finished_at, ?),
+                       updated_at=?
+                 WHERE task_id=?
+                   AND id<>?
+                   AND status NOT IN (?, ?, ?)
+                """,
+                (
+                    PATCHSET_STATUS_SUPERSEDED,
+                    now,
+                    now,
+                    task_id,
+                    patchset_id,
+                    PATCHSET_STATUS_MERGED,
+                    PATCHSET_STATUS_SUPERSEDED,
+                    status,
+                ),
+            )
+        if status == PATCHSET_STATUS_MERGED:
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET current_patchset_id=?,
+                       current_patchset_status=?,
+                       merged_patchset_id=?,
+                       updated_at=?
+                 WHERE id=?
+                """,
+                (patchset_id, status, patchset_id, now, task_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET current_patchset_id=?,
+                       current_patchset_status=?,
+                       updated_at=?
+                 WHERE id=?
+                """,
+                (patchset_id, status, now, task_id),
+            )
+
+    row = conn.execute(
+        "SELECT * FROM task_patchsets WHERE id=?",
+        (patchset_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def save_task_patchset(task_id: str, patchset: dict | None, *, update_task_refs: bool = True) -> dict | None:
+    conn = get_conn()
+    try:
+        row = _save_task_patchset_in_conn(
+            conn,
+            task_id=task_id,
+            patchset=patchset,
+            update_task_refs=update_task_refs,
+        )
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
+def get_task_patchset(patchset_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM task_patchsets WHERE id=?",
+            (patchset_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_task_patchsets(task_id: str) -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_patchsets WHERE task_id=? ORDER BY created_at ASC, id ASC",
+            (task_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_patchset_metrics(project_id: str | None = None) -> dict:
+    conn = get_conn()
+    try:
+        patchset_params: list[object] = []
+        patchset_where = ""
+        if project_id:
+            patchset_where = "WHERE t.project_id=?"
+            patchset_params.append(project_id)
+        patchset_rows = conn.execute(
+            f"""
+            SELECT ps.*, t.project_id, t.status AS task_status, t.updated_at AS task_updated_at
+              FROM task_patchsets ps
+              JOIN tasks t ON t.id = ps.task_id
+             {patchset_where}
+            ORDER BY ps.created_at ASC, ps.id ASC
+            """,
+            tuple(patchset_params),
+        ).fetchall()
+
+        handoff_params: list[object] = []
+        handoff_where = ""
+        if project_id:
+            handoff_where = "WHERE t.project_id=?"
+            handoff_params.append(project_id)
+        handoff_rows = conn.execute(
+            f"""
+            SELECT h.task_id, h.stage, h.status_to, h.created_at
+              FROM task_handoffs h
+              JOIN tasks t ON t.id = h.task_id
+             {handoff_where}
+            """,
+            tuple(handoff_params),
+        ).fetchall()
+
+        patchsets = [dict(row) for row in patchset_rows]
+        handoffs = [dict(row) for row in handoff_rows]
+        all_time = _compute_patchset_metrics_window(patchsets, handoffs, window_hours=None)
+        recent_24h = _compute_patchset_metrics_window(patchsets, handoffs, window_hours=24)
+        return {
+            "project_id": project_id,
+            **all_time,
+            "windows": {
+                "all_time": all_time,
+                "last_24h": recent_24h,
+            },
+        }
+    finally:
+        conn.close()
+
+
+def _compute_patchset_metrics_window(
+    patchsets: list[dict],
+    handoffs: list[dict],
+    *,
+    window_hours: int | None,
+) -> dict:
+    since_dt = None
+    if window_hours:
+        since_dt = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=max(1, int(window_hours)))
+
+    def _in_window(ts_value, *, allow_empty: bool = False) -> bool:
+        if since_dt is None:
+            return True
+        parsed = _parse_iso_datetime(ts_value)
+        if not parsed:
+            return allow_empty
+        return parsed >= since_dt
+
+    visible_patchsets = [item for item in patchsets if _in_window(item.get("created_at"))]
+    visible_handoffs = [item for item in handoffs if _in_window(item.get("created_at"))]
+    total_patchsets = len(visible_patchsets)
+    active_patchsets = [
+        item for item in visible_patchsets
+        if str(item.get("status") or "").strip().lower() not in {PATCHSET_STATUS_DRAFT, PATCHSET_STATUS_SUPERSEDED}
+    ]
+    queued = sum(1 for item in visible_patchsets if str(item.get("queue_status") or "").strip().lower() == PATCHSET_QUEUE_QUEUED)
+    processing = sum(1 for item in visible_patchsets if str(item.get("queue_status") or "").strip().lower() == PATCHSET_QUEUE_PROCESSING)
+    stale = sum(1 for item in visible_patchsets if str(item.get("status") or "").strip().lower() == PATCHSET_STATUS_STALE)
+    merged = sum(1 for item in visible_patchsets if str(item.get("status") or "").strip().lower() == PATCHSET_STATUS_MERGED)
+    review_pass = sum(1 for item in visible_handoffs if str(item.get("stage") or "").strip() == "review_to_manager")
+    review_return = sum(1 for item in visible_handoffs if str(item.get("stage") or "").strip() == "review_to_dev")
+    manager_pass = sum(1 for item in visible_handoffs if str(item.get("stage") or "").strip() == "merge_to_acceptance")
+    manager_return = sum(1 for item in visible_handoffs if str(item.get("stage") or "").strip() == "merge_to_dev")
+    preflight_failed = sum(
+        1 for item in visible_handoffs
+        if str(item.get("stage") or "").strip() in {"dev_dirty_patchset", "dev_commit_required", "dev_no_progress"}
+        or str(item.get("stage") or "").strip().endswith("_dirty_patchset")
+    )
+
+    review_cycles_by_task: dict[str, int] = {}
+    patchsets_by_task: dict[str, int] = {}
+    acceptance_durations: list[float] = []
+    queue_latencies: list[float] = []
+    stale_reason_counts: dict[str, int] = {}
+    first_patchset_by_task: dict[str, datetime] = {}
+    for item in patchsets:
+        task_key = str(item.get("task_id") or "").strip()
+        if not task_key:
+            continue
+        created_at = _parse_iso_datetime(item.get("created_at"))
+        if created_at and task_key not in first_patchset_by_task:
+            first_patchset_by_task[task_key] = created_at
+    for item in active_patchsets:
+        task_key = str(item.get("task_id") or "").strip()
+        if not task_key:
+            continue
+        patchsets_by_task[task_key] = patchsets_by_task.get(task_key, 0) + 1
+    for item in visible_handoffs:
+        task_key = str(item.get("task_id") or "").strip()
+        if not task_key:
+            continue
+        if str(item.get("stage") or "").strip() in {"review_to_manager", "review_to_dev"}:
+            review_cycles_by_task[task_key] = review_cycles_by_task.get(task_key, 0) + 1
+
+    accepted_tasks: set[str] = set()
+    for item in patchsets:
+        task_key = str(item.get("task_id") or "").strip()
+        if not task_key or task_key in accepted_tasks:
+            continue
+        task_status = str(item.get("task_status") or "").strip().lower()
+        finished = _parse_iso_datetime(item.get("task_updated_at"))
+        if task_status not in {"pending_acceptance", "completed"} or not finished:
+            continue
+        if since_dt is not None and finished < since_dt:
+            continue
+        started = first_patchset_by_task.get(task_key)
+        if started and finished >= started:
+            acceptance_durations.append((finished - started).total_seconds())
+            accepted_tasks.add(task_key)
+
+    for item in patchsets:
+        final_ts = _parse_iso_datetime(item.get("merged_at") or item.get("queue_finished_at"))
+        if since_dt is not None and (not final_ts or final_ts < since_dt):
+            continue
+        queued_at = _parse_iso_datetime(item.get("queued_at"))
+        merged_at = _parse_iso_datetime(item.get("merged_at"))
+        if queued_at and merged_at and merged_at >= queued_at:
+            queue_latencies.append((merged_at - queued_at).total_seconds())
+        reason = str(item.get("queue_reason") or "").strip()
+        if str(item.get("status") or "").strip().lower() == PATCHSET_STATUS_STALE and reason:
+            stale_reason_counts[reason] = stale_reason_counts.get(reason, 0) + 1
+
+    avg_review_cycles = (
+        sum(review_cycles_by_task.values()) / len(review_cycles_by_task)
+        if review_cycles_by_task else 0.0
+    )
+    avg_patchsets_per_task = (
+        sum(patchsets_by_task.values()) / len(patchsets_by_task)
+        if patchsets_by_task else 0.0
+    )
+    avg_submit_to_acceptance_secs = (
+        sum(acceptance_durations) / len(acceptance_durations)
+        if acceptance_durations else 0.0
+    )
+    avg_queue_latency_secs = (
+        sum(queue_latencies) / len(queue_latencies)
+        if queue_latencies else 0.0
+    )
+    return {
+        "window": "last_24h" if window_hours else "all_time",
+        "window_hours": int(window_hours or 0),
+        "total_patchsets": total_patchsets,
+        "active_patchsets": len(active_patchsets),
+        "queued_patchsets": queued,
+        "processing_patchsets": processing,
+        "merged_patchsets": merged,
+        "stale_patchsets": stale,
+        "stale_patchset_rate": (stale / len(active_patchsets)) if active_patchsets else 0.0,
+        "review_return_rate": (review_return / (review_pass + review_return)) if (review_pass + review_return) else 0.0,
+        "manager_return_rate": (manager_return / (manager_pass + manager_return)) if (manager_pass + manager_return) else 0.0,
+        "preflight_fail_rate": (preflight_failed / total_patchsets) if total_patchsets else 0.0,
+        "review_cycles_per_task": avg_review_cycles,
+        "patchsets_per_task": avg_patchsets_per_task,
+        "avg_submit_to_acceptance_secs": avg_submit_to_acceptance_secs,
+        "avg_queue_latency_secs": avg_queue_latency_secs,
+        "stale_reason_counts": stale_reason_counts,
+        "review_pass_count": review_pass,
+        "review_return_count": review_return,
+        "manager_pass_count": manager_pass,
+        "manager_return_count": manager_return,
+        "preflight_fail_count": preflight_failed,
+    }
+
+
 def transition_task(
     task_id: str,
     fields: dict | None = None,
     handoff: dict | None = None,
     log: dict | None = None,
+    patchset: dict | None = None,
     expected_run_id: str | None = None,
     expected_lease_token: str | None = None,
 ) -> dict | None:
@@ -3569,6 +4263,7 @@ def transition_task(
         )
         created_handoff = None
         created_log = None
+        created_patchset = None
         if not is_cancelled and handoff:
             created_handoff = _add_handoff_in_conn(
                 conn,
@@ -3585,6 +4280,18 @@ def transition_task(
                 payload=handoff.get("payload") if isinstance(handoff.get("payload"), dict) else {},
                 artifact_path=handoff.get("artifact_path"),
             )
+        if not is_cancelled and patchset:
+            created_patchset = _save_task_patchset_in_conn(
+                conn,
+                task_id=task_id,
+                patchset=patchset,
+                update_task_refs=True,
+            )
+            if created_patchset:
+                row = conn.execute(_join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)).fetchone()
+                task = dict(row) if row else task
+                if task:
+                    _attach_dependency_state_to_tasks_in_conn(conn, [task])
         if not is_cancelled and log:
             created_log = _add_log_in_conn(
                 conn,
@@ -3593,7 +4300,12 @@ def transition_task(
                 message=str(log.get("message") or ""),
             )
         conn.commit()
-        return {"task": task, "handoff": created_handoff, "log": created_log}
+        return {
+            "task": task,
+            "handoff": created_handoff,
+            "log": created_log,
+            "patchset": created_patchset,
+        }
     except Exception:
         conn.rollback()
         raise
