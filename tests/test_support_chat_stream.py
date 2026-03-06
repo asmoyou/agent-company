@@ -194,6 +194,15 @@ class SupportChatStreamApiTest(unittest.TestCase):
         self.assertEqual(payload["repetition_penalty"], 1.0)
         self.assertEqual(payload["max_tokens"], 1024)
 
+    def test_support_system_prompt_includes_latest_platform_features(self):
+        prompt = app_module.SUPPORT_SYSTEM_PROMPT
+
+        self.assertIn("需求反馈清单", prompt)
+        self.assertIn("AI自动排期中", prompt)
+        self.assertIn("Patchset", prompt)
+        self.assertIn("管理员账号不提供需求提交入口", prompt)
+        self.assertIn("模型自检", prompt)
+
     def test_support_chat_stream_surfaces_upstream_error(self):
         def _factory(**_kwargs):
             return _FakeUpstreamResponse(status_code=503, body='{"error":"gateway down"}')
