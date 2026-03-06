@@ -4301,6 +4301,27 @@ async def update_feedback_request(
     return _format_feedback_request(updated, viewer_is_admin=True)
 
 
+def _build_agent_prompt_generation_meta_prompt(description: str) -> str:
+    desc = str(description or "").strip()
+    return (
+        "你是一个专业的AI Agent提示词工程师。"
+        f"请为以下用途的AI Agent编写一个详细的提示词模板：\n\n{desc}\n\n"
+        "要求：\n"
+        "1. 提示词清晰、具体、可操作。\n"
+        "2. 按需使用以下占位符变量（用花括号包裹）：\n"
+        "   {task_title} - 任务标题\n"
+        "   {task_description} - 任务的详细需求描述\n"
+        "   {rework_section} - 审查反馈（返工时会有内容，初次为空）\n"
+        "3. 生成的提示词必须显式包含“交付规范/完成定义”一类规则，明确要求该 Agent：\n"
+        "   - 必须把结果写入当前工作区文件，不能只在终端输出正文。\n"
+        "   - 完成后必须自行核对交付物，再执行 git add -A 和 git commit -m \"...\"。\n"
+        "   - 最终回复中必须说明交付文件路径、是否已提交，以及 commit hash。\n"
+        "   - 如果没有写入文件或没有提交，不得声称任务已完成或已交付。\n"
+        "4. 如果任务描述里包含交付物、验收标准、范围或约束，提示词要要求执行时严格遵守这些条目。\n"
+        "5. 只输出提示词内容本身，不要任何前缀说明或解释。"
+    )
+
+
 # ── Agent Types ────────────────────────────────────────────────────────────────
 
 @app.get("/agent-types")
@@ -4311,17 +4332,7 @@ async def list_agent_types():
 @app.post("/agent-types/generate-prompt")
 async def generate_agent_prompt(body: GeneratePromptRequest, _admin: dict = Depends(require_admin)):
     """Call the local CLI to generate a prompt template for a new agent."""
-    meta_prompt = (
-        "你是一个专业的AI Agent提示词工程师。"
-        f"请为以下用途的AI Agent编写一个详细的提示词模板：\n\n{body.description}\n\n"
-        "要求：\n"
-        "1. 提示词清晰、具体、可操作\n"
-        "2. 按需使用以下占位符变量（用花括号包裹）：\n"
-        "   {task_title} - 任务标题\n"
-        "   {task_description} - 任务的详细需求描述\n"
-        "   {rework_section} - 审查反馈（返工时会有内容，初次为空）\n"
-        "3. 只输出提示词内容本身，不要任何前缀说明或解释"
-    )
+    meta_prompt = _build_agent_prompt_generation_meta_prompt(body.description)
     cli = body.cli if body.cli in ("claude", "codex") else "codex"
     cmd = ["claude", "--dangerously-skip-permissions", "-p", meta_prompt] if cli == "claude" \
           else ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", meta_prompt]
