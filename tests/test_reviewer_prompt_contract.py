@@ -75,6 +75,39 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不修改生产逻辑", prompt)
         self.assertIn("只要任一验收项缺少证据", prompt)
 
+    async def test_process_task_rejects_commit_that_is_not_independently_mergeable(self):
+        target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
+        parent_commit = "7f9c2ba4e88f827d616045507605853ed73b809c"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", f"{target_commit}^"):
+                return parent_commit
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+        self.agent._is_ancestor = mock.AsyncMock(return_value=False)
+        self.agent._is_patch_equivalent_on_ref = mock.AsyncMock(return_value=False)
+        self.agent.run_cli = mock.AsyncMock(return_value=(0, '{"decision":"approve","comment":"ok"}'))
+
+        task = {
+            "id": "task-2",
+            "title": "补全接口测试覆盖",
+            "description": "",
+            "status": "in_review",
+            "commit_hash": target_commit,
+            "assigned_agent": "developer",
+            "dev_agent": "developer",
+        }
+
+        await self.agent.process_task(task)
+
+        self.agent.run_cli.assert_not_awaited()
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "review_to_dev")
+        self.assertIn("提交基线不一致", call.kwargs["handoff"]["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

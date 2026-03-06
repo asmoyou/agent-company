@@ -70,6 +70,53 @@ class ReviewerAgent(BaseAgent):
         m = re.search(r"\[review_retry=(\d+)/(\d+)\]", str(feedback or ""))
         return int(m.group(1)) if m else 0
 
+    async def _is_ancestor(self, repo_root: Path, ancestor: str, ref: str) -> bool:
+        try:
+            await self.git("merge-base", "--is-ancestor", ancestor, ref, cwd=repo_root)
+            return True
+        except Exception:
+            return False
+
+    async def _is_patch_equivalent_on_ref(self, repo_root: Path, commit_hash: str, ref: str) -> bool:
+        commit = str(commit_hash or "").strip()
+        if not commit:
+            return False
+        try:
+            out = (await self.git("cherry", ref, commit, cwd=repo_root)).strip()
+        except Exception:
+            return False
+        if not out:
+            return False
+        for raw in out.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            marker, candidate = parts[0], parts[1]
+            if marker not in {"+", "-"}:
+                continue
+            if candidate.startswith(commit) or commit.startswith(candidate):
+                return marker == "-"
+        return False
+
+    def _build_non_mergeable_commit_feedback(
+        self,
+        *,
+        commit_hash: str,
+        parent_commit: str,
+        dev_branch: str,
+    ) -> str:
+        return (
+            f"[提交基线不一致] 目标 commit {commit_hash[:12]} 的父提交 "
+            f"{parent_commit[:12]} 不在 main 上（或非等价提交），该提交不是可独立合并变更。\n"
+            "修改建议：\n"
+            f"1. 在 `{dev_branch}` 基于最新 `main` 重建本次改动并生成新 commit；\n"
+            "2. 保证新 commit 仅包含本任务文件，不携带历史任务残留改动；\n"
+            "3. 交接时附上 `git show --name-status <new_commit>` 结果摘要。"
+        )
+
     async def _handle_system_error(
         self,
         task: dict,
@@ -259,6 +306,56 @@ class ReviewerAgent(BaseAgent):
                     f"{top.get('short') or str(commit_hash)[:12]}（候选 {len(related_history_commits)} 条）"
                 ),
             )
+
+        parent_commit = ""
+        try:
+            parent_commit = (await self.git("rev-parse", f"{commit_hash}^", cwd=proj_root)).strip()
+        except Exception:
+            parent_commit = ""
+        if parent_commit:
+            parent_on_main = await self._is_ancestor(proj_root, parent_commit, "main")
+            if not parent_on_main:
+                parent_on_main = await self._is_patch_equivalent_on_ref(
+                    proj_root, parent_commit, "main"
+                )
+            if not parent_on_main:
+                feedback = self._build_non_mergeable_commit_feedback(
+                    commit_hash=commit_hash,
+                    parent_commit=parent_commit,
+                    dev_branch=branch,
+                )
+                await self.transition_task(
+                    task_id,
+                    fields={
+                        "status": "needs_changes",
+                        "assignee": None,
+                        "assigned_agent": dev_agent,
+                        "dev_agent": dev_agent,
+                        "review_feedback": feedback[:1000],
+                        "feedback_source": self.name,
+                        "feedback_stage": "review_to_dev",
+                        "feedback_actor": self.name,
+                    },
+                    handoff={
+                        "stage": "review_to_dev",
+                        "to_agent": dev_agent,
+                        "status_from": "in_review",
+                        "status_to": "needs_changes",
+                        "title": "审查退回开发",
+                        "summary": feedback[:300],
+                        "commit_hash": commit_hash,
+                        "conclusion": "提交基线不一致，退回开发重建可独立合并的 commit",
+                        "payload": {
+                            "decision": "request_changes",
+                            "commit_hash": commit_hash,
+                            "source_branch": branch,
+                            "related_history_commits": related_history_commits,
+                            "reason": "non_mergeable_commit_baseline",
+                        },
+                    },
+                    log_message=f"↩ 需修改: {feedback[:200]}",
+                )
+                return
 
         decision_dir = worktree_dev / ".opc" / "decisions"
         decision_dir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -100,6 +101,78 @@ class TransitionTaskAtomicityTest(unittest.TestCase):
             log={"agent": "developer", "message": "submitted"},
         )
         self.assertIsNone(result)
+
+    def test_feedback_history_keeps_cross_stage_issues_open(self):
+        task = self._create_task(status="todo")
+
+        db.transition_task(
+            task["id"],
+            fields={
+                "status": "needs_changes",
+                "review_feedback": "manager: rebuild on latest main",
+                "feedback_source": "manager",
+                "feedback_stage": "merge_to_dev",
+                "feedback_actor": "manager",
+            },
+        )
+        db.transition_task(
+            task["id"],
+            fields={
+                "status": "needs_changes",
+                "review_feedback": "reviewer: remove out-of-scope files",
+                "feedback_source": "reviewer",
+                "feedback_stage": "review_to_dev",
+                "feedback_actor": "reviewer",
+            },
+        )
+
+        refreshed = db.get_task(task["id"])
+        history = json.loads(refreshed["review_feedback_history"])
+        self.assertEqual(len(history), 2)
+        self.assertFalse(history[0]["resolved"])
+        self.assertFalse(history[1]["resolved"])
+
+    def test_feedback_history_only_supersedes_same_stage_feedback(self):
+        task = self._create_task(status="todo")
+
+        db.transition_task(
+            task["id"],
+            fields={
+                "status": "needs_changes",
+                "review_feedback": "manager: rebuild on latest main",
+                "feedback_source": "manager",
+                "feedback_stage": "merge_to_dev",
+                "feedback_actor": "manager",
+            },
+        )
+        db.transition_task(
+            task["id"],
+            fields={
+                "status": "needs_changes",
+                "review_feedback": "reviewer: first review issue",
+                "feedback_source": "reviewer",
+                "feedback_stage": "review_to_dev",
+                "feedback_actor": "reviewer",
+            },
+        )
+        db.transition_task(
+            task["id"],
+            fields={
+                "status": "needs_changes",
+                "review_feedback": "reviewer: second review issue",
+                "feedback_source": "reviewer",
+                "feedback_stage": "review_to_dev",
+                "feedback_actor": "reviewer",
+            },
+        )
+
+        refreshed = db.get_task(task["id"])
+        history = json.loads(refreshed["review_feedback_history"])
+        self.assertEqual(len(history), 3)
+        self.assertFalse(history[0]["resolved"])
+        self.assertTrue(history[1]["resolved"])
+        self.assertEqual(history[1]["resolved_reason"], "superseded")
+        self.assertFalse(history[2]["resolved"])
 
 
 if __name__ == "__main__":
