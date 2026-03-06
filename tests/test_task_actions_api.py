@@ -1029,6 +1029,39 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(data["task"]["status"], "in_review")
         self.assertEqual(data["task"]["assigned_agent"], "reviewer")
 
+    def test_retry_blocked_action_resumes_generic_delivery_block(self):
+        self._create_custom_agent(key="writer")
+        task = self._create_task(
+            status="blocked",
+            assigned_agent="writer",
+        )
+        db.add_handoff(
+            task["id"],
+            stage="writer_delivery_blocked",
+            from_agent="writer",
+            to_agent="writer",
+            status_from="todo",
+            status_to="blocked",
+            title="Writer 连续未完成交付",
+            summary="连续 3 次未产出可交付文件，任务转为 blocked",
+            conclusion="Writer 连续 3 次未完成交付，请人工检查后再重试",
+            payload={
+                "delivery_blocked": True,
+                "resume_status": "todo",
+                "resume_assigned_agent": "writer",
+                "latest_failure_stage": "writer_no_progress",
+            },
+        )
+        res = self.client.post(
+            f"/tasks/{task['id']}/actions",
+            json={"action": "retry_blocked"},
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "todo")
+        self.assertEqual(data["task"]["assigned_agent"], "writer")
+
     def test_decompose_action_moves_todo_to_decompose(self):
         task = self._create_task(status="todo")
         res = self.client.post(

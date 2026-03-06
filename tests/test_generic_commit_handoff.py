@@ -55,6 +55,7 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         )
         self.agent.run_cli = mock.AsyncMock(return_value=(0, "done"))
         self.agent.stop_if_task_cancelled = mock.AsyncMock(return_value=False)
+        self.agent.get_handoffs = mock.AsyncMock(return_value=[])
         self.agent.add_log = mock.AsyncMock()
         self.agent.add_alert = mock.AsyncMock()
         self.agent.transition_task = mock.AsyncMock(
@@ -201,6 +202,82 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## 执行基线（必须遵守）", prompt)
         self.assertIn("docs/faq.md", prompt)
         self.assertIn("FAQ 至少覆盖 10 个常见问题", prompt)
+
+    async def test_no_progress_blocks_after_three_consecutive_delivery_failures(self):
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+        self.agent.get_handoffs = mock.AsyncMock(
+            return_value=[
+                {"stage": "writer_commit_required"},
+                {"stage": "writer_no_progress"},
+            ]
+        )
+
+        task = {
+            "id": "task-4",
+            "title": "no delivery",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "blocked")
+        self.assertEqual(call.kwargs["fields"]["assigned_agent"], "writer")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "writer_delivery_blocked")
+        payload = call.kwargs["handoff"]["payload"]
+        self.assertTrue(payload["delivery_blocked"])
+        self.assertEqual(payload["delivery_retry_count"], 3)
+        self.assertEqual(payload["resume_status"], "todo")
+        self.assertEqual(payload["latest_failure_stage"], "writer_no_progress")
+
+    async def test_commit_required_blocks_after_three_consecutive_delivery_failures(self):
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return " notes.md | 10 +++++-----"
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+        self.agent.get_handoffs = mock.AsyncMock(
+            return_value=[
+                {"stage": "writer_no_progress"},
+                {"stage": "writer_commit_required"},
+            ]
+        )
+
+        task = {
+            "id": "task-5",
+            "title": "forgot to commit",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        self.agent.transition_task.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "blocked")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "writer_delivery_blocked")
+        payload = call.kwargs["handoff"]["payload"]
+        self.assertTrue(payload["requires_cli_commit"])
+        self.assertEqual(payload["delivery_retry_count"], 3)
+        self.assertEqual(payload["latest_failure_stage"], "writer_commit_required")
 
 
 if __name__ == "__main__":

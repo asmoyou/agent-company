@@ -70,6 +70,112 @@ class GenericAgent(BaseAgent):
     def _post_commit_sync_stage(self) -> str:
         return "developer_post_commit_sync" if self._uses_developer_profile() else f"{self.name}_post_commit_sync"
 
+    def _delivery_retry_limit(self) -> int:
+        return 0 if self._uses_developer_profile() else 3
+
+    def _delivery_retry_stages(self) -> set[str]:
+        return {self._commit_required_stage(), self._no_progress_stage()}
+
+    def _delivery_blocked_stage(self) -> str:
+        return f"{self.name}_delivery_blocked"
+
+    async def _current_delivery_retry_count(self, task_id: str) -> int:
+        retry_limit = self._delivery_retry_limit()
+        if retry_limit <= 0:
+            return 0
+        handoffs = await self.get_handoffs(task_id)
+        if not handoffs:
+            return 0
+        tracked_stages = self._delivery_retry_stages()
+        count = 0
+        for item in reversed(handoffs):
+            stage = str(item.get("stage") or "").strip()
+            if stage in tracked_stages:
+                count += 1
+                continue
+            break
+        return count
+
+    async def _transition_delivery_failure(
+        self,
+        *,
+        task_id: str,
+        prev_status: str,
+        failure_stage: str,
+        failure_title: str,
+        failure_summary: str,
+        failure_conclusion: str,
+        failure_payload: dict,
+        artifact_path: str,
+        retry_reason: str,
+        retry_log_message: str,
+    ) -> None:
+        retry_limit = self._delivery_retry_limit()
+        retry_count = (
+            await self._current_delivery_retry_count(task_id) + 1
+            if retry_limit > 0
+            else 1
+        )
+        payload = {
+            **failure_payload,
+            "delivery_retry_count": retry_count,
+            "delivery_retry_limit": retry_limit,
+        }
+        if retry_limit > 0 and retry_count >= retry_limit:
+            await self.transition_task(
+                task_id,
+                fields={
+                    "status": "blocked",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                },
+                handoff={
+                    "stage": self._delivery_blocked_stage(),
+                    "to_agent": self.name,
+                    "status_from": prev_status,
+                    "status_to": "blocked",
+                    "title": f"{self._display_name} 连续未完成交付",
+                    "summary": f"连续 {retry_count} 次{retry_reason}，任务转为 blocked",
+                    "conclusion": (
+                        f"{self._display_name} 连续 {retry_count} 次未完成交付，"
+                        "请人工检查提示词或执行链路后再重试"
+                    ),
+                    "payload": {
+                        **payload,
+                        "delivery_blocked": True,
+                        "resume_status": prev_status,
+                        "resume_assigned_agent": self.name,
+                        "latest_failure_stage": failure_stage,
+                    },
+                    "artifact_path": artifact_path,
+                },
+                log_message=(
+                    f"连续 {retry_count} 次{retry_reason}，任务转为 blocked，等待人工处理"
+                ),
+            )
+            return
+
+        update_fields = {"status": prev_status, "assignee": None}
+        if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+            update_fields["assigned_agent"] = self.name
+            update_fields["dev_agent"] = self.name
+        await self.transition_task(
+            task_id,
+            fields=update_fields,
+            handoff={
+                "stage": failure_stage,
+                "to_agent": self.name,
+                "status_from": prev_status,
+                "status_to": prev_status,
+                "title": failure_title,
+                "summary": failure_summary,
+                "conclusion": failure_conclusion,
+                "payload": payload,
+                "artifact_path": artifact_path,
+            },
+            log_message=retry_log_message,
+        )
+
     def _dirty_patchset_transition_spec(
         self,
         *,
@@ -401,64 +507,56 @@ class GenericAgent(BaseAgent):
             )
             if await self.stop_if_task_cancelled(task_id, "检测到未提交变更回退前"):
                 return
-            update_fields = {"status": prev_status, "assignee": None}
-            if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
-                update_fields["assigned_agent"] = self.name
-                update_fields["dev_agent"] = self.name
-            await self.transition_task(
-                task_id,
-                fields=update_fields,
-                handoff={
-                    "stage": self._commit_required_stage(),
-                    "to_agent": self.name,
-                    "status_from": prev_status,
-                    "status_to": prev_status,
-                    "title": "开发需在 CLI 内提交" if self._uses_developer_profile() else f"{self._display_name} 需在 CLI 内提交",
-                    "summary": "检测到未提交改动，未自动提交，保持当前状态",
-                    "conclusion": "请在 CLI 内完成提交后再交接",
-                    "payload": {
-                        "has_commit": False,
-                        "requires_cli_commit": True,
-                        "source_branch": branch,
-                        "diff_stat": diff.strip()[:1200],
-                        "head_changed": cli_created_commit,
-                    },
-                    "artifact_path": str(worktree_dev),
+            await self._transition_delivery_failure(
+                task_id=task_id,
+                prev_status=prev_status,
+                failure_stage=self._commit_required_stage(),
+                failure_title=(
+                    "开发需在 CLI 内提交"
+                    if self._uses_developer_profile()
+                    else f"{self._display_name} 需在 CLI 内提交"
+                ),
+                failure_summary="检测到未提交改动，未自动提交，保持当前状态",
+                failure_conclusion="请在 CLI 内完成提交后再交接",
+                failure_payload={
+                    "has_commit": False,
+                    "requires_cli_commit": True,
+                    "source_branch": branch,
+                    "diff_stat": diff.strip()[:1200],
+                    "head_changed": cli_created_commit,
                 },
-                log_message=f"检测到未提交改动，保持 {prev_status}",
+                artifact_path=str(worktree_dev),
+                retry_reason="未在 CLI 内提交交付改动",
+                retry_log_message=f"检测到未提交改动，保持 {prev_status}",
             )
             return
 
         await self.add_log(task_id, "未检测到新提交或文件改动，不推进状态。")
         if await self.stop_if_task_cancelled(task_id, "无变更回退前"):
             return
-        update_fields = {"status": prev_status, "assignee": None}
-        if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
-            update_fields["assigned_agent"] = self.name
-            update_fields["dev_agent"] = self.name
-        await self.transition_task(
-            task_id,
-            fields=update_fields,
-            handoff={
-                "stage": self._no_progress_stage(),
-                "to_agent": self.name,
-                "status_from": prev_status,
-                "status_to": prev_status,
-                "title": "开发未产生新提交" if self._uses_developer_profile() else f"{self._display_name} 未产生新变更",
-                "summary": (
-                    f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}"
-                    if self._uses_developer_profile()
-                    else f"未检测到新提交或文件改动，保持在 {prev_status}"
-                ),
-                "conclusion": (
-                    "本轮无可审查交付，等待下一轮开发"
-                    if self._uses_developer_profile()
-                    else "本轮未产出可交付变更，等待下一轮执行"
-                ),
-                "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
-                "artifact_path": str(worktree_dev),
-            },
-            log_message=f"无文件变更，保持 {prev_status}",
+        await self._transition_delivery_failure(
+            task_id=task_id,
+            prev_status=prev_status,
+            failure_stage=self._no_progress_stage(),
+            failure_title=(
+                "开发未产生新提交"
+                if self._uses_developer_profile()
+                else f"{self._display_name} 未产生新变更"
+            ),
+            failure_summary=(
+                f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}"
+                if self._uses_developer_profile()
+                else f"未检测到新提交或文件改动，保持在 {prev_status}"
+            ),
+            failure_conclusion=(
+                "本轮无可审查交付，等待下一轮开发"
+                if self._uses_developer_profile()
+                else "本轮未产出可交付变更，等待下一轮执行"
+            ),
+            failure_payload={"has_commit": False, "no_progress": True, "source_branch": branch},
+            artifact_path=str(worktree_dev),
+            retry_reason="未产出可交付文件",
+            retry_log_message=f"无文件变更，保持 {prev_status}",
         )
 
     def working_status_for(self, status: str) -> str:
