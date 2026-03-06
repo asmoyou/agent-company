@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,8 @@ AUTO_REPLY_IDLE_SECS = int(os.getenv("AUTO_REPLY_IDLE_SECS", "0"))
 AUTO_REPLY_TEXT = os.getenv("AUTO_REPLY_TEXT", "\n")
 HANDOFF_SYNC_STRATEGY = os.getenv("HANDOFF_SYNC_STRATEGY", "cherry-pick").strip().lower()
 BRANCH_SYNC_STRATEGY = os.getenv("BRANCH_SYNC_STRATEGY", "merge").strip().lower()
+TASK_DELIVERY_MODEL = os.getenv("TASK_DELIVERY_MODEL", "patchset").strip().lower() or "patchset"
+MANAGER_MERGE_MODE = os.getenv("MANAGER_MERGE_MODE", "squash_patchset").strip().lower() or "squash_patchset"
 CODEX_ENABLE_OUTPUT_SCHEMA = os.getenv("CODEX_ENABLE_OUTPUT_SCHEMA", "0").strip().lower() in {"1", "true", "yes", "on"}
 CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "3600"))
 CONTEXT_MAX_HANDOFFS = int(os.getenv("CONTEXT_MAX_HANDOFFS", "24"))
@@ -445,6 +448,22 @@ class BaseAgent:
         r.raise_for_status()
         return r.json()
 
+    async def update_patchset(
+        self,
+        task_id: str,
+        *,
+        patchset: dict,
+        update_task_refs: bool = False,
+    ) -> dict:
+        payload = {
+            "patchset": dict(patchset or {}),
+            "update_task_refs": bool(update_task_refs),
+            **self._transition_guard_fields(task_id),
+        }
+        r = await self.http.post(f"/tasks/{task_id}/patchsets", json=payload)
+        r.raise_for_status()
+        return r.json()
+
     async def transition_task(
         self,
         task_id: str,
@@ -771,11 +790,15 @@ class BaseAgent:
                 to_agent = str(h.get("to_agent") or "").strip() or "-"
                 summary = str(h.get("summary") or "").strip()
                 commit_hash = str(h.get("commit_hash") or "").strip()
+                patchset = self._extract_handoff_patchset(h) or {}
+                patchset_id = str(patchset.get("id") or "").strip()
                 conclusion = str(h.get("conclusion") or "").strip()
                 info = conclusion or summary
                 line = f"- {(created or '-')} | {from_agent} -> {to_agent} [{stage}]"
                 if commit_hash:
                     line += f" commit={commit_hash}"
+                if patchset_id:
+                    line += f" patchset={patchset_id}"
                 if info:
                     line += f" | {info[:180]}"
                 newest.append(line)
@@ -952,6 +975,360 @@ class BaseAgent:
             if len(out) >= max(1, int(max_count)):
                 break
         return out
+
+    def _extract_handoff_patchset(self, handoff: dict) -> dict | None:
+        payload = handoff.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("patchset")
+        if not isinstance(raw, dict):
+            return None
+        head_sha = str(raw.get("head_sha") or raw.get("commit_hash") or "").strip()
+        patchset_id = str(raw.get("id") or payload.get("patchset_id") or "").strip()
+        if not head_sha and not patchset_id:
+            return None
+        commit_list = raw.get("commit_list")
+        if isinstance(commit_list, str):
+            try:
+                commit_list = json.loads(commit_list)
+            except Exception:
+                commit_list = []
+        if not isinstance(commit_list, list):
+            commit_list = []
+        normalized_list: list[dict] = []
+        for item in commit_list:
+            if not isinstance(item, dict):
+                continue
+            commit_hash = str(item.get("hash") or item.get("commit_hash") or "").strip()
+            if not commit_hash:
+                continue
+            normalized_list.append(
+                {
+                    "hash": commit_hash[:120],
+                    "short": str(item.get("short") or commit_hash[:12]).strip()[:24],
+                    "subject": str(item.get("subject") or "").strip()[:240],
+                }
+            )
+        worktree_clean = raw.get("worktree_clean")
+        if isinstance(worktree_clean, str):
+            worktree_clean = worktree_clean.strip().lower() not in {"0", "false", "off", "no"}
+        elif worktree_clean is None:
+            worktree_clean = True
+        changed_files = raw.get("changed_files")
+        if isinstance(changed_files, str):
+            try:
+                changed_files = json.loads(changed_files)
+            except Exception:
+                changed_files = []
+        if not isinstance(changed_files, list):
+            changed_files = []
+        normalized_changed_files: list[dict] = []
+        for item in changed_files:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or item.get("new_path") or "").strip()
+            if not path:
+                continue
+            normalized_item = {
+                "status": str(item.get("status") or "M").strip()[:16] or "M",
+                "path": path[:500],
+            }
+            old_path = str(item.get("old_path") or "").strip()
+            if old_path:
+                normalized_item["old_path"] = old_path[:500]
+            normalized_changed_files.append(normalized_item)
+            if len(normalized_changed_files) >= 256:
+                break
+        artifact_manifest = raw.get("artifact_manifest")
+        if isinstance(artifact_manifest, str):
+            try:
+                artifact_manifest = json.loads(artifact_manifest)
+            except Exception:
+                artifact_manifest = {}
+        if not isinstance(artifact_manifest, dict):
+            artifact_manifest = {}
+        return {
+            "id": patchset_id[:80],
+            "source_branch": str(raw.get("source_branch") or payload.get("source_branch") or "").strip(),
+            "base_sha": str(raw.get("base_sha") or payload.get("base_sha") or "").strip(),
+            "head_sha": head_sha[:120],
+            "commit_count": int(raw.get("commit_count") or len(normalized_list) or (1 if head_sha else 0)),
+            "commit_list": normalized_list,
+            "diff_stat": str(raw.get("diff_stat") or payload.get("diff_stat") or "").strip(),
+            "status": str(raw.get("status") or payload.get("patchset_status") or "").strip(),
+            "worktree_clean": bool(worktree_clean),
+            "merge_strategy": str(raw.get("merge_strategy") or payload.get("merge_strategy") or "").strip(),
+            "summary": str(raw.get("summary") or payload.get("conclusion") or "").strip(),
+            "artifact_path": str(raw.get("artifact_path") or handoff.get("artifact_path") or "").strip(),
+            "queue_status": str(raw.get("queue_status") or payload.get("queue_status") or "").strip(),
+            "queue_reason": str(raw.get("queue_reason") or payload.get("queue_reason") or "").strip(),
+            "queued_at": str(raw.get("queued_at") or payload.get("queued_at") or "").strip(),
+            "queue_started_at": str(raw.get("queue_started_at") or payload.get("queue_started_at") or "").strip(),
+            "queue_finished_at": str(raw.get("queue_finished_at") or payload.get("queue_finished_at") or "").strip(),
+            "approved_at": str(raw.get("approved_at") or payload.get("approved_at") or "").strip(),
+            "merged_at": str(raw.get("merged_at") or payload.get("merged_at") or "").strip(),
+            "reviewed_main_sha": str(raw.get("reviewed_main_sha") or payload.get("reviewed_main_sha") or "").strip(),
+            "queue_main_sha": str(raw.get("queue_main_sha") or payload.get("queue_main_sha") or "").strip(),
+            "changed_files": normalized_changed_files,
+            "artifact_manifest": artifact_manifest,
+        }
+
+    def _task_patchset_from_task(self, task: dict | None) -> dict | None:
+        item = task or {}
+        patchset_id = str(item.get("current_patchset_id") or "").strip()
+        status = str(item.get("current_patchset_status") or "").strip()
+        if not patchset_id and not status:
+            return None
+        head_sha = str(item.get("commit_hash") or "").strip()
+        return {
+            "id": patchset_id[:80],
+            "base_sha": "",
+            "head_sha": head_sha[:120],
+            "source_branch": "",
+            "commit_count": 1 if head_sha else 0,
+            "commit_list": [],
+            "diff_stat": "",
+            "status": status,
+            "worktree_clean": True,
+            "merge_strategy": "",
+            "summary": "",
+            "artifact_path": "",
+            "queue_status": "",
+            "queue_reason": "",
+            "queued_at": "",
+            "queue_started_at": "",
+            "queue_finished_at": "",
+            "approved_at": "",
+            "merged_at": "",
+            "reviewed_main_sha": "",
+            "queue_main_sha": "",
+            "changed_files": [],
+            "artifact_manifest": {},
+        }
+
+    async def resolve_task_patchset(self, task: dict) -> dict | None:
+        patchset = self._task_patchset_from_task(task)
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            return patchset
+        handoff = await self.get_latest_handoff_for_agent(task_id)
+        if handoff:
+            handoff_patchset = self._extract_handoff_patchset(handoff)
+            if handoff_patchset and patchset:
+                merged = dict(patchset)
+                for key, value in handoff_patchset.items():
+                    if value not in ("", [], None):
+                        merged[key] = value
+                return merged
+            if handoff_patchset:
+                return handoff_patchset
+        return patchset
+
+    async def build_patchset_snapshot(
+        self,
+        repo_root: Path,
+        *,
+        source_branch: str,
+        head_sha: str | None = None,
+    ) -> dict:
+        if not head_sha:
+            head_sha = (await self.git("rev-parse", "HEAD", cwd=repo_root)).strip()
+        base_sha = ""
+        try:
+            base_sha = (await self.git("merge-base", "main", head_sha, cwd=repo_root)).strip()
+        except Exception:
+            base_sha = ""
+
+        if base_sha:
+            rev_range = f"{base_sha}..{head_sha}"
+        else:
+            rev_range = head_sha
+
+        commit_list: list[dict] = []
+        try:
+            raw_commits = await self.git(
+                "log",
+                "--reverse",
+                "--pretty=format:%H%x1f%h%x1f%s",
+                rev_range,
+                cwd=repo_root,
+            )
+            for line in str(raw_commits or "").splitlines():
+                parts = line.split("\x1f")
+                if len(parts) < 3:
+                    continue
+                commit_list.append(
+                    {
+                        "hash": parts[0].strip()[:120],
+                        "short": parts[1].strip()[:24],
+                        "subject": parts[2].strip()[:240],
+                    }
+                )
+        except Exception:
+            commit_list = []
+
+        diff_stat = ""
+        try:
+            if base_sha:
+                diff_stat = await self.git("diff", "--stat", f"{base_sha}..{head_sha}", cwd=repo_root)
+            else:
+                diff_stat = await self.git("show", "--stat", "--format=", head_sha, cwd=repo_root)
+        except Exception:
+            diff_stat = ""
+
+        worktree_clean = True
+        try:
+            worktree_clean = not bool((await self.git("status", "--porcelain", cwd=repo_root)).strip())
+        except Exception:
+            worktree_clean = True
+        changed_files = await self._collect_patchset_changed_files(
+            repo_root,
+            base_sha=base_sha,
+            head_sha=str(head_sha or "").strip(),
+        )
+        artifact_manifest = self._read_patchset_artifact_manifest(repo_root)
+
+        payload = {
+            "id": "",
+            "source_branch": str(source_branch or "").strip(),
+            "base_sha": base_sha,
+            "head_sha": str(head_sha or "").strip()[:120],
+            "commit_count": len(commit_list) if commit_list else (1 if head_sha else 0),
+            "commit_list": commit_list,
+            "diff_stat": str(diff_stat or "").strip()[:4000],
+            "status": "",
+            "worktree_clean": worktree_clean,
+            "merge_strategy": "squash",
+            "summary": "",
+            "artifact_path": str(repo_root),
+            "created_by_agent": self.name,
+            "queue_status": "",
+            "queue_reason": "",
+            "queued_at": "",
+            "queue_started_at": "",
+            "queue_finished_at": "",
+            "approved_at": "",
+            "merged_at": "",
+            "reviewed_main_sha": "",
+            "queue_main_sha": "",
+            "changed_files": changed_files,
+            "artifact_manifest": artifact_manifest,
+        }
+        raw_id = f"{payload['source_branch']}|{payload['base_sha']}|{payload['head_sha']}"
+        payload["id"] = f"ps_{hashlib.sha1(raw_id.encode('utf-8')).hexdigest()[:24]}"
+        return payload
+
+    async def enrich_patchset_snapshot(
+        self,
+        repo_root: Path,
+        patchset: dict | None,
+        *,
+        source_branch: str = "",
+    ) -> dict:
+        data = dict(patchset or {})
+        head_sha = str(data.get("head_sha") or data.get("commit_hash") or "").strip()
+        if not head_sha:
+            return data
+        base_sha = str(data.get("base_sha") or "").strip()
+        if not isinstance(data.get("changed_files"), list) or not data.get("changed_files"):
+            data["changed_files"] = await self._collect_patchset_changed_files(
+                repo_root,
+                base_sha=base_sha,
+                head_sha=head_sha,
+            )
+        artifact_manifest = data.get("artifact_manifest")
+        if not isinstance(artifact_manifest, dict) or not artifact_manifest:
+            data["artifact_manifest"] = self._read_patchset_artifact_manifest(repo_root)
+        if not str(data.get("artifact_path") or "").strip():
+            data["artifact_path"] = str(repo_root)
+        if source_branch and not str(data.get("source_branch") or "").strip():
+            data["source_branch"] = str(source_branch).strip()
+        return data
+
+    async def _collect_patchset_changed_files(
+        self,
+        repo_root: Path,
+        *,
+        base_sha: str,
+        head_sha: str,
+    ) -> list[dict]:
+        if not head_sha:
+            return []
+        try:
+            if base_sha:
+                raw = await self.git(
+                    "diff",
+                    "--name-status",
+                    "--find-renames",
+                    "--find-copies",
+                    f"{base_sha}..{head_sha}",
+                    cwd=repo_root,
+                )
+            else:
+                raw = await self.git("show", "--name-status", "--format=", head_sha, cwd=repo_root)
+        except Exception:
+            return []
+        changed_files: list[dict] = []
+        for raw_line in str(raw or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split("\t") if part.strip()]
+            if len(parts) < 2:
+                continue
+            status = parts[0][:16] or "M"
+            if len(parts) >= 3 and status.startswith(("R", "C")):
+                old_path = parts[1][:500]
+                path = parts[2][:500]
+                changed_files.append({"status": status, "path": path, "old_path": old_path})
+            else:
+                changed_files.append({"status": status, "path": parts[1][:500]})
+            if len(changed_files) >= 256:
+                break
+        return changed_files
+
+    def _read_patchset_artifact_manifest(self, repo_root: Path) -> dict:
+        candidates = (
+            ".opc/delivery.json",
+            ".opc/handoff.json",
+            ".opc/manifest.json",
+        )
+        for rel_path in candidates:
+            path = repo_root / rel_path
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                raw_text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                return {"path": rel_path, "error": f"read_failed:{str(exc)[:120]}"}
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                return {"path": rel_path, "error": "invalid_json"}
+            manifest: dict[str, object] = {
+                "path": rel_path,
+                "data": self._sanitize_manifest_value(parsed),
+            }
+            if isinstance(parsed, dict):
+                manifest["keys"] = [str(key)[:120] for key in list(parsed.keys())[:24]]
+            return manifest
+        return {}
+
+    def _sanitize_manifest_value(self, value, *, depth: int = 0):
+        if depth >= 4:
+            return "..."
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:500]
+        if isinstance(value, list):
+            return [self._sanitize_manifest_value(item, depth=depth + 1) for item in value[:32]]
+        if isinstance(value, dict):
+            out: dict[str, object] = {}
+            for key, item in list(value.items())[:40]:
+                out[str(key)[:120]] = self._sanitize_manifest_value(item, depth=depth + 1)
+            return out
+        return str(value)[:500]
 
     async def get_latest_handoff_for_agent(self, task_id: str) -> dict | None:
         handoffs = await self.get_handoffs(task_id)

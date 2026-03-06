@@ -1,12 +1,14 @@
 import asyncio
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
-from base import BaseAgent, get_task_dev_agent, parse_status_list
+from base import BaseAgent, MANAGER_MERGE_MODE, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_status_list
 
 MANAGER_PROMPT_DEFAULT = (
-    "你是发布合并管理者。请在当前仓库中将已审查 commit 合并到 main。\n\n"
+    "你是发布合并管理者。请优先将已审查 patchset(base..head) 以 deterministic squash merge 方式合并到 main；"
+    "只有缺少 patchset 时才回退到 commit 路径。\n\n"
     "任务标题：{task_title}\n"
     "目标 commit：{commit_hash}\n"
     "来源分支：{dev_branch}\n"
@@ -22,6 +24,10 @@ MANAGER_PROMPT_DEFAULT = (
     '{"decision":"merged|already_up_to_date|conflict|failed","message":"..."}\n'
     "并在回复最后一行输出同一个 JSON 对象。"
 )
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class ManagerAgent(BaseAgent):
@@ -258,6 +264,255 @@ class ManagerAgent(BaseAgent):
         lines.append(f"请 {dev_agent} 按上述建议提交新 commit 后重新流转审查。")
         return "\n".join(lines)
 
+    async def _merge_patchset_squash(
+        self,
+        repo_root: Path,
+        *,
+        head_sha: str,
+        merge_message: str,
+    ) -> dict:
+        await self._cleanup_merge_state(repo_root)
+        await self._ensure_on_main(repo_root)
+        try:
+            await self.git("config", "user.email", "agent@opc-demo.local", cwd=repo_root)
+            await self.git("config", "user.name", "OPC Agent", cwd=repo_root)
+        except Exception:
+            pass
+        head_before = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()
+        try:
+            await self.git("merge", "--squash", "--no-commit", head_sha, cwd=repo_root)
+        except Exception as e:
+            status_text = ""
+            conflicts: list[dict] = []
+            try:
+                status_text = await self.git("status", "--porcelain", cwd=repo_root)
+                conflicts = self._parse_unmerged_from_status(status_text)
+            except Exception:
+                pass
+            try:
+                await self.git("merge", "--abort", cwd=repo_root)
+            except Exception:
+                pass
+            return {
+                "status": "conflict",
+                "head_before": head_before,
+                "head_after": head_before,
+                "error": str(e)[:240],
+                "conflicts": conflicts,
+            }
+
+        try:
+            staged = (await self.git("diff", "--cached", "--stat", cwd=repo_root)).strip()
+        except Exception:
+            staged = ""
+        if not staged:
+            return {
+                "status": "already_up_to_date",
+                "head_before": head_before,
+                "head_after": head_before,
+                "conflicts": [],
+            }
+
+        await self.git("commit", "-m", merge_message, cwd=repo_root)
+        head_after = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()
+        return {
+            "status": "merged",
+            "head_before": head_before,
+            "head_after": head_after,
+            "conflicts": [],
+        }
+
+    async def _process_patchset(
+        self,
+        task: dict,
+        *,
+        task_id: str,
+        dev_agent: str,
+        proj_root: Path,
+        dev_branch: str,
+        patchset: dict,
+    ) -> bool:
+        try:
+            patchset = await self.enrich_patchset_snapshot(
+                proj_root,
+                patchset,
+                source_branch=dev_branch,
+            )
+        except Exception:
+            patchset = dict(patchset or {})
+        head_sha = str(patchset.get("head_sha") or "").strip()
+        patchset_id = str(patchset.get("id") or "").strip()
+        if not head_sha:
+            return False
+        queue_started_at = _utcnow_iso()
+        main_head_before = ""
+        try:
+            await self._ensure_on_main(proj_root)
+            main_head_before = (await self.git("rev-parse", "HEAD", cwd=proj_root)).strip()
+        except Exception:
+            main_head_before = ""
+        reviewed_main_sha = str(patchset.get("reviewed_main_sha") or "").strip()
+
+        try:
+            await self.git("cat-file", "-e", f"{head_sha}^{{commit}}", cwd=proj_root)
+        except Exception as e:
+            feedback = f"[合并前置检查失败] patchset head 不存在：{e}"
+            await self._return_to_dev_for_merge_issue(
+                task_id=task_id,
+                dev_agent=dev_agent,
+                target_commit=head_sha,
+                related_history_commits=[],
+                feedback=feedback,
+                dev_branch=dev_branch,
+                patchset=patchset,
+            )
+            return True
+
+        await self.add_log(
+            task_id,
+            (
+                f"Manager 开始合并 patchset {patchset_id or '-'} "
+                f"(branch={dev_branch}, base={str(patchset.get('base_sha') or '')[:12] or '-'}, "
+                f"head={head_sha[:12]})"
+            ),
+        )
+        try:
+            await self.update_patchset(
+                task_id,
+                patchset={
+                    **patchset,
+                    "status": "approved",
+                    "queue_status": "processing",
+                    "queue_reason": "",
+                    "queue_started_at": queue_started_at,
+                    "queue_main_sha": main_head_before,
+                    "reviewed_main_sha": reviewed_main_sha,
+                    "summary": f"patchset {patchset_id or '-'} 进入 merge queue 处理",
+                },
+                update_task_refs=False,
+            )
+        except Exception:
+            pass
+        merge_message = f"merge: {task['title'][:72]} | Task ID: {task_id}"
+        result = await self._merge_patchset_squash(
+            proj_root,
+            head_sha=head_sha,
+            merge_message=merge_message,
+        )
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"merged", "already_up_to_date"}:
+            head_after = str(result.get("head_after") or "").strip() or head_sha[:7]
+            queue_finished_at = _utcnow_iso()
+            summary = (
+                f"patchset {patchset_id or '-'} 已 squash 合并到 main：{head_after}"
+                if status == "merged"
+                else f"patchset {patchset_id or '-'} 已在 main，无需重复合并"
+            )
+            await self.transition_task(
+                task_id,
+                fields={
+                    "status": "pending_acceptance",
+                    "assignee": None,
+                    "commit_hash": head_after,
+                    "current_patchset_id": patchset_id or None,
+                    "current_patchset_status": "merged",
+                    "merged_patchset_id": patchset_id or None,
+                },
+                handoff={
+                    "stage": "merge_to_acceptance",
+                    "to_agent": "user",
+                    "status_from": "approved",
+                    "status_to": "pending_acceptance",
+                    "title": "合并完成，交接验收",
+                    "summary": summary,
+                    "commit_hash": head_after,
+                    "conclusion": "patchset 合并完成，进入待验收",
+                    "payload": {
+                        "commit_hash": head_after,
+                        "source_branch": dev_branch,
+                        "patchset": {
+                            **patchset,
+                            "status": "merged",
+                            "merge_strategy": "squash",
+                            "summary": summary,
+                            "queue_status": "merged",
+                            "queue_reason": "",
+                            "queue_started_at": queue_started_at,
+                            "queue_finished_at": queue_finished_at,
+                            "merged_at": queue_finished_at,
+                            "queue_main_sha": main_head_before,
+                            "reviewed_main_sha": reviewed_main_sha,
+                        },
+                    },
+                    "artifact_path": str(proj_root),
+                },
+                log_message=f"✅ 合并成功: {head_after}",
+            )
+            return True
+
+        queue_reason = "merge_conflict"
+        if reviewed_main_sha and main_head_before and reviewed_main_sha != main_head_before:
+            queue_reason = "merge_conflict_after_main_advanced"
+        refresh_hint = self._build_patchset_refresh_hint(
+            patchset=patchset,
+            reviewed_main_sha=reviewed_main_sha,
+            latest_main_sha=main_head_before,
+            queue_reason=queue_reason,
+            conflicts=list(result.get("conflicts") or []),
+        )
+        feedback = self._build_patchset_conflict_feedback(
+            patchset=patchset,
+            dev_branch=dev_branch,
+            conflicts=list(result.get("conflicts") or []),
+            refresh_hint=refresh_hint,
+        )
+        queue_finished_at = _utcnow_iso()
+        await self.transition_task(
+            task_id,
+            fields={
+                "status": "needs_changes",
+                "assignee": None,
+                "assigned_agent": dev_agent,
+                "dev_agent": dev_agent,
+                "review_feedback": feedback[:1000],
+                "feedback_source": self.name,
+                "feedback_stage": "merge_to_dev",
+                "feedback_actor": self.name,
+                "current_patchset_id": patchset_id or None,
+                "current_patchset_status": "stale",
+            },
+            handoff={
+                "stage": "merge_to_dev",
+                "to_agent": dev_agent,
+                "status_from": "approved",
+                "status_to": "needs_changes",
+                "title": "合并退回开发",
+                "summary": feedback[:300],
+                "commit_hash": head_sha,
+                "conclusion": "patchset 无法合并到最新 main，退回开发刷新后重提",
+                "payload": {
+                    "reason": "patchset_merge_conflict",
+                    "commit_hash": head_sha,
+                    "refresh_hint": refresh_hint,
+                    "patchset": {
+                        **patchset,
+                        "status": "stale",
+                        "merge_strategy": "squash",
+                        "summary": feedback[:300],
+                        "queue_status": "stale",
+                        "queue_reason": queue_reason,
+                        "queue_started_at": queue_started_at,
+                        "queue_finished_at": queue_finished_at,
+                        "queue_main_sha": main_head_before,
+                        "reviewed_main_sha": reviewed_main_sha,
+                    },
+                    "conflicts": list(result.get("conflicts") or []),
+                },
+            },
+            log_message=feedback[:300],
+        )
+        return True
+
     def _load_decision_file(self, path: Path) -> dict | None:
         if not path.exists():
             return None
@@ -300,6 +555,7 @@ class ManagerAgent(BaseAgent):
         related_history_commits: list[dict],
         feedback: str,
         dev_branch: str = "",
+        patchset: dict | None = None,
     ):
         await self.add_log(task_id, feedback[:500])
         await self.add_alert(
@@ -322,6 +578,12 @@ class ManagerAgent(BaseAgent):
                 "feedback_source": self.name,
                 "feedback_stage": "merge_to_dev",
                 "feedback_actor": self.name,
+                "current_patchset_id": (
+                    str((patchset or {}).get("id") or "").strip() or None
+                ),
+                "current_patchset_status": (
+                    "stale" if patchset else None
+                ),
             },
             handoff={
                 "stage": "merge_to_dev",
@@ -336,10 +598,148 @@ class ManagerAgent(BaseAgent):
                     "reason": "merge_to_dev",
                     "commit_hash": target_commit,
                     "related_history_commits": related_history_commits,
+                    "patchset": (
+                        {
+                            **patchset,
+                            "status": "stale",
+                            "summary": feedback[:300],
+                        }
+                        if patchset
+                        else {}
+                    ),
                 },
             },
             log_message=feedback[:300],
         )
+
+    async def _squash_merge_patchset(
+        self,
+        repo_root: Path,
+        *,
+        head_sha: str,
+        merge_message: str,
+    ) -> dict:
+        await self._cleanup_merge_state(repo_root)
+        await self._ensure_on_main(repo_root)
+        head_before = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()
+        try:
+            await self.git("merge", "--squash", "--no-commit", head_sha, cwd=repo_root)
+        except Exception as e:
+            status_text = ""
+            conflicts: list[dict] = []
+            try:
+                status_text = await self.git("status", "--porcelain", cwd=repo_root)
+                conflicts = self._parse_unmerged_from_status(status_text)
+            except Exception:
+                pass
+            try:
+                await self.git("merge", "--abort", cwd=repo_root)
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "status": "conflict",
+                "head_before": head_before,
+                "head_after": head_before,
+                "error": str(e)[:240],
+                "conflicts": conflicts,
+            }
+
+        staged = ""
+        try:
+            staged = await self.git("diff", "--cached", "--name-only", cwd=repo_root)
+        except Exception:
+            staged = ""
+        if not staged.strip():
+            try:
+                await self.git("merge", "--abort", cwd=repo_root)
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "status": "already_up_to_date",
+                "head_before": head_before,
+                "head_after": head_before,
+                "error": "",
+                "conflicts": [],
+            }
+
+        await self.git("commit", "-m", merge_message, cwd=repo_root)
+        head_after = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()
+        return {
+            "ok": True,
+            "status": "merged",
+            "head_before": head_before,
+            "head_after": head_after,
+            "error": "",
+            "conflicts": [],
+        }
+
+    def _build_patchset_conflict_feedback(
+        self,
+        *,
+        patchset: dict,
+        dev_branch: str,
+        conflicts: list[dict],
+        refresh_hint: dict | None = None,
+    ) -> str:
+        patchset_id = str(patchset.get("id") or "").strip()[:16]
+        head_sha = str(patchset.get("head_sha") or "").strip()[:12]
+        changed_files = patchset.get("changed_files") if isinstance(patchset.get("changed_files"), list) else []
+        lines = [
+            f"[Patchset 合并冲突] patchset {patchset_id or '-'}（head={head_sha or '-'}) 无法无冲突落到最新 main。",
+            "修改建议：",
+            f"1. 在 `{dev_branch}` 基于最新 `main` 刷新当前任务分支，并保留最终净变更。",
+            "2. 清理工作区后重新生成 patchset，再重新送审。",
+            "3. 交接时附上新的 base/head 与 changed files 摘要。",
+        ]
+        if refresh_hint:
+            lines.append(
+                "4. refresh 基线："
+                f"reviewed_main={str(refresh_hint.get('reviewed_main_sha') or '-')[:12]} -> "
+                f"latest_main={str(refresh_hint.get('latest_main_sha') or '-')[:12]}。"
+            )
+        if changed_files:
+            summary = " · ".join(
+                f"{str(item.get('status') or 'M').strip().upper()} {str(item.get('path') or '').strip()}"
+                for item in changed_files[:6]
+                if str(item.get("path") or "").strip()
+            )
+            if summary:
+                lines.append(f"变更摘要：{summary}")
+        for item in conflicts[:8]:
+            code = str(item.get('code') or '').strip().upper()
+            path = str(item.get('path') or '').strip()
+            if code and path:
+                lines.append(f"- `{code} {path}`")
+        return "\n".join(lines)
+
+    def _build_patchset_refresh_hint(
+        self,
+        *,
+        patchset: dict,
+        reviewed_main_sha: str,
+        latest_main_sha: str,
+        queue_reason: str,
+        conflicts: list[dict],
+    ) -> dict:
+        changed_files = patchset.get("changed_files") if isinstance(patchset.get("changed_files"), list) else []
+        return {
+            "action": "refresh_patchset",
+            "reason": queue_reason,
+            "base_sha": str(patchset.get("base_sha") or "").strip(),
+            "head_sha": str(patchset.get("head_sha") or "").strip(),
+            "reviewed_main_sha": reviewed_main_sha,
+            "latest_main_sha": latest_main_sha,
+            "main_advanced": bool(reviewed_main_sha and latest_main_sha and reviewed_main_sha != latest_main_sha),
+            "changed_files": changed_files[:32],
+            "conflicts": conflicts[:16],
+            "steps": [
+                "同步最新 main 到当前任务分支并解决冲突。",
+                "确认只保留当前任务范围内的净变更。",
+                "清理工作区后重新生成 patchset，再重新送审。",
+            ],
+        }
 
     async def process_task(self, task: dict):
         task_id = task["id"]
@@ -347,12 +747,29 @@ class ManagerAgent(BaseAgent):
             return
 
         dev_agent = get_task_dev_agent(task)
+        patchset = await self.resolve_task_patchset(task)
         commit_hash = (task.get("commit_hash") or "").strip()
         task_commit_hash = commit_hash
         related_history_commits: list[dict] = []
         proj_root, _, dev_branch = await self.ensure_agent_workspace(
             task, agent_key=dev_agent, sync_with_main=False
         )
+        if (
+            TASK_DELIVERY_MODEL == "patchset"
+            and MANAGER_MERGE_MODE != "single_commit"
+            and patchset
+            and str(patchset.get("head_sha") or "").strip()
+        ):
+            handled = await self._process_patchset(
+                task,
+                task_id=task_id,
+                dev_agent=dev_agent,
+                proj_root=proj_root,
+                dev_branch=dev_branch,
+                patchset=patchset,
+            )
+            if handled:
+                return
 
         if not commit_hash:
             commit_hash, related_history_commits = await self.resolve_handoff_commit_candidate(

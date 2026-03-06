@@ -122,25 +122,25 @@ decompose -> decomposed -> (subtasks in todo...)
 
 - 查询：`GET /tasks/{task_id}/handoffs`
 - 写入：`POST /tasks/{task_id}/handoffs`
-- 关键字段：`from_agent`、`to_agent`、`stage`、`status_from`/`status_to`、`commit_hash`、`conclusion`、`payload`（结构化详情）
+- 关键字段：`from_agent`、`to_agent`、`stage`、`status_from`/`status_to`、`commit_hash`、`conclusion`、`payload`（结构化详情，`patchset` 为主交付对象）
 
 建议每次交接都记录：
 
-- 对应 commit hash
+- 对应 patchset `base/head` 与兼容 `commit_hash`
 - 本轮修改范围
 - 审查结论（pass / fail + 风险等级）
 - 下一步动作和责任 Agent
 
 ## 跨 Worktree 协作说明
 
-你关心的问题是对的：如果没合并到 `main`，其他 Agent 能不能看到 commit？
+你关心的问题是对的：如果没合并到 `main`，其他 Agent 能不能看到 patchset / commit？
 
 - 在同一个 Git 仓库下的多个 `worktree`，共享同一套对象库（`.git/objects`）。
 - 当前默认采用“任务级隔离”：
   - 分支：`agent/<agent>/<task_id>`
   - 工作树：`.worktrees/<agent>/<task_id>`
-- 所以只要开发 Agent 已经本地 commit，Reviewer 通常可以直接按 `commit_hash` 读取和审查，不必等合并到 `main`。
-- Manager 再根据策略把该提交同步到目标分支（如 `cherry-pick` 到 `main`）。
+- 所以只要开发 Agent 已经本地提交，Reviewer 通常可以直接按 `patchset(base..head)` 审查，不必等合并到 `main`。
+- Manager 默认对 patchset 做 `squash merge` 到 `main`；只有灰度回退时才走 legacy commit 路径。
 - 只有在“不同 clone / 不同仓库”时，才需要通过 `push/fetch` 才能看到彼此提交。
 
 ## 环境变量
@@ -164,6 +164,8 @@ decompose -> decomposed -> (subtasks in todo...)
 | `AGENT_PROJECT_IDS` | `` | 可选项目白名单（逗号分隔 project id），为空则自动发现 |
 | `HANDOFF_SYNC_STRATEGY` | `cherry-pick` | 跨 Agent 提交同步策略：`cherry-pick` / `merge` / `none` |
 | `BRANCH_SYNC_STRATEGY` | `merge` | 任务开始前同步 `main` 的策略：`merge` / `rebase` / `none` |
+| `TASK_DELIVERY_MODEL` | `patchset` | 任务交付建模模式：`patchset` / `commit`。`commit` 可用于灰度回退 |
+| `MANAGER_MERGE_MODE` | `squash_patchset` | Manager 合并模式：`squash_patchset` / `single_commit` |
 | `AUTO_CLEANUP_TASK_WORKSPACES` | `1` | 任务进入 `completed`/`cancelled` 后自动清理对应 task worktree/branch |
 | `TASK_WORKSPACE_FORCE_DELETE_UNMERGED` | `0` | 对未合并分支是否允许强制删除（仅在自动清理中生效） |
 | `TASK_WORKSPACE_SWEEP_SECS` | `180` | 周期性扫描终态任务并触发清理的间隔（秒） |
@@ -182,6 +184,8 @@ decompose -> decomposed -> (subtasks in todo...)
 
 - `GET /runtime/workspace-cleanup`：查看清理配置、计数指标、最近清理事件、当前 in-flight 任务
 - `POST /runtime/workspace-cleanup/sweep?max_tasks=100`：管理员手动触发一次终态任务清理扫描
+- `GET /runtime/patchset-metrics?project_id=<id>`：查看 patchset 队列、退回率、stale 比例和提交到验收耗时
+  - 返回同时包含累计历史和最近 24 小时窗口
 - `GET /runtime/support-chat/health`：检查智能客服模型网关是否可达、目标模型是否可用
 
 ## 当前边界（MVP）

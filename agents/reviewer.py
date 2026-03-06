@@ -2,9 +2,10 @@ import asyncio
 import json
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
-from base import BaseAgent, get_task_dev_agent, parse_status_list
+from base import BaseAgent, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_status_list
 
 REVIEWER_PROMPT_DEFAULT = (
     "你是资深代码/文档审查工程师，负责审查以下变更。\n\n"
@@ -227,6 +228,25 @@ class ReviewerAgent(BaseAgent):
                 raise first_error
             return await self.git("show", commit_hash, cwd=repo_root)
 
+    async def get_diff_for_patchset(
+        self,
+        worktree_dev,
+        *,
+        head_sha: str,
+        base_sha: str = "",
+        repo_root=None,
+    ) -> str:
+        try:
+            if base_sha:
+                return await self.git("diff", f"{base_sha}..{head_sha}", cwd=worktree_dev)
+            return await self.git("show", head_sha, cwd=worktree_dev)
+        except Exception as first_error:
+            if repo_root is None:
+                raise first_error
+            if base_sha:
+                return await self.git("diff", f"{base_sha}..{head_sha}", cwd=repo_root)
+            return await self.git("show", head_sha, cwd=repo_root)
+
     def _load_decision_file(self, path: Path) -> dict | None:
         if not path.exists():
             return None
@@ -246,12 +266,18 @@ class ReviewerAgent(BaseAgent):
         if await self.stop_if_task_cancelled(task_id, "开始审查前"):
             return
         dev_agent = get_task_dev_agent(task)
+        patchset = await self.resolve_task_patchset(task)
         commit_hash = (task.get("commit_hash") or "").strip()
         task_commit_hash = commit_hash
         related_history_commits: list[dict] = []
         proj_root, worktree_dev, branch = await self.ensure_agent_workspace(
             task, agent_key=dev_agent, sync_with_main=False
         )
+        patchset_head = str((patchset or {}).get("head_sha") or "").strip()
+        patchset_base = str((patchset or {}).get("base_sha") or "").strip()
+        use_patchset = TASK_DELIVERY_MODEL == "patchset" and bool(patchset_head)
+        if use_patchset:
+            commit_hash = patchset_head
         if not commit_hash:
             commit_hash, related_history_commits = await self.resolve_handoff_commit_candidate(
                 task_id,
@@ -297,32 +323,15 @@ class ReviewerAgent(BaseAgent):
                 stage="review_to_dev",
             )
             return
-        if not task_commit_hash and related_history_commits:
-            top = related_history_commits[0]
-            await self.add_log(
-                task_id,
-                (
-                    "任务未显式提供 commit_hash，已使用历史提交证据进行审查："
-                    f"{top.get('short') or str(commit_hash)[:12]}（候选 {len(related_history_commits)} 条）"
-                ),
-            )
-
-        parent_commit = ""
-        try:
-            parent_commit = (await self.git("rev-parse", f"{commit_hash}^", cwd=proj_root)).strip()
-        except Exception:
-            parent_commit = ""
-        if parent_commit:
-            parent_on_main = await self._is_ancestor(proj_root, parent_commit, "main")
-            if not parent_on_main:
-                parent_on_main = await self._is_patch_equivalent_on_ref(
-                    proj_root, parent_commit, "main"
-                )
-            if not parent_on_main:
-                feedback = self._build_non_mergeable_commit_feedback(
-                    commit_hash=commit_hash,
-                    parent_commit=parent_commit,
-                    dev_branch=branch,
+        if use_patchset:
+            try:
+                dirty = (await self.git("status", "--porcelain", cwd=worktree_dev)).strip()
+            except Exception:
+                dirty = ""
+            if dirty:
+                feedback = (
+                    "[交付不完整] 当前任务分支仍有未提交改动，reviewer 不会基于脏工作区继续审查。\n"
+                    "请先清理工作区并重新提交，再重新流转审查。"
                 )
                 await self.transition_task(
                     task_id,
@@ -335,6 +344,8 @@ class ReviewerAgent(BaseAgent):
                         "feedback_source": self.name,
                         "feedback_stage": "review_to_dev",
                         "feedback_actor": self.name,
+                        "current_patchset_id": str(patchset.get("id") or "").strip() or None,
+                        "current_patchset_status": "rejected",
                     },
                     handoff={
                         "stage": "review_to_dev",
@@ -344,18 +355,82 @@ class ReviewerAgent(BaseAgent):
                         "title": "审查退回开发",
                         "summary": feedback[:300],
                         "commit_hash": commit_hash,
-                        "conclusion": "提交基线不一致，退回开发重建可独立合并的 commit",
+                        "conclusion": "工作区存在未提交改动，退回开发清理后重提",
                         "payload": {
                             "decision": "request_changes",
+                            "reason": "dirty_worktree",
                             "commit_hash": commit_hash,
                             "source_branch": branch,
-                            "related_history_commits": related_history_commits,
-                            "reason": "non_mergeable_commit_baseline",
+                            "patchset": {
+                                **patchset,
+                                "status": "rejected",
+                                "summary": "工作区存在未提交改动",
+                            },
                         },
                     },
                     log_message=f"↩ 需修改: {feedback[:200]}",
                 )
                 return
+        if not task_commit_hash and related_history_commits:
+            top = related_history_commits[0]
+            await self.add_log(
+                task_id,
+                (
+                    "任务未显式提供 commit_hash，已使用历史提交证据进行审查："
+                    f"{top.get('short') or str(commit_hash)[:12]}（候选 {len(related_history_commits)} 条）"
+                ),
+            )
+
+        if not use_patchset:
+            parent_commit = ""
+            try:
+                parent_commit = (await self.git("rev-parse", f"{commit_hash}^", cwd=proj_root)).strip()
+            except Exception:
+                parent_commit = ""
+            if parent_commit:
+                parent_on_main = await self._is_ancestor(proj_root, parent_commit, "main")
+                if not parent_on_main:
+                    parent_on_main = await self._is_patch_equivalent_on_ref(
+                        proj_root, parent_commit, "main"
+                    )
+                if not parent_on_main:
+                    feedback = self._build_non_mergeable_commit_feedback(
+                        commit_hash=commit_hash,
+                        parent_commit=parent_commit,
+                        dev_branch=branch,
+                    )
+                    await self.transition_task(
+                        task_id,
+                        fields={
+                            "status": "needs_changes",
+                            "assignee": None,
+                            "assigned_agent": dev_agent,
+                            "dev_agent": dev_agent,
+                            "review_feedback": feedback[:1000],
+                            "feedback_source": self.name,
+                            "feedback_stage": "review_to_dev",
+                            "feedback_actor": self.name,
+                        },
+                        handoff={
+                            "stage": "review_to_dev",
+                            "to_agent": dev_agent,
+                            "status_from": "in_review",
+                            "status_to": "needs_changes",
+                            "title": "审查退回开发",
+                            "summary": feedback[:300],
+                            "commit_hash": commit_hash,
+                            "conclusion": "提交基线不一致，退回开发重建可独立合并的 commit",
+                            "payload": {
+                                "decision": "request_changes",
+                                "commit_hash": commit_hash,
+                                "source_branch": branch,
+                                "related_history_commits": related_history_commits,
+                                "reason": "non_mergeable_commit_baseline",
+                            },
+                        },
+                        log_message=f"↩ 需修改: {feedback[:200]}",
+                    )
+                    return
 
         decision_dir = worktree_dev / ".opc" / "decisions"
         decision_dir.mkdir(parents=True, exist_ok=True)
@@ -365,13 +440,27 @@ class ReviewerAgent(BaseAgent):
         except Exception:
             pass
 
+        patchset_note = ""
+        if use_patchset and patchset and str(patchset.get("id") or "").strip():
+            patchset_note = (
+                f", patchset={patchset.get('id')}, "
+                f"base={str(patchset.get('base_sha') or '')[:12] or '-'}"
+            )
         await self.add_log(
             task_id,
-            f"Reviewer 开始审查（dev_agent={dev_agent}, 分支={branch}, commit={commit_hash}）",
+            f"Reviewer 开始审查（dev_agent={dev_agent}, 分支={branch}, commit={commit_hash}{patchset_note}）",
         )
 
         try:
-            diff = await self.get_diff_for_commit(worktree_dev, commit_hash, repo_root=proj_root)
+            if use_patchset:
+                diff = await self.get_diff_for_patchset(
+                    worktree_dev,
+                    head_sha=patchset_head,
+                    base_sha=patchset_base,
+                    repo_root=proj_root,
+                )
+            else:
+                diff = await self.get_diff_for_commit(worktree_dev, commit_hash, repo_root=proj_root)
         except Exception as e:
             feedback = f"[系统错误] 无法读取目标 commit={commit_hash}：{e}"
             await self.transition_task(
@@ -410,7 +499,13 @@ class ReviewerAgent(BaseAgent):
             )
             return
 
-        await self.add_log(task_id, f"获取到 commit diff ({len(diff)} 字符): {commit_hash}")
+        if use_patchset:
+            await self.add_log(
+                task_id,
+                f"获取到 patchset diff ({len(diff)} 字符): {str(patchset.get('id') or '')} head={commit_hash}",
+            )
+        else:
+            await self.add_log(task_id, f"获取到 commit diff ({len(diff)} 字符): {commit_hash}")
 
         diff_file = decision_dir / f"{task_id}.review.patch"
         try:
@@ -452,6 +547,15 @@ class ReviewerAgent(BaseAgent):
                 f"审查任务「{task['title']}」的代码变更（commit={commit_hash}）：\n\n```\n{diff_for_prompt}\n```\n\n"
                 "输出 JSON 决定：{\"decision\":\"approve\",\"comment\":\"...\"} "
                 "或 {\"decision\":\"request_changes\",\"feedback\":\"...\"}"
+            )
+        if use_patchset:
+            prompt += (
+                "\n\n## Patchset 上下文\n"
+                f"- patchset_id: {str(patchset.get('id') or '').strip()}\n"
+                f"- base_sha: {patchset_base or '(empty)'}\n"
+                f"- head_sha: {patchset_head}\n"
+                f"- commit_count: {int(patchset.get('commit_count') or 0)}\n"
+                f"- worktree_clean: {'yes' if bool(patchset.get('worktree_clean')) else 'no'}\n"
             )
         if diff_file is not None:
             prompt += (
@@ -515,6 +619,24 @@ class ReviewerAgent(BaseAgent):
                 )
                 return
 
+        reviewed_main_sha = ""
+        if use_patchset:
+            try:
+                reviewed_main_sha = (await self.git("rev-parse", "main", cwd=proj_root)).strip()
+            except Exception:
+                reviewed_main_sha = ""
+        patchset_for_handoff = patchset
+        if use_patchset and patchset:
+            try:
+                patchset_for_handoff = await self.enrich_patchset_snapshot(
+                    proj_root,
+                    patchset,
+                    source_branch=branch,
+                )
+            except Exception:
+                patchset_for_handoff = patchset
+        review_timestamp = datetime.now(UTC).isoformat()
+
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")
             await self.transition_task(
@@ -526,6 +648,8 @@ class ReviewerAgent(BaseAgent):
                     "feedback_source": self.name,
                     "feedback_stage": "review_to_manager",
                     "feedback_actor": self.name,
+                    "current_patchset_id": str((patchset or {}).get("id") or "").strip() or None if use_patchset else None,
+                    "current_patchset_status": "approved" if use_patchset else None,
                 },
                 handoff={
                     "stage": "review_to_manager",
@@ -541,6 +665,20 @@ class ReviewerAgent(BaseAgent):
                         "commit_hash": commit_hash,
                         "source_branch": branch,
                         "related_history_commits": related_history_commits,
+                        "patchset": (
+                            {
+                                **(patchset_for_handoff or {}),
+                                "status": "approved",
+                                "summary": comment[:300],
+                                "queue_status": "queued",
+                                "queue_reason": "",
+                                "approved_at": review_timestamp,
+                                "queued_at": review_timestamp,
+                                "reviewed_main_sha": reviewed_main_sha,
+                            }
+                            if use_patchset
+                            else {}
+                        ),
                     },
                     "artifact_path": str(decision_file),
                 },
@@ -559,6 +697,8 @@ class ReviewerAgent(BaseAgent):
                     "feedback_source": self.name,
                     "feedback_stage": "review_to_dev",
                     "feedback_actor": self.name,
+                    "current_patchset_id": str((patchset or {}).get("id") or "").strip() or None if use_patchset else None,
+                    "current_patchset_status": "rejected" if use_patchset else None,
                 },
                 handoff={
                     "stage": "review_to_dev",
@@ -574,6 +714,18 @@ class ReviewerAgent(BaseAgent):
                         "commit_hash": commit_hash,
                         "source_branch": branch,
                         "related_history_commits": related_history_commits,
+                        "patchset": (
+                            {
+                                **(patchset_for_handoff or {}),
+                                "status": "rejected",
+                                "summary": feedback[:300],
+                                "queue_status": "",
+                                "queue_reason": "review_rejected",
+                                "reviewed_main_sha": reviewed_main_sha,
+                            }
+                            if use_patchset
+                            else {}
+                        ),
                     },
                     "artifact_path": str(decision_file),
                 },

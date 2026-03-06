@@ -36,6 +36,23 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         )
         self.agent.sync_from_latest_handoff = mock.AsyncMock(return_value={"status": "no_handoff"})
         self.agent.build_handoff_context = mock.AsyncMock(return_value="")
+        self.agent.build_patchset_snapshot = mock.AsyncMock(
+            return_value={
+                "id": "ps-writer-1",
+                "source_branch": "agent/writer",
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "commit_count": 1,
+                "commit_list": [{"hash": "b" * 40, "short": "bbbbbbb", "subject": "feat: task"}],
+                "diff_stat": " main.js | 3 ++-",
+                "status": "",
+                "worktree_clean": False,
+                "merge_strategy": "squash",
+                "summary": "",
+                "artifact_path": str(self.worktree),
+                "created_by_agent": "writer",
+            }
+        )
         self.agent.run_cli = mock.AsyncMock(return_value=(0, "done"))
         self.agent.stop_if_task_cancelled = mock.AsyncMock(return_value=False)
         self.agent.add_log = mock.AsyncMock()
@@ -51,7 +68,7 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
             await self.agent.http_output.aclose()
         self._tmp.cleanup()
 
-    async def test_cli_commit_with_uncommitted_diff_still_handoffs(self):
+    async def test_cli_commit_with_uncommitted_diff_returns_to_previous_status(self):
         head_before = "a" * 40
         head_after = "b" * 40
 
@@ -89,14 +106,20 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         self.agent.transition_task.assert_awaited_once()
         call = self.agent.transition_task.await_args
-        self.assertEqual(call.kwargs["fields"]["status"], "in_review")
+        self.assertEqual(call.kwargs["fields"]["status"], "todo")
         self.assertEqual(call.kwargs["fields"]["commit_hash"], head_after[:7])
-        self.assertEqual(call.kwargs["handoff"]["stage"], "writer_handoff")
+        self.assertEqual(call.kwargs["fields"]["current_patchset_id"], "ps-writer-1")
+        self.assertEqual(call.kwargs["fields"]["current_patchset_status"], "draft")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "writer_dirty_patchset")
 
         payload = call.kwargs["handoff"]["payload"]
         self.assertTrue(payload["committed_by_cli"])
         self.assertTrue(payload["has_uncommitted_changes"])
+        self.assertTrue(payload["requires_clean_worktree"])
         self.assertIn("main.js", payload["uncommitted_diff_stat"])
+        self.assertEqual(payload["patchset"]["head_sha"], head_after)
+        self.assertEqual(payload["patchset"]["id"], "ps-writer-1")
+        self.assertEqual(payload["patchset"]["status"], "draft")
 
     async def test_cli_commit_with_review_disabled_skips_to_approved(self):
         head_before = "a" * 40

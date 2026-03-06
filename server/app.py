@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
@@ -81,6 +82,8 @@ STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().l
 }
 PER_PROJECT_MAX_WORKERS = int(os.getenv("PER_PROJECT_MAX_WORKERS", "0"))
 PER_AGENT_TYPE_MAX_WORKERS = int(os.getenv("PER_AGENT_TYPE_MAX_WORKERS", "0"))
+TASK_DELIVERY_MODEL = str(os.getenv("TASK_DELIVERY_MODEL", "patchset")).strip().lower() or "patchset"
+MANAGER_MERGE_MODE = str(os.getenv("MANAGER_MERGE_MODE", "squash_patchset")).strip().lower() or "squash_patchset"
 AGENT_OUTPUT_HISTORY_MAX_LINES = max(
     100,
     int(str(os.getenv("AGENT_OUTPUT_HISTORY_MAX_LINES", "1000")).strip() or "1000"),
@@ -1422,6 +1425,9 @@ class TaskUpdate(BaseModel):
     review_enabled: bool | None = None
     review_feedback: str | None = None
     commit_hash: str | None = None
+    current_patchset_id: str | None = None
+    current_patchset_status: str | None = None
+    merged_patchset_id: str | None = None
     priority: int | None = Field(default=None, ge=0, le=3)
     archived: int | None = None
     feedback_source: str | None = None
@@ -1449,6 +1455,14 @@ class HandoffCreate(BaseModel):
     artifact_path: str | None = None
     expected_run_id: str | None = None
     expected_lease_token: str | None = None
+
+
+class PatchsetUpsertRequest(BaseModel):
+    patchset: dict = Field(default_factory=dict)
+    update_task_refs: bool = False
+    expected_run_id: str | None = None
+    expected_lease_token: str | None = None
+
 
 class AgentAlertCreate(BaseModel):
     agent: str
@@ -1649,10 +1663,273 @@ def _normalize_transition_fields(before: dict, fields: dict) -> dict:
     return out
 
 
-def _build_handoff_row(task_for_handoff: dict, handoff: HandoffCreate | None) -> dict | None:
-    if not handoff:
+def _coerce_patchset_commit_list(raw) -> list[dict]:
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            commit_hash = str(
+                item.get("hash")
+                or item.get("commit_hash")
+                or item.get("head_sha")
+                or ""
+            ).strip()
+            if not commit_hash:
+                continue
+            out.append(
+                {
+                    "hash": commit_hash[:120],
+                    "short": str(item.get("short") or commit_hash[:12]).strip()[:24],
+                    "subject": str(item.get("subject") or "").strip()[:240],
+                }
+            )
+        else:
+            commit_hash = str(item or "").strip()
+            if commit_hash:
+                out.append({"hash": commit_hash[:120], "short": commit_hash[:12], "subject": ""})
+        if len(out) >= 128:
+            break
+    return out
+
+
+def _coerce_patchset_changed_files(raw) -> list[dict]:
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("new_path") or "").strip()
+        if not path:
+            continue
+        normalized = {
+            "status": str(item.get("status") or "M").strip()[:16] or "M",
+            "path": path[:500],
+        }
+        old_path = str(item.get("old_path") or "").strip()
+        if old_path:
+            normalized["old_path"] = old_path[:500]
+        out.append(normalized)
+        if len(out) >= 256:
+            break
+    return out
+
+
+def _sanitize_patchset_manifest_value(value, *, depth: int = 0):
+    if depth >= 4:
+        return "..."
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, list):
+        return [_sanitize_patchset_manifest_value(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, dict):
+        out: dict[str, object] = {}
+        for key, item in list(value.items())[:40]:
+            out[str(key)[:120]] = _sanitize_patchset_manifest_value(item, depth=depth + 1)
+        return out
+    return str(value)[:500]
+
+
+def _coerce_patchset_artifact_manifest(raw) -> dict:
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        return {}
+    return _sanitize_patchset_manifest_value(data)
+
+
+def _patchset_identity(task_id: str, base_sha: str, head_sha: str) -> str:
+    digest = hashlib.sha1(f"{task_id}|{base_sha}|{head_sha}".encode("utf-8")).hexdigest()
+    return f"ps_{digest[:24]}"
+
+
+def _normalize_patchset_status(value: str | None, *, default: str = db.PATCHSET_STATUS_DRAFT) -> str:
+    text = str(value or "").strip().lower()
+    if text in db.PATCHSET_ALLOWED_STATUSES:
+        return text
+    return default
+
+
+def _normalize_patchset_queue_status(value: str | None, *, default: str = "") -> str:
+    text = str(value or "").strip().lower()
+    if text in db.PATCHSET_ALLOWED_QUEUE_STATUSES:
+        return text
+    return default
+
+
+def _infer_patchset_queue_status(status: str, *, default: str = "") -> str:
+    normalized = _normalize_patchset_status(status, default=db.PATCHSET_STATUS_DRAFT)
+    if normalized == db.PATCHSET_STATUS_APPROVED:
+        return db.PATCHSET_QUEUE_QUEUED
+    if normalized == db.PATCHSET_STATUS_MERGED:
+        return db.PATCHSET_QUEUE_MERGED
+    if normalized == db.PATCHSET_STATUS_STALE:
+        return db.PATCHSET_QUEUE_STALE
+    if normalized in {
+        db.PATCHSET_STATUS_DRAFT,
+        db.PATCHSET_STATUS_SUBMITTED,
+        db.PATCHSET_STATUS_REJECTED,
+        db.PATCHSET_STATUS_SUPERSEDED,
+    }:
+        return ""
+    return default
+
+
+def _infer_patchset_status(stage: str, status_to: str | None, payload: dict) -> str:
+    stage_key = str(stage or "").strip().lower()
+    target_status = _norm_status(status_to)
+    reason = str(payload.get("reason") or "").strip().lower()
+    if stage_key in {"merge_to_acceptance", "acceptance_complete"} or target_status in {"pending_acceptance", "completed"}:
+        return db.PATCHSET_STATUS_MERGED
+    if stage_key in {"review_to_manager"} or target_status == "approved":
+        return db.PATCHSET_STATUS_APPROVED
+    if stage_key in {"merge_to_dev"}:
+        return db.PATCHSET_STATUS_STALE if "merge" in reason or "baseline" in reason else db.PATCHSET_STATUS_REJECTED
+    if stage_key in {"review_to_dev", "user_to_dev"} or target_status == "needs_changes":
+        return db.PATCHSET_STATUS_REJECTED
+    if stage_key in {"dev_to_review", "developer_handoff"} or target_status == "in_review":
+        return db.PATCHSET_STATUS_SUBMITTED
+    return db.PATCHSET_STATUS_DRAFT
+
+
+def _normalize_patchset_payload(
+    task: dict,
+    *,
+    stage: str,
+    status_to: str | None,
+    payload: dict,
+    commit_hash: str | None,
+    artifact_path: str | None,
+    from_agent: str,
+) -> dict | None:
+    raw = payload.get("patchset")
+    source = dict(raw) if isinstance(raw, dict) else {}
+    has_explicit_patchset = bool(source) or any(
+        str(payload.get(key) or "").strip()
+        for key in ("patchset_id", "base_sha", "head_sha")
+    )
+    if not has_explicit_patchset and stage not in COMMIT_REQUIRED_STAGES:
         return None
-    payload, commit_hash, conclusion = _prepare_handoff(task_for_handoff, handoff)
+
+    task_id = str(task.get("id") or "").strip()
+    base_sha = str(source.get("base_sha") or payload.get("base_sha") or "").strip()[:120]
+    head_sha = str(
+        source.get("head_sha")
+        or source.get("commit_hash")
+        or commit_hash
+        or payload.get("head_sha")
+        or payload.get("commit_hash")
+        or ""
+    ).strip()[:120]
+    patchset_id = str(source.get("id") or payload.get("patchset_id") or "").strip()[:80]
+    if not patchset_id and head_sha:
+        patchset_id = _patchset_identity(task_id, base_sha, head_sha)
+    if not patchset_id and not head_sha:
+        return None
+
+    commit_list = _coerce_patchset_commit_list(source.get("commit_list") or payload.get("commit_list"))
+    try:
+        commit_count = int(source.get("commit_count") or payload.get("commit_count") or 0)
+    except Exception:
+        commit_count = 0
+    if commit_count <= 0:
+        commit_count = len(commit_list)
+    if commit_count <= 0 and head_sha:
+        commit_count = 1
+
+    worktree_clean = source.get("worktree_clean")
+    if worktree_clean is None:
+        worktree_clean = payload.get("worktree_clean")
+    if isinstance(worktree_clean, str):
+        worktree_clean = worktree_clean.strip().lower() not in {"0", "false", "off", "no"}
+    if worktree_clean is None:
+        worktree_clean = True
+
+    merge_strategy = str(
+        source.get("merge_strategy")
+        or payload.get("merge_strategy")
+        or payload.get("auto_merge_strategy")
+        or ""
+    ).strip()[:80]
+    summary = str(
+        source.get("summary")
+        or payload.get("conclusion")
+        or payload.get("summary")
+        or ""
+    ).strip()[:1000]
+    status = _normalize_patchset_status(
+        source.get("status"),
+        default=_infer_patchset_status(stage, status_to, payload),
+    )
+
+    normalized = {
+        "id": patchset_id,
+        "task_id": task_id,
+        "source_branch": str(source.get("source_branch") or payload.get("source_branch") or "").strip()[:255],
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "commit_count": max(0, int(commit_count)),
+        "commit_list": commit_list,
+        "changed_files": _coerce_patchset_changed_files(
+            source.get("changed_files") if "changed_files" in source else payload.get("changed_files")
+        ),
+        "artifact_manifest": _coerce_patchset_artifact_manifest(
+            source.get("artifact_manifest") if "artifact_manifest" in source else payload.get("artifact_manifest")
+        ),
+        "diff_stat": str(source.get("diff_stat") or payload.get("diff_stat") or "").strip()[:4000],
+        "status": status,
+        "worktree_clean": bool(worktree_clean),
+        "merge_strategy": merge_strategy,
+        "summary": summary,
+        "artifact_path": str(source.get("artifact_path") or artifact_path or "").strip()[:1000],
+        "created_by_agent": str(source.get("created_by_agent") or from_agent or "").strip()[:80],
+        "queue_status": _normalize_patchset_queue_status(
+            source.get("queue_status") or payload.get("queue_status"),
+            default=_infer_patchset_queue_status(status),
+        ),
+        "queue_reason": str(source.get("queue_reason") or payload.get("queue_reason") or "").strip()[:240],
+        "queued_at": str(source.get("queued_at") or payload.get("queued_at") or "").strip()[:80],
+        "queue_started_at": str(source.get("queue_started_at") or payload.get("queue_started_at") or "").strip()[:80],
+        "queue_finished_at": str(source.get("queue_finished_at") or payload.get("queue_finished_at") or "").strip()[:80],
+        "approved_at": str(source.get("approved_at") or payload.get("approved_at") or "").strip()[:80],
+        "merged_at": str(source.get("merged_at") or payload.get("merged_at") or "").strip()[:80],
+        "reviewed_main_sha": str(source.get("reviewed_main_sha") or payload.get("reviewed_main_sha") or "").strip()[:120],
+        "queue_main_sha": str(source.get("queue_main_sha") or payload.get("queue_main_sha") or "").strip()[:120],
+    }
+    payload["patchset"] = normalized
+    payload.setdefault("patchset_id", patchset_id)
+    payload["patchset_status"] = status
+    payload["patchset_queue_status"] = normalized["queue_status"]
+    if head_sha and not payload.get("head_sha"):
+        payload["head_sha"] = head_sha
+    if base_sha and not payload.get("base_sha"):
+        payload["base_sha"] = base_sha
+    return normalized
+
+
+def _build_handoff_row(task_for_handoff: dict, handoff: HandoffCreate | None) -> tuple[dict | None, dict | None]:
+    if not handoff:
+        return None, None
+    payload, commit_hash, conclusion, patchset = _prepare_handoff(task_for_handoff, handoff)
     return {
         "stage": str(handoff.stage or "").strip(),
         "from_agent": str(handoff.from_agent or "").strip(),
@@ -1665,7 +1942,7 @@ def _build_handoff_row(task_for_handoff: dict, handoff: HandoffCreate | None) ->
         "conclusion": conclusion,
         "payload": payload,
         "artifact_path": handoff.artifact_path,
-    }
+    }, patchset
 
 
 async def _apply_transition_and_broadcast(
@@ -1675,6 +1952,7 @@ async def _apply_transition_and_broadcast(
     fields: dict,
     handoff_row: dict | None = None,
     log_row: dict | None = None,
+    patchset_row: dict | None = None,
     expected_run_id: str | None = None,
     expected_lease_token: str | None = None,
     skip_status_validation: bool = False,
@@ -1689,6 +1967,7 @@ async def _apply_transition_and_broadcast(
             fields=normalized_fields,
             handoff=handoff_row,
             log=log_row,
+            patchset=patchset_row,
             expected_run_id=expected_run_id,
             expected_lease_token=expected_lease_token,
         )
@@ -1703,6 +1982,10 @@ async def _apply_transition_and_broadcast(
     handoff = result.get("handoff")
     if handoff:
         await manager.broadcast({"event": "handoff_added", "handoff": _format_handoff(handoff)})
+
+    patchset = result.get("patchset")
+    if patchset:
+        await manager.broadcast({"event": "patchset_updated", "patchset": _format_patchset(patchset)})
 
     log = result.get("log")
     if log:
@@ -1728,6 +2011,7 @@ async def _apply_transition_and_broadcast(
         "task": task,
         "handoff": _format_handoff(handoff) if handoff else None,
         "log": log,
+        "patchset": _format_patchset(patchset) if patchset else None,
     }
 
 
@@ -1749,7 +2033,7 @@ def _resolve_blocked_retry(task: dict) -> tuple[str, str | None, str] | None:
     return None
 
 
-def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None, str]:
+def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None, str, dict | None]:
     stage = str(body.stage or "").strip()
     if not stage:
         raise HTTPException(422, "handoff.stage 不能为空")
@@ -1782,6 +2066,11 @@ def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None,
     raw_commit = (
         str(body.commit_hash or "").strip()
         or str(payload.get("commit_hash") or "").strip()
+        or (
+            str(payload.get("patchset", {}).get("head_sha") or "").strip()
+            if isinstance(payload.get("patchset"), dict)
+            else ""
+        )
         or (related_candidates[0] if related_candidates else "")
     )
     commit_hash = raw_commit[:120] if raw_commit else None
@@ -1802,7 +2091,17 @@ def _prepare_handoff(task: dict, body: HandoffCreate) -> tuple[dict, str | None,
     if stage in COMMIT_REQUIRED_STAGES and has_commit is not False and not commit_hash:
         raise HTTPException(422, f"stage={stage} 交接必须包含 commit_hash")
 
-    return payload, commit_hash, conclusion
+    patchset = _normalize_patchset_payload(
+        task,
+        stage=stage,
+        status_to=body.status_to,
+        payload=payload,
+        commit_hash=commit_hash,
+        artifact_path=body.artifact_path,
+        from_agent=from_agent,
+    )
+
+    return payload, commit_hash, conclusion, patchset
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
@@ -2482,7 +2781,7 @@ async def transition_task(
 
     task_for_handoff = dict(before)
     task_for_handoff.update(normalized_fields)
-    handoff_row = _build_handoff_row(task_for_handoff, body.handoff)
+    handoff_row, patchset_row = _build_handoff_row(task_for_handoff, body.handoff)
 
     return await _apply_transition_and_broadcast(
         task_id,
@@ -2490,6 +2789,7 @@ async def transition_task(
         fields=normalized_fields,
         handoff_row=handoff_row,
         log_row=log_row,
+        patchset_row=patchset_row,
         expected_run_id=body.expected_run_id,
         expected_lease_token=body.expected_lease_token,
     )
@@ -2529,7 +2829,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
     if action == "accept":
         if status != "pending_acceptance" and not force_action:
             raise HTTPException(409, f"仅 pending_acceptance 可验收通过，当前为 {status}")
-        fields = {"status": "completed", "assignee": None}
+        fields = {"status": "completed", "assignee": None, "current_patchset_status": "merged"}
         handoff_obj = HandoffCreate(
             stage="acceptance_complete",
             from_agent="user",
@@ -2560,6 +2860,7 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
             "feedback_source": "user",
             "feedback_stage": "user_to_dev",
             "feedback_actor": "user",
+            "current_patchset_status": "rejected",
         }
         handoff_obj = HandoffCreate(
             stage="user_to_dev",
@@ -2629,13 +2930,14 @@ async def task_action(task_id: str, body: TaskActionRequest, user: dict = Depend
     normalized_fields = _normalize_transition_fields(before, fields)
     task_for_handoff = dict(before)
     task_for_handoff.update(normalized_fields)
-    handoff_row = _build_handoff_row(task_for_handoff, handoff_obj)
+    handoff_row, patchset_row = _build_handoff_row(task_for_handoff, handoff_obj)
     result = await _apply_transition_and_broadcast(
         task_id,
         before=before,
         fields=normalized_fields,
         handoff_row=handoff_row,
         log_row=log_row,
+        patchset_row=patchset_row,
         skip_status_validation=force_action,
     )
     result["action"] = action
@@ -2803,6 +3105,8 @@ def _format_handoff(h: dict) -> dict:
     out["payload"] = payload
     if not out.get("commit_hash"):
         ch = payload.get("commit_hash")
+        if not ch and isinstance(payload.get("patchset"), dict):
+            ch = payload["patchset"].get("head_sha") or payload["patchset"].get("commit_hash")
         out["commit_hash"] = ch if isinstance(ch, str) and ch.strip() else None
     if not out.get("conclusion"):
         cc = payload.get("conclusion")
@@ -2815,12 +3119,96 @@ def _format_handoff(h: dict) -> dict:
     return out
 
 
+def _format_patchset(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    out = dict(row)
+    out["status"] = _normalize_patchset_status(out.get("status"), default=db.PATCHSET_STATUS_DRAFT)
+    try:
+        out["commit_count"] = int(out.get("commit_count") or 0)
+    except Exception:
+        out["commit_count"] = 0
+    raw_commit_list = out.get("commit_list")
+    out["commit_list"] = _coerce_patchset_commit_list(raw_commit_list)
+    out["changed_files"] = _coerce_patchset_changed_files(out.get("changed_files"))
+    out["artifact_manifest"] = _coerce_patchset_artifact_manifest(out.get("artifact_manifest"))
+    raw_clean = out.get("worktree_clean")
+    if isinstance(raw_clean, str):
+        out["worktree_clean"] = raw_clean.strip().lower() not in {"0", "false", "off", "no"}
+    else:
+        out["worktree_clean"] = bool(raw_clean)
+    return out
+
+
 @app.get("/tasks/{task_id}/handoffs")
 async def get_handoffs(task_id: str):
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
     return [_format_handoff(h) for h in db.get_handoffs(task_id)]
+
+
+@app.get("/tasks/{task_id}/patchsets")
+async def get_task_patchsets(task_id: str, user: dict = Depends(require_user)):
+    require_task_access(task_id, user)
+    return [_format_patchset(item) for item in db.list_task_patchsets(task_id)]
+
+
+@app.post("/tasks/{task_id}/patchsets", status_code=201)
+async def upsert_task_patchset(
+    task_id: str,
+    body: PatchsetUpsertRequest,
+    principal: dict = Depends(require_agent_or_user),
+):
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if principal.get("auth_type") == "user":
+        require_task_access(task_id, principal)
+    if body.expected_run_id or body.expected_lease_token:
+        ok, reason = db.validate_task_lease(
+            task_id=task_id,
+            expected_run_id=body.expected_run_id,
+            expected_lease_token=body.expected_lease_token,
+            strict_if_active=False,
+        )
+        if not ok:
+            if reason == "task_not_found":
+                raise HTTPException(404, "Task not found")
+            raise HTTPException(409, reason)
+
+    payload = dict(body.patchset or {})
+    payload.setdefault("task_id", task_id)
+    saved_patchset = db.save_task_patchset(
+        task_id,
+        payload,
+        update_task_refs=bool(body.update_task_refs),
+    )
+    if not saved_patchset:
+        raise HTTPException(422, "patchset payload 无效")
+    formatted = _format_patchset(saved_patchset)
+    await manager.broadcast({"event": "patchset_updated", "patchset": formatted})
+    if body.update_task_refs:
+        refreshed_task = db.get_task(task_id)
+        if refreshed_task:
+            await manager.broadcast({"event": "task_updated", "task": refreshed_task})
+    return formatted
+
+
+@app.get("/runtime/patchset-metrics")
+async def get_runtime_patchset_metrics(
+    project_id: str | None = Query(default=None),
+    user: dict = Depends(require_user),
+):
+    if project_id:
+        require_project_access(project_id, user)
+    return {
+        "flags": {
+            "task_delivery_model": TASK_DELIVERY_MODEL,
+            "manager_merge_mode": MANAGER_MERGE_MODE,
+        },
+        "metrics": db.get_patchset_metrics(project_id=project_id),
+    }
 
 
 @app.post("/tasks/{task_id}/handoffs", status_code=201)
@@ -2843,7 +3231,7 @@ async def add_handoff(
         if reason == "task_not_found":
             raise HTTPException(404, "Task not found")
         raise HTTPException(409, reason)
-    payload, commit_hash, conclusion = _prepare_handoff(task, body)
+    payload, commit_hash, conclusion, patchset = _prepare_handoff(task, body)
     stage = str(body.stage or "").strip()
     from_agent = str(body.from_agent or "").strip()
     handoff = db.add_handoff(
@@ -2860,8 +3248,14 @@ async def add_handoff(
         payload=payload,
         artifact_path=body.artifact_path,
     )
+    saved_patchset = db.save_task_patchset(task_id, patchset, update_task_refs=True) if patchset else None
     formatted = _format_handoff(handoff)
     await manager.broadcast({"event": "handoff_added", "handoff": formatted})
+    if saved_patchset:
+        refreshed_task = db.get_task(task_id)
+        if refreshed_task:
+            await manager.broadcast({"event": "task_updated", "task": refreshed_task})
+        await manager.broadcast({"event": "patchset_updated", "patchset": _format_patchset(saved_patchset)})
     return formatted
 
 @app.get("/tasks/{task_id}/files")
@@ -2882,6 +3276,8 @@ async def get_task_files(task_id: str, user: dict = Depends(require_user)):
     )
     status       = task.get("status", "")
     commit_hash  = task.get("commit_hash", "")
+    current_patchset_id = str(task.get("current_patchset_id") or "").strip()
+    current_patchset = db.get_task_patchset(current_patchset_id) if current_patchset_id else None
 
     if status == "pending_acceptance" or status == "completed":
         inspect_dir = proj_root
@@ -2895,7 +3291,34 @@ async def get_task_files(task_id: str, user: dict = Depends(require_user)):
     files = []
     has_real_commit = False
 
-    if commit_hash:
+    patchset_base = str((current_patchset or {}).get("base_sha") or "").strip()
+    patchset_head = str((current_patchset or {}).get("head_sha") or "").strip()
+    if patchset_base and patchset_head:
+        probe_dirs = []
+        if inspect_dir.exists():
+            probe_dirs.append(inspect_dir)
+        if proj_root.exists() and proj_root not in probe_dirs:
+            probe_dirs.append(proj_root)
+        for probe in probe_dirs:
+            try:
+                res = subprocess.run(
+                    ["git", "diff", "--name-only", f"{patchset_base}..{patchset_head}"],
+                    cwd=str(probe),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                raw = [f.strip() for f in res.stdout.strip().splitlines() if f.strip()]
+                if not raw:
+                    continue
+                files = [(rel_base + f) for f in raw]
+                has_real_commit = bool(files)
+                if has_real_commit:
+                    break
+            except Exception:
+                continue
+
+    if commit_hash and not has_real_commit:
         probe_dirs = []
         if inspect_dir.exists():
             probe_dirs.append(inspect_dir)
@@ -2941,15 +3364,15 @@ SPECIALIZED_RUNTIME_CLASS_MAP = {
     "leader": "LeaderAgent",
 }
 SPECIALIZED_RUNTIME_SUMMARY_MAP = {
-    "reviewer": "专用审查流程：基于 commit 精确审查，解析结构化结论，并处理系统重试/阻塞。",
-    "manager": "专用合并流程：只按目标 commit_hash 精确合并到 main，并处理冲突与验收交接。",
+    "reviewer": "专用审查流程：优先基于 patchset 全量差异审查；无 patchset 时回退到 commit 兼容路径，并处理系统重试/阻塞。",
+    "manager": "专用合并流程：优先基于 patchset 做 deterministic squash merge；无 patchset 时回退到 commit 兼容路径。",
     "leader": "专用主管流程：先补全需求，再判断简单执行或结构化分解子任务。",
 }
 GENERIC_AGENT_RUNTIME_SUMMARY = (
     "通用模板流程：按 agent_types 中的 prompt / poll_statuses / next_status / working_status 配置驱动。"
 )
 GENERIC_DEVELOPER_RUNTIME_SUMMARY = (
-    "通用模板流程 + developer 策略：固定开发状态流转、完整 commit_hash、提交后状态同步重试。"
+    "通用模板流程 + developer 策略：固定开发状态流转、patchset 快照、兼容 commit_hash、提交后状态同步重试。"
 )
 
 

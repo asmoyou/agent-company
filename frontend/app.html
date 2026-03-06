@@ -889,6 +889,7 @@
     #modal-profile > div,
     #modal-users > div,
     #modal-user-edit > div,
+    #modal-patchset-metrics > div,
     #modal-task > div{
       background:linear-gradient(165deg, rgba(15,23,42,.96), rgba(15,23,42,.88));
       border-color:rgba(100,116,139,.58)!important;
@@ -1137,6 +1138,11 @@
       disabled>
       📁 办公区
     </button>
+    <button onclick="openPatchsetMetricsModal()" id="btn-patchset-metrics"
+      class="header-btn text-xs px-3 py-1.5 rounded-lg transition"
+      title="查看 patchset queue、退回率与灰度配置">
+      📈 Patchset
+    </button>
   </div>
 
   <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1 shrink-0">
@@ -1372,6 +1378,36 @@
   </div>
 </div>
 
+<!-- Patchset Metrics Modal -->
+<div id="modal-patchset-metrics" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl shadow-2xl flex flex-col" style="max-height:85vh;">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between gap-3 shrink-0">
+      <div>
+        <h3 class="font-semibold text-white">Patchset 指标</h3>
+        <div id="patchset-metrics-scope" class="text-xs text-slate-500 mt-1">当前项目 / 全局</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button type="button" onclick="loadPatchsetMetrics(true)"
+          class="header-btn text-xs px-3 py-1.5 rounded-lg transition">刷新</button>
+        <button onclick="closePatchsetMetricsModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+      </div>
+    </div>
+    <div class="flex-1 overflow-y-auto p-5 space-y-4">
+      <div id="patchset-metrics-flags" class="text-xs text-slate-400 bg-slate-900/40 border border-slate-700 rounded-lg px-3 py-2">
+        加载中...
+      </div>
+      <div id="patchset-metrics-window-tabs" class="flex items-center gap-2">
+        <button type="button" onclick="setPatchsetMetricsWindow('all_time')"
+          class="header-btn text-xs px-3 py-1.5 rounded-lg transition">累计历史</button>
+        <button type="button" onclick="setPatchsetMetricsWindow('last_24h')"
+          class="header-btn text-xs px-3 py-1.5 rounded-lg transition">最近 24h</button>
+      </div>
+      <div id="patchset-metrics-grid" class="grid grid-cols-2 md:grid-cols-3 gap-3"></div>
+      <div id="patchset-metrics-note" class="text-xs text-slate-500"></div>
+    </div>
+  </div>
+</div>
+
 <!-- Project Workspace Drawer -->
 <div id="file-overlay" onclick="closeFileBrowser()" class="fixed inset-0 bg-black/40 z-10"></div>
 <div id="file-panel" class="fixed top-0 left-0 h-full bg-slate-800 border-r border-slate-700 z-20 flex flex-col shadow-2xl">
@@ -1557,6 +1593,12 @@
     <div id="panel-feedback-history-wrap" class="hidden">
       <div class="text-xs text-slate-400 mb-2">修改意见历史</div>
       <div id="panel-feedback-history" class="space-y-2 text-xs"></div>
+    </div>
+
+    <!-- Patchset -->
+    <div id="panel-patchset-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-1">Patchset</div>
+      <div id="panel-patchset" class="rounded-lg border border-slate-700 bg-slate-900/40 p-3 text-xs"></div>
     </div>
 
     <!-- Commit -->
@@ -2302,6 +2344,9 @@ const requestedAgentKey = _urlParams.get("agent") || "";
 let terminalAgentFilter = terminalOnlyMode ? requestedAgentKey : "";
 let currentProjectId = requestedProjectId || loadStoredProjectId() || null;
 let currentTaskId = null;
+let taskHandoffRowsByTask = {};
+let taskPatchsetRowsByTask = {};
+let patchsetMetricsState = {loading:false, payload:null, projectId:"", window:"all_time"};
 let ws = null;
 let wsPingTimer = null;
 let wsReconnectTimer = null;
@@ -2674,13 +2719,13 @@ function getRuntimeAgentInfo(atOrKey) {
       runtime_class: "ReviewerAgent",
       runtime_family: "specialized",
       runtime_profile: "",
-      runtime_summary: "专用审查流程：基于 commit 精确审查，解析结构化结论，并处理系统重试/阻塞。",
+      runtime_summary: "专用审查流程：优先基于 patchset 全量差异审查；无 patchset 时回退到 commit 兼容路径，并处理系统重试/阻塞。",
     },
     manager: {
       runtime_class: "ManagerAgent",
       runtime_family: "specialized",
       runtime_profile: "",
-      runtime_summary: "专用合并流程：只按目标 commit_hash 精确合并到 main，并处理冲突与验收交接。",
+      runtime_summary: "专用合并流程：优先基于 patchset 做 deterministic squash merge；无 patchset 时回退到 commit 兼容路径。",
     },
     leader: {
       runtime_class: "LeaderAgent",
@@ -2695,7 +2740,7 @@ function getRuntimeAgentInfo(atOrKey) {
     runtime_family: "generic",
     runtime_profile: runtimeProfile,
     runtime_summary: runtimeProfile
-      ? "通用模板流程 + developer 策略：固定开发状态流转、完整 commit_hash、提交后状态同步重试。"
+      ? "通用模板流程 + developer 策略：固定开发状态流转、patchset 快照、兼容 commit_hash、提交后状态同步重试。"
       : "通用模板流程：按 agent_types 中的 prompt / poll_statuses / next_status / working_status 配置驱动。",
   };
   const base = fallback;
@@ -2976,6 +3021,129 @@ function openAgentsModal() {
 function closeAgentsModal() {
   document.getElementById("modal-agents").classList.add("hidden");
 }
+
+function openPatchsetMetricsModal() {
+  document.getElementById("modal-patchset-metrics").classList.remove("hidden");
+  loadPatchsetMetrics(true);
+}
+
+function closePatchsetMetricsModal() {
+  document.getElementById("modal-patchset-metrics").classList.add("hidden");
+}
+
+function fmtMetricPercent(value) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return "0%";
+  return `${(num * 100).toFixed(num >= 0.1 ? 1 : 2)}%`;
+}
+
+function fmtMetricSeconds(value) {
+  const secs = Number(value || 0);
+  if (!Number.isFinite(secs) || secs <= 0) return "0s";
+  if (secs < 60) return `${secs.toFixed(0)}s`;
+  if (secs < 3600) return `${(secs / 60).toFixed(1)}m`;
+  return `${(secs / 3600).toFixed(1)}h`;
+}
+
+function setPatchsetMetricsWindow(windowKey) {
+  patchsetMetricsState.window = windowKey === "last_24h" ? "last_24h" : "all_time";
+  if (patchsetMetricsState.payload) renderPatchsetMetrics(patchsetMetricsState.payload);
+}
+
+function renderPatchsetMetrics(payload) {
+  const scopeEl = document.getElementById("patchset-metrics-scope");
+  const flagsEl = document.getElementById("patchset-metrics-flags");
+  const tabsEl = document.getElementById("patchset-metrics-window-tabs");
+  const gridEl = document.getElementById("patchset-metrics-grid");
+  const noteEl = document.getElementById("patchset-metrics-note");
+  if (!scopeEl || !flagsEl || !gridEl || !noteEl || !tabsEl) return;
+
+  const metricsRoot = payload?.metrics || {};
+  const selectedWindow = String(patchsetMetricsState.window || "all_time").trim() || "all_time";
+  const metrics = metricsRoot?.windows?.[selectedWindow] || metricsRoot || {};
+  const flags = payload?.flags || {};
+  const projectName = currentProjectId && projects[currentProjectId]
+    ? projects[currentProjectId].name
+    : "";
+  scopeEl.textContent = currentProjectId
+    ? `项目: ${projectName || currentProjectId}`
+    : "全局聚合";
+  tabsEl.innerHTML = ["all_time", "last_24h"].map((key) => {
+    const active = key === selectedWindow;
+    const label = key === "last_24h" ? "最近 24h" : "累计历史";
+    return `<button type="button" onclick="setPatchsetMetricsWindow('${escAttr(key)}')"
+      class="px-3 py-1.5 rounded-lg text-xs border transition ${active ? "border-cyan-500/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 bg-slate-900/30 text-slate-400 hover:text-slate-200"}">${escHtml(label)}</button>`;
+  }).join("");
+  flagsEl.innerHTML = `
+    <div class="flex flex-wrap items-center gap-2">
+      <span>delivery=<span class="font-mono text-slate-200">${escHtml(flags.task_delivery_model || "-")}</span></span>
+      <span>merge=<span class="font-mono text-slate-200">${escHtml(flags.manager_merge_mode || "-")}</span></span>
+      <span>window=<span class="font-mono text-slate-200">${escHtml(selectedWindow)}</span></span>
+    </div>
+  `;
+
+  const cards = [
+    ["排队中", String(metrics.queued_patchsets ?? 0), "当前等待 merge queue 的 patchset"],
+    ["处理中", String(metrics.processing_patchsets ?? 0), "manager 正在处理的 patchset"],
+    ["已合并", String(metrics.merged_patchsets ?? 0), "成功落到 main 的 patchset"],
+    ["已过期", String(metrics.stale_patchsets ?? 0), "因 main 前进或冲突失效的 patchset"],
+    ["Review 退回率", fmtMetricPercent(metrics.review_return_rate), "review_to_dev / 全部 review 决策"],
+    ["Manager 退回率", fmtMetricPercent(metrics.manager_return_rate), "merge_to_dev / 全部 manager 决策"],
+    ["Preflight 失败率", fmtMetricPercent(metrics.preflight_fail_rate), "dirty worktree / 无提交 / 无有效交付"],
+    ["平均审查轮次", Number(metrics.review_cycles_per_task || 0).toFixed(2), "每个任务平均 review 轮次"],
+    ["平均 queue 延迟", fmtMetricSeconds(metrics.avg_queue_latency_secs), "从 queued_at 到 merged_at 的平均耗时"],
+    ["提交到验收", fmtMetricSeconds(metrics.avg_submit_to_acceptance_secs), "从首个 patchset 到 pending_acceptance/completed"],
+  ];
+  gridEl.innerHTML = cards.map(([label, value, hint]) => `
+    <div class="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-3">
+      <div class="text-[11px] text-slate-500">${escHtml(label)}</div>
+      <div class="text-lg font-semibold text-slate-100 mt-1">${escHtml(value)}</div>
+      <div class="text-[11px] text-slate-600 mt-1">${escHtml(hint)}</div>
+    </div>
+  `).join("");
+  const staleReasons = metrics.stale_reason_counts && typeof metrics.stale_reason_counts === "object"
+    ? Object.entries(metrics.stale_reason_counts)
+        .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+        .slice(0, 3)
+        .map(([key, value]) => `${key}:${value}`)
+        .join(" · ")
+    : "";
+  noteEl.textContent = `review pass=${metrics.review_pass_count || 0} · review return=${metrics.review_return_count || 0} · manager pass=${metrics.manager_pass_count || 0} · manager return=${metrics.manager_return_count || 0}${staleReasons ? ` · stale reason=${staleReasons}` : ""}`;
+}
+
+async function loadPatchsetMetrics(force = false) {
+  const modal = document.getElementById("modal-patchset-metrics");
+  if (!modal || modal.classList.contains("hidden")) return;
+  if (patchsetMetricsState.loading) return;
+  const projectId = String(currentProjectId || "").trim();
+  if (!force && patchsetMetricsState.payload && patchsetMetricsState.projectId === projectId) {
+    renderPatchsetMetrics(patchsetMetricsState.payload);
+    return;
+  }
+  patchsetMetricsState.loading = true;
+  const flagsEl = document.getElementById("patchset-metrics-flags");
+  const gridEl = document.getElementById("patchset-metrics-grid");
+  const noteEl = document.getElementById("patchset-metrics-note");
+  if (flagsEl) flagsEl.textContent = "加载中...";
+  if (gridEl) gridEl.innerHTML = "";
+  if (noteEl) noteEl.textContent = "";
+  try {
+    const url = new URL(`${API}/runtime/patchset-metrics`, window.location.origin);
+    if (projectId) url.searchParams.set("project_id", projectId);
+    const res = await apiFetch(url.pathname + url.search);
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    patchsetMetricsState = {...patchsetMetricsState, loading:false, payload, projectId};
+    renderPatchsetMetrics(payload);
+  } catch (err) {
+    patchsetMetricsState.loading = false;
+    if (flagsEl) flagsEl.textContent = "加载失败";
+    if (noteEl) noteEl.textContent = normalizeMsgText(err?.message || err || "请求失败");
+  } finally {
+    patchsetMetricsState.loading = false;
+  }
+}
+
 function renderAgentTypesList() {
   const el = document.getElementById("agent-types-list");
   const editable = isAdminUser();
@@ -3241,6 +3409,9 @@ function onProjectChange() {
   updateProjectUI();
   refreshBoard();
   renderTerminals();
+  if (!document.getElementById("modal-patchset-metrics").classList.contains("hidden")) {
+    loadPatchsetMetrics(true);
+  }
   if (document.getElementById("file-panel").classList.contains("open")) {
     fbClearPreview(true);
     fbNavigate("");
@@ -4950,6 +5121,7 @@ async function openPanel(id) {
     cmWrap.classList.remove("hidden");
     document.getElementById("panel-commit").textContent = task.commit_hash;
   } else { cmWrap.classList.add("hidden"); }
+  renderTaskPatchset(task);
 
   document.getElementById("panel").classList.remove("hidden-panel");
   document.getElementById("panel-overlay").classList.remove("hidden");
@@ -4957,6 +5129,7 @@ async function openPanel(id) {
   // Heavy panels are loaded lazily in parallel to keep opening snappy.
   loadTaskFiles(id, task.status);
   loadTaskDependencies(id);
+  loadTaskPatchsets(id);
   loadTaskHandoffs(id);
 }
 
@@ -5011,6 +5184,302 @@ function renderFeedbackHistory(task) {
     </div>`;
   }).join("");
   wrap.classList.remove("hidden");
+}
+
+const PATCHSET_STATUS_LABEL = {
+  draft: "草稿",
+  submitted: "已提交",
+  approved: "已通过",
+  rejected: "已退回",
+  stale: "已过期",
+  merged: "已合并",
+  superseded: "已替代",
+};
+
+const PATCHSET_STATUS_BADGE = {
+  draft: "bg-slate-700/70 text-slate-300",
+  submitted: "bg-sky-900/40 text-sky-300",
+  approved: "bg-emerald-900/40 text-emerald-300",
+  rejected: "bg-rose-900/40 text-rose-300",
+  stale: "bg-amber-900/40 text-amber-300",
+  merged: "bg-teal-900/40 text-teal-300",
+  superseded: "bg-fuchsia-900/40 text-fuchsia-300",
+};
+
+const PATCHSET_QUEUE_LABEL = {
+  queued: "排队中",
+  processing: "处理中",
+  merged: "已出队",
+  stale: "需刷新",
+  failed: "失败",
+};
+
+const PATCHSET_QUEUE_BADGE = {
+  queued: "bg-cyan-900/40 text-cyan-300",
+  processing: "bg-indigo-900/40 text-indigo-300",
+  merged: "bg-teal-900/40 text-teal-300",
+  stale: "bg-amber-900/40 text-amber-300",
+  failed: "bg-rose-900/40 text-rose-300",
+};
+
+function normalizePatchsetBool(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return null;
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return null;
+}
+
+function normalizePatchsetCount(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+function normalizePatchsetRecord(source, fallback) {
+  const src = source && typeof source === "object" ? source : {};
+  const fb = fallback && typeof fallback === "object" ? fallback : {};
+  const commitList = Array.isArray(src.commit_list)
+    ? src.commit_list
+    : Array.isArray(fb.commit_list)
+    ? fb.commit_list
+    : [];
+  const id = String(
+    src.id ??
+    src.patchset_id ??
+    src.current_patchset_id ??
+    fb.current_patchset_id ??
+    fb.patchset_id ??
+    fb.id ??
+    "",
+  ).trim();
+  const baseSha = String(
+    src.base_sha ??
+    src.current_patchset_base_sha ??
+    fb.current_patchset_base_sha ??
+    fb.base_sha ??
+    "",
+  ).trim();
+  const headSha = String(
+    src.head_sha ??
+    src.commit_hash ??
+    src.current_patchset_head_sha ??
+    fb.current_patchset_head_sha ??
+    fb.head_sha ??
+    fb.commit_hash ??
+    "",
+  ).trim();
+  const status = String(
+    src.status ??
+    src.patchset_status ??
+    src.current_patchset_status ??
+    fb.current_patchset_status ??
+    fb.patchset_status ??
+    fb.status ??
+    "",
+  ).trim();
+  const commitCount = normalizePatchsetCount(
+    src.commit_count,
+    src.current_patchset_commit_count,
+    fb.current_patchset_commit_count,
+    fb.commit_count,
+    commitList.length ? commitList.length : null,
+  );
+  const worktreeClean = normalizePatchsetBool(
+    src.worktree_clean ??
+    src.current_patchset_worktree_clean ??
+    fb.current_patchset_worktree_clean ??
+    fb.worktree_clean,
+  );
+  const sourceBranch = String(src.source_branch ?? fb.source_branch ?? "").trim();
+  const mergeStrategy = String(src.merge_strategy ?? fb.merge_strategy ?? "").trim();
+  const queueStatus = String(src.queue_status ?? fb.queue_status ?? "").trim();
+  const queueReason = String(src.queue_reason ?? fb.queue_reason ?? "").trim();
+  const reviewedMainSha = String(src.reviewed_main_sha ?? fb.reviewed_main_sha ?? "").trim();
+  const queueMainSha = String(src.queue_main_sha ?? fb.queue_main_sha ?? "").trim();
+  const queuedAt = String(src.queued_at ?? fb.queued_at ?? "").trim();
+  const approvedAt = String(src.approved_at ?? fb.approved_at ?? "").trim();
+  const mergedAt = String(src.merged_at ?? fb.merged_at ?? "").trim();
+  const changedFilesRaw = Array.isArray(src.changed_files)
+    ? src.changed_files
+    : Array.isArray(fb.changed_files)
+    ? fb.changed_files
+    : [];
+  const changedFiles = changedFilesRaw
+    .filter(item => item && typeof item === "object" && String(item.path || item.new_path || "").trim())
+    .slice(0, 256)
+    .map(item => ({
+      status: String(item.status || "M").trim() || "M",
+      path: String(item.path || item.new_path || "").trim(),
+      old_path: String(item.old_path || "").trim(),
+    }));
+  const artifactManifest = src.artifact_manifest && typeof src.artifact_manifest === "object"
+    ? src.artifact_manifest
+    : fb.artifact_manifest && typeof fb.artifact_manifest === "object"
+    ? fb.artifact_manifest
+    : {};
+  if (!id && !baseSha && !headSha && !status && commitCount === null && worktreeClean === null) {
+    return null;
+  }
+  return {
+    id,
+    patchset_id: id,
+    base_sha: baseSha,
+    head_sha: headSha,
+    status,
+    commit_count: commitCount,
+    worktree_clean: worktreeClean,
+    source_branch: sourceBranch,
+    merge_strategy: mergeStrategy,
+    queue_status: queueStatus,
+    queue_reason: queueReason,
+    reviewed_main_sha: reviewedMainSha,
+    queue_main_sha: queueMainSha,
+    queued_at: queuedAt,
+    approved_at: approvedAt,
+    merged_at: mergedAt,
+    changed_files: changedFiles,
+    artifact_manifest: artifactManifest,
+  };
+}
+
+function selectTaskPatchset(taskRef) {
+  const task = typeof taskRef === "string" ? tasks[String(taskRef || "")] : taskRef;
+  if (!task || typeof task !== "object") return null;
+  const taskPatchset = normalizePatchsetRecord(task, task);
+  const handoffRows = Array.isArray(taskHandoffRowsByTask[task.id]) ? taskHandoffRowsByTask[task.id] : [];
+  const patchsetRows = Array.isArray(taskPatchsetRowsByTask[task.id]) ? taskPatchsetRowsByTask[task.id] : [];
+  const handoffPatchsets = handoffRows
+    .map(row => normalizePatchsetRecord(row?.payload?.patchset, row?.payload || task))
+    .filter(Boolean);
+  const storedPatchsets = patchsetRows
+    .map(row => normalizePatchsetRecord(row, task))
+    .filter(Boolean);
+  const targetId = String(task.current_patchset_id || taskPatchset?.id || "").trim();
+  const latestHandoffPatchset = handoffPatchsets.length ? handoffPatchsets[handoffPatchsets.length - 1] : null;
+  const latestStoredPatchset = storedPatchsets.length ? storedPatchsets[storedPatchsets.length - 1] : null;
+  const matchedHandoffPatchset = targetId
+    ? [...handoffPatchsets].reverse().find(item => item.id === targetId) || null
+    : null;
+  const matchedStoredPatchset = targetId
+    ? [...storedPatchsets].reverse().find(item => item.id === targetId) || null
+    : null;
+  return (
+    normalizePatchsetRecord(matchedHandoffPatchset, matchedStoredPatchset || task) ||
+    normalizePatchsetRecord(matchedStoredPatchset, task) ||
+    normalizePatchsetRecord(latestHandoffPatchset, latestStoredPatchset || task) ||
+    normalizePatchsetRecord(latestStoredPatchset, task) ||
+    taskPatchset
+  );
+}
+
+function renderPatchsetBlock(patchset, {compact = false} = {}) {
+  const data = normalizePatchsetRecord(patchset);
+  if (!data) return "";
+  const status = String(data.status || "").trim();
+  const statusLabel = PATCHSET_STATUS_LABEL[status] || status || "";
+  const statusClass = PATCHSET_STATUS_BADGE[status] || "bg-slate-700/70 text-slate-300";
+  const queueStatus = String(data.queue_status || "").trim();
+  const queueLabel = PATCHSET_QUEUE_LABEL[queueStatus] || queueStatus || "";
+  const queueClass = PATCHSET_QUEUE_BADGE[queueStatus] || "bg-slate-700/70 text-slate-300";
+  const countText = data.commit_count === null ? "" : String(data.commit_count);
+  const cleanText = data.worktree_clean === null ? "" : (data.worktree_clean ? "true" : "false");
+  const hashClass = compact ? "text-[11px]" : "text-xs";
+  const hashValue = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const visible = compact ? raw.slice(0, 12) : raw;
+    return `<span class="font-mono ${hashClass} break-all" title="${escAttr(raw)}">${escHtml(visible)}</span>`;
+  };
+  const sourceBranchLine = data.source_branch
+    ? `<div class="text-slate-500 mt-1">source_branch: <span class="font-mono text-sky-300 break-all">${escHtml(data.source_branch)}</span></div>`
+    : "";
+  const mergeStrategyLine = data.merge_strategy
+    ? `<div class="text-slate-500 mt-1">merge_strategy: <span class="font-mono text-fuchsia-300">${escHtml(data.merge_strategy)}</span></div>`
+    : "";
+  const changedFiles = Array.isArray(data.changed_files) ? data.changed_files : [];
+  const changedFilesSummary = changedFiles.length
+    ? changedFiles.slice(0, compact ? 3 : 5).map((item) => {
+        const statusText = escHtml(String(item.status || "M").toUpperCase());
+        const pathText = escHtml(String(item.path || "").trim());
+        const oldPath = String(item.old_path || "").trim();
+        if (oldPath) {
+          return `<span class="font-mono text-[11px]">${statusText} ${escHtml(oldPath)} → ${pathText}</span>`;
+        }
+        return `<span class="font-mono text-[11px]">${statusText} ${pathText}</span>`;
+      }).join(" · ")
+    : "";
+  const changedFilesLine = changedFilesSummary
+    ? `<div class="text-slate-500 mt-1">changed_files: <span class="text-slate-300">${changedFilesSummary}${changedFiles.length > (compact ? 3 : 5) ? ` · +${changedFiles.length - (compact ? 3 : 5)}` : ""}</span></div>`
+    : "";
+  const artifactManifest = data.artifact_manifest && typeof data.artifact_manifest === "object" ? data.artifact_manifest : {};
+  const manifestPath = String(artifactManifest.path || "").trim();
+  const manifestKeys = Array.isArray(artifactManifest.keys) ? artifactManifest.keys.slice(0, 4) : [];
+  const manifestLine = manifestPath || manifestKeys.length
+    ? `<div class="text-slate-500 mt-1">manifest: ${manifestPath ? `<span class="font-mono text-cyan-300">${escHtml(manifestPath)}</span>` : ""}${manifestKeys.length ? ` <span class="text-slate-400">${escHtml(manifestKeys.join(" · "))}</span>` : ""}</div>`
+    : "";
+  return `<div class="rounded-lg border ${compact ? "border-fuchsia-900/20 bg-slate-900/30 p-2 mt-1" : "border-fuchsia-900/30 bg-slate-900/40 p-3"}">
+    <div class="flex flex-wrap items-center gap-1.5">
+      <span class="text-[10px] uppercase tracking-wide text-fuchsia-300">patchset</span>
+      ${data.id ? `<span class="font-mono text-[11px] text-fuchsia-200 break-all">${escHtml(data.id)}</span>` : ""}
+      ${statusLabel ? `<span class="px-1.5 py-0.5 rounded text-[10px] ${statusClass}">${escHtml(statusLabel)}</span>` : ""}
+      ${queueLabel ? `<span class="px-1.5 py-0.5 rounded text-[10px] ${queueClass}">${escHtml(queueLabel)}</span>` : ""}
+      ${countText ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">commit_count: ${escHtml(countText)}</span>` : ""}
+      ${cleanText ? `<span class="px-1.5 py-0.5 rounded text-[10px] ${data.worktree_clean ? "bg-emerald-900/30 text-emerald-300" : "bg-amber-900/30 text-amber-300"}">worktree_clean: ${escHtml(cleanText)}</span>` : ""}
+    </div>
+    <div class="grid gap-1 mt-2">
+      ${data.base_sha ? `<div class="text-slate-500">base: ${hashValue(data.base_sha)}</div>` : ""}
+      ${data.head_sha ? `<div class="text-slate-500">head: ${hashValue(data.head_sha)}</div>` : ""}
+      ${data.reviewed_main_sha ? `<div class="text-slate-500">reviewed_main: ${hashValue(data.reviewed_main_sha)}</div>` : ""}
+      ${data.queue_main_sha ? `<div class="text-slate-500">queue_main: ${hashValue(data.queue_main_sha)}</div>` : ""}
+      ${sourceBranchLine}
+      ${mergeStrategyLine}
+      ${changedFilesLine}
+      ${manifestLine}
+      ${data.queue_reason ? `<div class="text-slate-500 mt-1">queue_reason: <span class="text-amber-300">${escHtml(data.queue_reason)}</span></div>` : ""}
+      ${data.queued_at ? `<div class="text-slate-600 mt-1">queued_at: ${escHtml(formatLocalDateTime(data.queued_at))}</div>` : ""}
+      ${data.approved_at ? `<div class="text-slate-600 mt-1">approved_at: ${escHtml(formatLocalDateTime(data.approved_at))}</div>` : ""}
+      ${data.merged_at ? `<div class="text-slate-600 mt-1">merged_at: ${escHtml(formatLocalDateTime(data.merged_at))}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderRefreshHintBlock(hint) {
+  if (!hint || typeof hint !== "object") return "";
+  const steps = Array.isArray(hint.steps) ? hint.steps.slice(0, 3) : [];
+  const changedFiles = Array.isArray(hint.changed_files) ? hint.changed_files.slice(0, 4) : [];
+  const changedSummary = changedFiles.length
+    ? changedFiles.map((item) => `${String(item.status || "M").toUpperCase()} ${String(item.path || "").trim()}`).join(" · ")
+    : "";
+  const mainSummary = String(hint.reviewed_main_sha || "").trim() || String(hint.latest_main_sha || "").trim()
+    ? `base refresh: ${String(hint.reviewed_main_sha || "-").slice(0, 12)} -> ${String(hint.latest_main_sha || "-").slice(0, 12)}`
+    : "";
+  return `<div class="mt-2 rounded-lg border border-amber-900/40 bg-amber-950/20 p-2 text-xs text-amber-200">
+    <div class="font-medium">refresh_hint</div>
+    ${mainSummary ? `<div class="mt-1">${escHtml(mainSummary)}</div>` : ""}
+    ${changedSummary ? `<div class="mt-1">changed_files: <span class="font-mono">${escHtml(changedSummary)}</span></div>` : ""}
+    ${steps.length ? `<div class="mt-1">${steps.map((step, idx) => `${idx + 1}. ${step}`).join(" ")}</div>` : ""}
+  </div>`;
+}
+
+function renderTaskPatchset(taskRef) {
+  const wrap = document.getElementById("panel-patchset-wrap");
+  const el = document.getElementById("panel-patchset");
+  if (!wrap || !el) return;
+  const patchset = selectTaskPatchset(taskRef);
+  if (!patchset) {
+    wrap.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  wrap.classList.remove("hidden");
+  el.innerHTML = renderPatchsetBlock(patchset);
 }
 
 function fbCommonPathPrefix(paths) {
@@ -5157,10 +5626,26 @@ async function loadTaskHandoffs(taskId) {
     const res = await apiFetch(`${API}/tasks/${taskId}/handoffs`);
     if (!res.ok) throw new Error(await res.text());
     const list = await res.json();
+    taskHandoffRowsByTask[String(taskId || "")] = Array.isArray(list) ? list : [];
     renderHandoffs(list);
+    if (currentTaskId === taskId) renderTaskPatchset(taskId);
   } catch {
+    taskHandoffRowsByTask[String(taskId || "")] = [];
+    if (currentTaskId === taskId) renderTaskPatchset(taskId);
     el.innerHTML = "<div class='text-slate-500'>无法加载交接记录</div>";
   }
+}
+
+async function loadTaskPatchsets(taskId) {
+  try {
+    const res = await apiFetch(`${API}/tasks/${taskId}/patchsets`);
+    if (!res.ok) throw new Error(await res.text());
+    const list = await res.json();
+    taskPatchsetRowsByTask[String(taskId || "")] = Array.isArray(list) ? list : [];
+  } catch {
+    taskPatchsetRowsByTask[String(taskId || "")] = [];
+  }
+  if (currentTaskId === taskId) renderTaskPatchset(taskId);
 }
 
 function fmtPayload(payload) {
@@ -5180,12 +5665,16 @@ function dedupeHandoffRows(rows) {
   const seen = new Set();
   for (const row of (rows || [])) {
     if (!row || typeof row !== "object") continue;
+    const patchset = normalizePatchsetRecord(row?.payload?.patchset, row?.payload || row);
     const key = [
       row.stage || "",
       row.from_agent || "",
       row.to_agent || "",
       row.status_from || "",
       row.status_to || "",
+      patchset?.id || "",
+      patchset?.head_sha || "",
+      patchset?.status || "",
       row.commit_hash || row?.payload?.commit_hash || "",
       normalizeTextForCompare(row.conclusion || row?.payload?.conclusion || ""),
       normalizeTextForCompare(row.summary || ""),
@@ -5211,6 +5700,7 @@ function renderHandoffs(handoffs) {
     ? `<div class="text-[11px] text-slate-500 mb-1">已折叠重复交接 ${duplicateCount} 条</div>`
     : "";
   el.innerHTML = duplicateHint + deduped.map(h => {
+    const patchset = normalizePatchsetRecord(h?.payload?.patchset, h?.payload || {});
     const from = escHtml(h.from_agent || "-");
     const to = escHtml(h.to_agent || "-");
     const title = escHtml(h.title || h.stage || "交接");
@@ -5219,7 +5709,8 @@ function renderHandoffs(handoffs) {
     const stage = escHtml(h.stage || "");
     const sFrom = escHtml(h.status_from || "-");
     const sTo = escHtml(h.status_to || "-");
-    const commitHash = escHtml(h.commit_hash || h.payload?.commit_hash || "");
+    const commitHashRaw = String(h.commit_hash || h.payload?.commit_hash || patchset?.head_sha || "").trim();
+    const commitHash = escHtml(commitHashRaw);
     const sourceBranch = escHtml(h.payload?.source_branch || "");
     const conclusionRaw = normalizeMsgText(h.conclusion || h.payload?.conclusion || "");
     const conclusionNorm = normalizeTextForCompare(conclusionRaw);
@@ -5231,8 +5722,14 @@ function renderHandoffs(handoffs) {
     const at = escHtml(formatLocalDateTime(h.created_at));
     const payload = escHtml(fmtPayload(h.payload));
     const artifact = h.artifact_path ? `<div class="text-cyan-400 mt-1 break-all">📎 ${escHtml(h.artifact_path)}</div>` : "";
-    const commitLine = commitHash ? `<div class="text-emerald-400 mt-1 font-mono">commit: ${commitHash}</div>` : "";
-    const branchLine = sourceBranch ? `<div class="text-sky-400 mt-1 font-mono">branch: ${sourceBranch}</div>` : "";
+    const patchsetBlock = patchset ? renderPatchsetBlock(patchset, {compact: true}) : "";
+    const refreshHintBlock = renderRefreshHintBlock(h?.payload?.refresh_hint);
+    const commitLine = (!patchset || (commitHashRaw && commitHashRaw !== String(patchset.head_sha || "").trim()))
+      ? (commitHash ? `<div class="text-emerald-400 mt-1 font-mono">commit: ${commitHash}</div>` : "")
+      : "";
+    const branchLine = sourceBranch && (!patchset || sourceBranch !== String(patchset.source_branch || "").trim())
+      ? `<div class="text-sky-400 mt-1 font-mono">branch: ${sourceBranch}</div>`
+      : "";
     const relatedLine = relatedHistory.length
       ? `<div class="text-emerald-300 mt-1 text-xs">历史提交证据: ${
           relatedHistory.slice(0, 5).map((c) => {
@@ -5249,9 +5746,11 @@ function renderHandoffs(handoffs) {
       <div class="text-indigo-300 font-medium">${title}</div>
       <div class="text-slate-400 mt-0.5">${from} → ${to} · ${stage}</div>
       <div class="text-slate-500 mt-0.5">${sFrom} → ${sTo}</div>
+      ${patchsetBlock}
       ${commitLine}
       ${branchLine}
       ${relatedLine}
+      ${refreshHintBlock}
       ${conclusionLine}
       ${summary ? `<div class="text-slate-300 mt-1 msg-rich">${summary}</div>` : ""}
       ${artifact}
@@ -5840,6 +6339,8 @@ function connectWS() {
     if (msg.event==="init") {
       if (msg.user) setAuthUser(msg.user);
       tasks={};
+      taskHandoffRowsByTask = {};
+      taskPatchsetRowsByTask = {};
       agentStates = {};
       agentTermLines = {};
       runtimeAgents = {};
@@ -5913,6 +6414,23 @@ function connectWS() {
       }
     } else if (msg.event==="handoff_added") {
       if (currentTaskId === msg.handoff.task_id) loadTaskHandoffs(currentTaskId);
+      if (!document.getElementById("modal-patchset-metrics").classList.contains("hidden")) {
+        loadPatchsetMetrics(true);
+      }
+    } else if (msg.event==="patchset_updated") {
+      const taskId = String(msg.patchset?.task_id || "").trim();
+      const patchsetId = String(msg.patchset?.id || msg.patchset?.patchset_id || "").trim();
+      if (taskId && patchsetId) {
+        const existing = Array.isArray(taskPatchsetRowsByTask[taskId]) ? [...taskPatchsetRowsByTask[taskId]] : [];
+        const index = existing.findIndex(item => String(item?.id || item?.patchset_id || "").trim() === patchsetId);
+        if (index >= 0) existing[index] = {...existing[index], ...msg.patchset};
+        else existing.push(msg.patchset);
+        taskPatchsetRowsByTask[taskId] = existing;
+      }
+      if (taskId && currentTaskId === taskId) renderTaskPatchset(taskId);
+      if (!document.getElementById("modal-patchset-metrics").classList.contains("hidden")) {
+        loadPatchsetMetrics(true);
+      }
     } else if (msg.event==="agent_alert") {
       const task = tasks[msg.task_id];
       const title = task ? task.title : (msg.summary || "系统告警");

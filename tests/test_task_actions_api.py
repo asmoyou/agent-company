@@ -742,6 +742,168 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(data["task"]["status"], "in_review")
         self.assertEqual(data["handoff"]["commit_hash"], "abc1234")
 
+    def test_transition_persists_patchset_and_exposes_patchset_list(self):
+        task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        patchset = {
+            "id": "ps-api-1",
+            "source_branch": "agent/developer/task-1",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "commit_count": 2,
+            "commit_list": [
+                {"hash": "b" * 40, "short": "bbbbbbb", "subject": "feat: ship it"},
+                {"hash": "c" * 40, "short": "ccccccc", "subject": "fix: polish"},
+            ],
+            "changed_files": [
+                {"status": "M", "path": "index.html"},
+                {"status": "A", "path": ".opc/delivery.json"},
+            ],
+            "artifact_manifest": {
+                "path": ".opc/delivery.json",
+                "keys": ["deliverables", "test_or_preview_evidence"],
+            },
+            "diff_stat": " index.html | 2 +-",
+            "status": "submitted",
+            "worktree_clean": False,
+        }
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "in_review",
+                    "assignee": None,
+                    "current_patchset_id": "ps-api-1",
+                    "current_patchset_status": "submitted",
+                },
+                "handoff": {
+                    "stage": "dev_to_review",
+                    "from_agent": "developer",
+                    "to_agent": "reviewer",
+                    "status_from": "in_progress",
+                    "status_to": "in_review",
+                    "title": "开发交接审查",
+                    "summary": "提交 patchset 进入审查",
+                    "commit_hash": "b" * 40,
+                    "conclusion": "进入审查",
+                    "payload": {"patchset": patchset},
+                },
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["current_patchset_id"], "ps-api-1")
+        self.assertEqual(data["task"]["current_patchset_status"], "submitted")
+        self.assertEqual(data["handoff"]["payload"]["patchset"]["head_sha"], "b" * 40)
+
+        patchsets = self.client.get(
+            f"/tasks/{task['id']}/patchsets",
+            headers=self._headers,
+        )
+        self.assertEqual(patchsets.status_code, 200)
+        listed = patchsets.json()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], "ps-api-1")
+        self.assertEqual(listed[0]["status"], "submitted")
+        self.assertFalse(listed[0]["worktree_clean"])
+        self.assertEqual(listed[0]["changed_files"][0]["path"], "index.html")
+        self.assertEqual(listed[0]["artifact_manifest"]["path"], ".opc/delivery.json")
+
+    def test_runtime_patchset_metrics_returns_queue_and_rate_summary(self):
+        task = self._create_task(
+            status="approved",
+            assigned_agent="manager",
+            dev_agent="developer",
+        )
+        patchset = {
+            "id": "ps-metrics-1",
+            "source_branch": "agent/developer/task-metrics",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "commit_count": 1,
+            "commit_list": [{"hash": "b" * 40, "short": "bbbbbbb", "subject": "feat: metric"}],
+            "diff_stat": " index.html | 2 +-",
+            "status": "approved",
+            "queue_status": "queued",
+            "approved_at": "2026-03-06T00:00:00",
+            "queued_at": "2026-03-06T00:00:00",
+            "reviewed_main_sha": "c" * 40,
+            "worktree_clean": True,
+        }
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "approved",
+                    "assignee": None,
+                    "current_patchset_id": "ps-metrics-1",
+                    "current_patchset_status": "approved",
+                },
+                "handoff": {
+                    "stage": "review_to_manager",
+                    "from_agent": "reviewer",
+                    "to_agent": "manager",
+                    "status_from": "in_review",
+                    "status_to": "approved",
+                    "title": "审查通过，交接合并",
+                    "summary": "ok",
+                    "commit_hash": "b" * 40,
+                    "conclusion": "ok",
+                    "payload": {"patchset": patchset},
+                },
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+
+        metrics = self.client.get(
+            f"/runtime/patchset-metrics?project_id={task['project_id']}",
+            headers=self._headers,
+        )
+        self.assertEqual(metrics.status_code, 200)
+        body = metrics.json()
+        self.assertEqual(body["flags"]["task_delivery_model"], "patchset")
+        self.assertEqual(body["metrics"]["queued_patchsets"], 1)
+        self.assertEqual(body["metrics"]["windows"]["last_24h"]["queued_patchsets"], 1)
+        self.assertIn("manager_return_rate", body["metrics"])
+        self.assertIn("review_cycles_per_task", body["metrics"])
+
+    def test_patchset_upsert_endpoint_updates_queue_status_without_touching_task_refs(self):
+        task = self._create_task(status="approved", assigned_agent="manager", dev_agent="developer")
+        db.save_task_patchset(
+            task["id"],
+            {
+                "id": "ps-queue-1",
+                "task_id": task["id"],
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "status": "approved",
+                "queue_status": "queued",
+            },
+            update_task_refs=True,
+        )
+        res = self.client.post(
+            f"/tasks/{task['id']}/patchsets",
+            json={
+                "patchset": {
+                    "id": "ps-queue-1",
+                    "task_id": task["id"],
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "status": "approved",
+                    "queue_status": "processing",
+                    "queue_reason": "",
+                },
+                "update_task_refs": False,
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        body = res.json()
+        self.assertEqual(body["queue_status"], "processing")
+        task_after = db.get_task(task["id"])
+        self.assertEqual(task_after["current_patchset_status"], "approved")
+
     def test_transition_accepts_agent_token(self):
         task = self._create_task(status="todo")
         res = self.client.post(
