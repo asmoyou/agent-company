@@ -886,6 +886,7 @@
     #modal-agents > div,
     #modal-project > div,
     #modal-dir-picker > div,
+    #modal-profile > div,
     #modal-users > div,
     #modal-user-edit > div,
     #modal-task > div{
@@ -1169,7 +1170,9 @@
       title="管理用户">
       👤 用户
     </button>
-    <div id="auth-user-badge" class="hidden text-xs text-slate-300 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 whitespace-nowrap shrink-0"></div>
+    <button id="auth-user-badge" type="button" onclick="openProfileModal()"
+      class="hidden header-btn text-xs px-2.5 py-1.5 rounded-lg transition whitespace-nowrap shrink-0"
+      title="查看个人信息"></button>
     <button id="btn-logout" onclick="logout()"
       class="hidden header-btn text-xs px-3 py-1.5 rounded-lg transition"
       title="退出登录">
@@ -1638,6 +1641,54 @@
   </div>
 </div>
 
+<!-- Profile Modal -->
+<div id="modal-profile" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+    <div class="px-6 py-4 border-b border-slate-700 flex items-start justify-between gap-4">
+      <div>
+        <h3 class="font-semibold text-white">个人信息</h3>
+        <div class="text-xs text-slate-500 mt-1">查看账号信息并修改登录密码</div>
+      </div>
+      <button onclick="closeProfileModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <form onsubmit="submitChangePassword(event)" class="p-6 space-y-4">
+      <div class="bg-slate-900/50 border border-slate-700 rounded-lg p-4 space-y-2">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div id="profile-username" class="text-sm text-slate-100 font-medium">-</div>
+            <div id="profile-role" class="text-xs text-slate-400 mt-1">-</div>
+          </div>
+          <button id="profile-manage-users-btn" type="button" onclick="openUsersModalFromProfile()"
+            class="hidden px-3 py-1.5 text-xs rounded-lg border border-slate-600 text-slate-300 hover:text-white hover:border-slate-500">
+            用户管理
+          </button>
+        </div>
+        <div id="profile-quota" class="text-xs text-slate-500">项目不限 · 任务不限</div>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">当前密码</label>
+        <input id="profile-current-password" type="password" autocomplete="current-password"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">新密码</label>
+        <input id="profile-new-password" type="password" autocomplete="new-password" placeholder="至少 6 位"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">确认新密码</label>
+        <input id="profile-confirm-password" type="password" autocomplete="new-password" placeholder="再次输入新密码"
+          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        <div class="text-[11px] text-slate-500 mt-1">改密后会让其他设备重新登录</div>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button type="button" onclick="closeProfileModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
+        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">修改密码</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- User Management Modal -->
 <div id="modal-users" class="hidden fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4">
   <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-xl shadow-2xl flex flex-col" style="max-height:85vh;">
@@ -1889,6 +1940,8 @@ function setAuthUser(user) {
     badge.classList.add("hidden");
     btnLogout.classList.add("hidden");
     btnAdmin.classList.add("hidden");
+    closeProfileModal();
+    closeUsersModal();
     return;
   }
   const role = currentUser.role === "admin" ? "管理员" : "普通用户";
@@ -1896,6 +1949,7 @@ function setAuthUser(user) {
   badge.classList.remove("hidden");
   btnLogout.classList.remove("hidden");
   btnAdmin.classList.toggle("hidden", !isAdminUser());
+  refreshProfileModal();
   if (!isAdminUser()) closeUsersModal();
   if (typeof updateProjectModeAvailability === "function") updateProjectModeAvailability();
 }
@@ -2287,6 +2341,109 @@ function formatQuotaText(label, value) {
   const normalized = normalizeQuotaValue(value);
   if (normalized === null) return `${label}不限`;
   return `${label}上限 ${normalized}`;
+}
+
+function clearProfilePasswordForm() {
+  const ids = [
+    "profile-current-password",
+    "profile-new-password",
+    "profile-confirm-password",
+  ];
+  ids.forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.value = "";
+  });
+}
+
+function refreshProfileModal() {
+  const usernameEl = document.getElementById("profile-username");
+  const roleEl = document.getElementById("profile-role");
+  const quotaEl = document.getElementById("profile-quota");
+  const manageBtn = document.getElementById("profile-manage-users-btn");
+  if (!usernameEl || !roleEl || !quotaEl || !manageBtn) return;
+
+  if (!currentUser) {
+    usernameEl.textContent = "-";
+    roleEl.textContent = "-";
+    quotaEl.textContent = "项目不限 · 任务不限";
+    manageBtn.classList.add("hidden");
+    return;
+  }
+
+  const role = currentUser.role === "admin" ? "管理员" : "普通用户";
+  usernameEl.textContent = currentUser.username || "-";
+  roleEl.textContent = role;
+  quotaEl.textContent = `${formatQuotaText("项目", currentUser.max_projects)} · ${formatQuotaText("任务", currentUser.max_tasks)}`;
+  manageBtn.classList.toggle("hidden", !isAdminUser());
+}
+
+function openProfileModal() {
+  if (!currentUser) return;
+  refreshProfileModal();
+  clearProfilePasswordForm();
+  document.getElementById("modal-profile").classList.remove("hidden");
+  setTimeout(() => document.getElementById("profile-current-password")?.focus(), 20);
+}
+
+function closeProfileModal() {
+  document.getElementById("modal-profile").classList.add("hidden");
+  clearProfilePasswordForm();
+}
+
+function openUsersModalFromProfile() {
+  if (!isAdminUser()) return;
+  closeProfileModal();
+  openUsersModal();
+}
+
+async function submitChangePassword(e) {
+  e.preventDefault();
+  if (!currentUser) return;
+
+  const currentPassword = (document.getElementById("profile-current-password").value || "").trim();
+  const newPassword = (document.getElementById("profile-new-password").value || "").trim();
+  const confirmPassword = (document.getElementById("profile-confirm-password").value || "").trim();
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    await uiAlert("请完整填写当前密码、新密码和确认密码", "输入有误", "warning");
+    return;
+  }
+  if (newPassword.length < 6) {
+    await uiAlert("新密码至少 6 位", "输入有误", "warning");
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    await uiAlert("两次输入的新密码不一致", "输入有误", "warning");
+    return;
+  }
+
+  try {
+    const res = await apiFetch(`${API}/auth/change-password`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    if (payload.token) {
+      authToken = payload.token;
+      localStorage.setItem("opc_token", authToken);
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        wsCloseExpected = true;
+        ws.close();
+      } else {
+        connectWS();
+      }
+    }
+    if (payload.user) setAuthUser(payload.user);
+    closeProfileModal();
+    showToast("密码已更新", "当前设备已自动续签登录，其它会话会在后续请求时失效。", "info");
+  } catch (err) {
+    await uiAlert("修改密码失败: " + err.message, "操作失败", "error");
+  }
 }
 
 function openUsersModal() {

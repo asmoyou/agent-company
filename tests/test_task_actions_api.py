@@ -185,6 +185,84 @@ class TaskActionsApiTest(unittest.TestCase):
         del_res = self.client.delete(f"/users/{target['id']}", headers=user_headers)
         self.assertEqual(del_res.status_code, 403)
 
+    def test_user_can_change_own_password_and_rotate_session(self):
+        created = self.client.post(
+            "/users",
+            json={"username": "dev04", "password": "devpass4"},
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "dev04", "password": "devpass4"},
+        )
+        self.assertEqual(login.status_code, 200)
+        old_token = login.json()["token"]
+        user_headers = {"Authorization": f"Bearer {old_token}"}
+
+        changed = self.client.post(
+            "/auth/change-password",
+            json={"current_password": "devpass4", "new_password": "newpass4"},
+            headers=user_headers,
+        )
+        self.assertEqual(changed.status_code, 200)
+        payload = changed.json()
+        self.assertTrue(payload.get("ok"))
+        self.assertIn("token", payload)
+        self.assertNotEqual(payload["token"], old_token)
+
+        old_me = self.client.get("/auth/me", headers=user_headers)
+        self.assertEqual(old_me.status_code, 401)
+
+        new_headers = {"Authorization": f"Bearer {payload['token']}"}
+        new_me = self.client.get("/auth/me", headers=new_headers)
+        self.assertEqual(new_me.status_code, 200)
+        self.assertEqual(new_me.json()["username"], "dev04")
+
+        old_login = self.client.post(
+            "/auth/login",
+            json={"username": "dev04", "password": "devpass4"},
+        )
+        self.assertEqual(old_login.status_code, 401)
+
+        new_login = self.client.post(
+            "/auth/login",
+            json={"username": "dev04", "password": "newpass4"},
+        )
+        self.assertEqual(new_login.status_code, 200)
+
+    def test_change_password_rejects_wrong_current_password(self):
+        created = self.client.post(
+            "/users",
+            json={"username": "dev05", "password": "devpass5"},
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "dev05", "password": "devpass5"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        changed = self.client.post(
+            "/auth/change-password",
+            json={"current_password": "wrong-pass", "new_password": "newpass5"},
+            headers=user_headers,
+        )
+        self.assertEqual(changed.status_code, 422)
+
+        me = self.client.get("/auth/me", headers=user_headers)
+        self.assertEqual(me.status_code, 200)
+
+        relogin = self.client.post(
+            "/auth/login",
+            json={"username": "dev05", "password": "devpass5"},
+        )
+        self.assertEqual(relogin.status_code, 200)
+
     def test_admin_can_set_and_clear_user_quota(self):
         created = self.client.post(
             "/users",

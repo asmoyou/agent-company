@@ -1371,6 +1371,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class UserCreateRequest(BaseModel):
     username: str
     password: str
@@ -1878,6 +1883,25 @@ async def logout(authorization: str | None = Header(default=None, alias="Authori
 @app.get("/auth/me")
 async def get_me(user: dict = Depends(require_user)):
     return user
+
+
+@app.post("/auth/change-password")
+async def change_password(body: ChangePasswordRequest, user: dict = Depends(require_user)):
+    current_password = str(body.current_password or "")
+    new_password = str(body.new_password or "")
+    if not current_password or not new_password:
+        raise HTTPException(422, "当前密码和新密码不能为空")
+    if len(new_password) < 6:
+        raise HTTPException(422, "密码至少 6 位")
+
+    try:
+        updated = db.change_user_password(user["id"], current_password, new_password)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not updated:
+        raise HTTPException(404, "用户不存在")
+    session = db.create_session(user["id"])
+    return {"ok": True, "user": updated, **session}
 
 
 @app.post("/auth/onboarding-complete")
