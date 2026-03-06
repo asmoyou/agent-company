@@ -20,6 +20,93 @@ class GenericAgent(BaseAgent):
         self._working_status = config.get("working_status") or "in_progress"
         self._prompt_tpl    = config.get("prompt") or ""
         self.cli_name       = config.get("cli") or "codex"
+        self._runtime_profile = str(config.get("runtime_profile") or ("developer" if self.name == "developer" else "generic")).strip().lower() or "generic"
+        self._sync_from_latest_handoff = self._coerce_bool(
+            config.get("sync_from_latest_handoff"),
+            default=self._runtime_profile != "developer",
+        )
+        self._post_commit_retry_max = self._coerce_int(
+            config.get("post_commit_retry_max"),
+            default=6 if self._runtime_profile == "developer" else 1,
+            minimum=1,
+        )
+        self._commit_hash_mode = str(
+            config.get("commit_hash_mode") or ("full" if self._runtime_profile == "developer" else "short")
+        ).strip().lower() or "short"
+
+    @staticmethod
+    def _coerce_bool(value, *, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return int(value) != 0
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        return text in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _coerce_int(value, *, default: int, minimum: int = 1) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        return max(minimum, parsed)
+
+    def _uses_developer_profile(self) -> bool:
+        return self._runtime_profile == "developer"
+
+    def _failure_stage(self) -> str:
+        return "developer_failed" if self._uses_developer_profile() else f"{self.name}_failed"
+
+    def _commit_required_stage(self) -> str:
+        return "dev_commit_required" if self._uses_developer_profile() else f"{self.name}_commit_required"
+
+    def _no_progress_stage(self) -> str:
+        return "dev_no_progress" if self._uses_developer_profile() else f"{self.name}_no_progress"
+
+    def _post_commit_sync_stage(self) -> str:
+        return "developer_post_commit_sync" if self._uses_developer_profile() else f"{self.name}_post_commit_sync"
+
+    def _post_commit_transition_spec(
+        self,
+        *,
+        review_enabled: bool,
+        commit_display: str,
+        effective_next_status: str,
+    ) -> dict[str, str]:
+        if self._uses_developer_profile():
+            return {
+                "stage": "dev_to_review" if review_enabled else "dev_to_approved",
+                "to_agent": "reviewer" if review_enabled else "manager",
+                "title": "开发交接审查" if review_enabled else "开发直达合并",
+                "summary": (
+                    f"CLI 已提交 commit {commit_display}，等待审查"
+                    if review_enabled
+                    else f"CLI 已提交 commit {commit_display}，跳过审查，交由 Manager 合并"
+                ),
+                "conclusion": (
+                    "开发完成，等待审查结论"
+                    if review_enabled
+                    else "开发完成，已跳过审查并转交 Manager 合并"
+                ),
+            }
+        return {
+            "stage": f"{self.name}_handoff",
+            "to_agent": "manager" if effective_next_status == "approved" else self.name,
+            "title": f"{self._display_name} 交接",
+            "summary": f"检测到 CLI 已生成 commit {commit_display}，推进到 {effective_next_status}",
+            "conclusion": f"{self._display_name} 完成，推进到 {effective_next_status}",
+        }
+
+    async def _resolve_commit_hash(self, worktree_dev, head_after: str) -> tuple[str, str]:
+        display = head_after[:7] if head_after else ""
+        if self._commit_hash_mode == "full":
+            return head_after, display
+        commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
+        return commit_hash, (commit_hash[:7] if commit_hash else display)
 
     async def process_task(self, task: dict):
         task_id = task["id"]
@@ -30,9 +117,10 @@ class GenericAgent(BaseAgent):
         await self.add_log(
             task_id, f"{self._display_name} 接手，分支: {branch}，工作目录: {worktree_dev}"
         )
-        sync_result = await self.sync_from_latest_handoff(task, worktree_dev, current_branch=branch)
-        if sync_result.get("status") == "failed":
-            return
+        if self._sync_from_latest_handoff:
+            sync_result = await self.sync_from_latest_handoff(task, worktree_dev, current_branch=branch)
+            if sync_result.get("status") == "failed":
+                return
 
         prev_status = task.get("_claimed_from_status", task.get("status"))
         is_rework = task.get("review_feedback") and prev_status == "needs_changes"
@@ -57,6 +145,9 @@ class GenericAgent(BaseAgent):
                 f"{rework_section}\n\n"
                 "把所有输出写入文件，不要只输出文字。"
             )
+        execution_contract = self.build_execution_contract_block(task)
+        if execution_contract:
+            prompt += f"\n\n{execution_contract}\n"
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
@@ -127,8 +218,8 @@ class GenericAgent(BaseAgent):
 
         if cli_created_commit and head_after:
             diff_stat = diff.strip()
-            commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
-            await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_hash}")
+            commit_hash, commit_display = await self._resolve_commit_hash(worktree_dev, head_after)
+            await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_display}")
             if diff_stat:
                 await self.add_log(
                     task_id,
@@ -139,6 +230,7 @@ class GenericAgent(BaseAgent):
             effective_next_status = self.next_status
             if effective_next_status == "in_review" and not is_review_enabled(task):
                 effective_next_status = "approved"
+            review_enabled = is_review_enabled(task)
             update_fields = {
                 "status": effective_next_status,
                 "assignee": None,
@@ -150,30 +242,67 @@ class GenericAgent(BaseAgent):
             elif effective_next_status == "approved":
                 update_fields["assigned_agent"] = "manager"
                 update_fields["dev_agent"] = self.name
-            await self.transition_task(
-                task_id,
-                fields=update_fields,
-                handoff={
-                    "stage": f"{self.name}_handoff",
-                    "to_agent": (update_fields.get("assigned_agent") or effective_next_status),
-                    "status_from": prev_status,
-                    "status_to": effective_next_status,
-                    "title": f"{self._display_name} 交接",
-                    "summary": f"检测到 CLI 已生成 commit {commit_hash}，推进到 {effective_next_status}",
-                    "commit_hash": commit_hash,
-                    "conclusion": f"{self._display_name} 完成，推进到 {effective_next_status}",
-                    "payload": {
-                        "commit_hash": commit_hash,
-                        "source_branch": branch,
-                        "committed_by_cli": True,
-                        "review_enabled": is_review_enabled(task),
-                        "has_uncommitted_changes": bool(diff_stat),
-                        "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
-                    },
-                    "artifact_path": str(worktree_dev),
-                },
-                log_message=f"检测到 CLI 已生成提交，推进至 {effective_next_status}",
+            transition_spec = self._post_commit_transition_spec(
+                review_enabled=review_enabled,
+                commit_display=commit_display,
+                effective_next_status=effective_next_status,
             )
+            update_error = None
+            for i in range(1, self._post_commit_retry_max + 1):
+                try:
+                    result = await self.transition_task(
+                        task_id,
+                        fields=update_fields,
+                        handoff={
+                            "stage": transition_spec["stage"],
+                            "to_agent": transition_spec["to_agent"],
+                            "status_from": prev_status,
+                            "status_to": effective_next_status,
+                            "title": transition_spec["title"],
+                            "summary": transition_spec["summary"],
+                            "commit_hash": commit_hash,
+                            "conclusion": transition_spec["conclusion"],
+                            "payload": {
+                                "commit_hash": commit_hash,
+                                "source_branch": branch,
+                                "committed_by_cli": True,
+                                "review_enabled": review_enabled,
+                                "has_uncommitted_changes": bool(diff_stat),
+                                "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
+                            },
+                            "artifact_path": str(worktree_dev),
+                        },
+                        log_message=f"检测到 CLI 已生成提交，推进至 {effective_next_status}",
+                    )
+                    if result is None:
+                        await self.stop_if_task_cancelled(task_id, "提交后同步状态")
+                        return
+                    update_error = None
+                    break
+                except Exception as e:
+                    update_error = e
+                    if i < self._post_commit_retry_max:
+                        self._post_output_bg(
+                            f"⚠ CLI 已提交 {commit_display}，同步状态失败（{i}/{self._post_commit_retry_max}）：{str(e)[:120]}"
+                        )
+                        await asyncio.sleep(min(2 * i, 10))
+            if update_error is not None:
+                await self.add_log(
+                    task_id,
+                    (
+                        f"⚠ CLI 已提交 {commit_display}，但无法把任务推进到 {effective_next_status}：{update_error}。"
+                        "保持当前状态，等待后续重试/人工处理。"
+                    ),
+                )
+                await self.add_alert(
+                    summary="提交已完成但状态同步失败",
+                    task_id=task_id,
+                    message=f"commit={commit_hash}; error={update_error}",
+                    kind="warning",
+                    code=f"{self.name}_commit_sync_failed",
+                    stage=self._post_commit_sync_stage(),
+                    metadata={"commit_hash": commit_hash},
+                )
             return
 
         if diff.strip():
@@ -191,11 +320,11 @@ class GenericAgent(BaseAgent):
                 task_id,
                 fields=update_fields,
                 handoff={
-                    "stage": f"{self.name}_commit_required",
+                    "stage": self._commit_required_stage(),
                     "to_agent": self.name,
                     "status_from": prev_status,
                     "status_to": prev_status,
-                    "title": f"{self._display_name} 需在 CLI 内提交",
+                    "title": "开发需在 CLI 内提交" if self._uses_developer_profile() else f"{self._display_name} 需在 CLI 内提交",
                     "summary": "检测到未提交改动，未自动提交，保持当前状态",
                     "conclusion": "请在 CLI 内完成提交后再交接",
                     "payload": {
@@ -222,13 +351,21 @@ class GenericAgent(BaseAgent):
             task_id,
             fields=update_fields,
             handoff={
-                "stage": f"{self.name}_no_progress",
+                "stage": self._no_progress_stage(),
                 "to_agent": self.name,
                 "status_from": prev_status,
                 "status_to": prev_status,
-                "title": f"{self._display_name} 未产生新变更",
-                "summary": f"未检测到新提交或文件改动，保持在 {prev_status}",
-                "conclusion": "本轮未产出可交付变更，等待下一轮执行",
+                "title": "开发未产生新提交" if self._uses_developer_profile() else f"{self._display_name} 未产生新变更",
+                "summary": (
+                    f"未检测到 CLI 内提交或文件改动，保持在 {prev_status}"
+                    if self._uses_developer_profile()
+                    else f"未检测到新提交或文件改动，保持在 {prev_status}"
+                ),
+                "conclusion": (
+                    "本轮无可审查交付，等待下一轮开发"
+                    if self._uses_developer_profile()
+                    else "本轮未产出可交付变更，等待下一轮执行"
+                ),
                 "payload": {"has_commit": False, "no_progress": True, "source_branch": branch},
                 "artifact_path": str(worktree_dev),
             },

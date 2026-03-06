@@ -1486,6 +1486,7 @@ class AgentTypeCreate(BaseModel):
     poll_statuses: list[str] = ["todo"]
     next_status: str = "in_review"
     working_status: str = "in_progress"
+    runtime_profile: str = ""
     cli: str = "codex"
 
 class AgentTypeUpdate(BaseModel):
@@ -1495,6 +1496,7 @@ class AgentTypeUpdate(BaseModel):
     poll_statuses: list[str] | None = None
     next_status: str | None = None
     working_status: str | None = None
+    runtime_profile: str | None = None
     cli: str | None = None
 
 class GeneratePromptRequest(BaseModel):
@@ -2909,10 +2911,76 @@ async def get_task_files(task_id: str, user: dict = Depends(require_user)):
 
 # ── Prompts endpoints (database-backed) ───────────────────────────────────────
 ALLOWED_PROMPT_AGENTS = {"developer", "reviewer", "manager", "leader"}
+SPECIALIZED_RUNTIME_CLASS_MAP = {
+    "reviewer": "ReviewerAgent",
+    "manager": "ManagerAgent",
+    "leader": "LeaderAgent",
+}
+SPECIALIZED_RUNTIME_SUMMARY_MAP = {
+    "reviewer": "专用审查流程：基于 commit 精确审查，解析结构化结论，并处理系统重试/阻塞。",
+    "manager": "专用合并流程：只按目标 commit_hash 精确合并到 main，并处理冲突与验收交接。",
+    "leader": "专用主管流程：先补全需求，再判断简单执行或结构化分解子任务。",
+}
+GENERIC_AGENT_RUNTIME_SUMMARY = (
+    "通用模板流程：按 agent_types 中的 prompt / poll_statuses / next_status / working_status 配置驱动。"
+)
+GENERIC_DEVELOPER_RUNTIME_SUMMARY = (
+    "通用模板流程 + developer 策略：固定开发状态流转、完整 commit_hash、提交后状态同步重试。"
+)
 
 
 class PromptUpdate(BaseModel):
     content: str
+
+
+def _normalize_runtime_profile_value(value: str | None, *, default: str = "", strict: bool = False) -> str:
+    text = str(value or "").strip().lower()
+    if not text or text == "generic":
+        return default
+    if text == "developer":
+        return "developer"
+    if strict:
+        raise HTTPException(400, "runtime_profile 只能是空值/generic/developer")
+    return default
+
+
+def _effective_runtime_profile(agent_type: dict | None) -> str:
+    item = agent_type or {}
+    key = normalize_agent_key(str(item.get("key") or ""), default=str(item.get("key") or ""))
+    if key in SPECIALIZED_RUNTIME_CLASS_MAP:
+        return ""
+    profile = _normalize_runtime_profile_value(item.get("runtime_profile"), default="", strict=False)
+    if profile:
+        return profile
+    if key == "developer":
+        return "developer"
+    return ""
+
+
+def _annotate_agent_type(agent_type: dict | None) -> dict | None:
+    if not agent_type:
+        return None
+    out = dict(agent_type)
+    key = normalize_agent_key(str(out.get("key") or ""), default=str(out.get("key") or ""))
+    runtime_class = SPECIALIZED_RUNTIME_CLASS_MAP.get(key, "GenericAgent")
+    runtime_family = "specialized" if runtime_class != "GenericAgent" else "generic"
+    runtime_profile = _effective_runtime_profile(out)
+    out["runtime_class"] = runtime_class
+    out["runtime_family"] = runtime_family
+    out["runtime_profile"] = runtime_profile
+    if runtime_class != "GenericAgent":
+        out["runtime_summary"] = SPECIALIZED_RUNTIME_SUMMARY_MAP.get(key, GENERIC_AGENT_RUNTIME_SUMMARY)
+    else:
+        out["runtime_summary"] = (
+            GENERIC_DEVELOPER_RUNTIME_SUMMARY
+            if runtime_profile == "developer"
+            else GENERIC_AGENT_RUNTIME_SUMMARY
+        )
+    return out
+
+
+def _annotate_agent_type_list(items: list[dict]) -> list[dict]:
+    return [annotated for annotated in (_annotate_agent_type(item) for item in (items or [])) if annotated]
 
 
 def _get_prompt_agent(agent_name: str) -> dict:
@@ -2928,8 +2996,9 @@ async def _update_prompt_and_broadcast(agent_name: str, content: str) -> dict:
     updated = db.update_agent_type(agent_name, prompt=content)
     if not updated:
         raise HTTPException(404, "Agent type not found")
-    await manager.broadcast({"event": "agent_type_updated", "agent_type": updated})
-    return updated
+    annotated = _annotate_agent_type(updated)
+    await manager.broadcast({"event": "agent_type_updated", "agent_type": annotated})
+    return annotated
 
 
 @app.get("/prompts/{agent_name}")
@@ -3503,7 +3572,7 @@ async def support_chat_stream(
 
 @app.get("/agent-types")
 async def list_agent_types():
-    return db.list_agent_types()
+    return _annotate_agent_type_list(db.list_agent_types())
 
 # NOTE: specific routes must come before parametric /{agent_key}
 @app.post("/agent-types/generate-prompt")
@@ -3577,32 +3646,45 @@ async def create_agent_type(body: AgentTypeCreate, _admin: dict = Depends(requir
         raise HTTPException(400, "key 只能包含小写字母、数字、连字符和下划线，且以字母开头")
     if db.get_agent_type(body.key):
         raise HTTPException(400, f"key '{body.key}' 已存在")
+    runtime_profile = _normalize_runtime_profile_value(
+        body.runtime_profile,
+        default="developer" if body.key == "developer" else "",
+        strict=True,
+    )
     at = db.create_agent_type(
         body.key, body.name, body.description, body.prompt,
-        body.poll_statuses, body.next_status, body.working_status, body.cli,
+        body.poll_statuses, body.next_status, body.working_status, body.cli, runtime_profile,
     )
     AGENT_OUTPUT[body.key]  # pre-create entry
     AGENT_STATUS[body.key]
-    await manager.broadcast({"event": "agent_type_created", "agent_type": at})
-    return at
+    annotated = _annotate_agent_type(at)
+    await manager.broadcast({"event": "agent_type_created", "agent_type": annotated})
+    return annotated
 
 @app.get("/agent-types/{agent_key}")
 async def get_agent_type(agent_key: str):
     at = db.get_agent_type(agent_key)
     if not at:
         raise HTTPException(404, "Not found")
-    return at
+    return _annotate_agent_type(at)
 
 @app.put("/agent-types/{agent_key}")
 async def update_agent_type(agent_key: str, body: AgentTypeUpdate, _admin: dict = Depends(require_admin)):
     if not db.get_agent_type(agent_key):
         raise HTTPException(404, "Not found")
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "runtime_profile" in fields:
+        fields["runtime_profile"] = _normalize_runtime_profile_value(
+            fields["runtime_profile"],
+            default="developer" if agent_key == "developer" else "",
+            strict=True,
+        )
     if not fields:
-        return db.get_agent_type(agent_key)
+        return _annotate_agent_type(db.get_agent_type(agent_key))
     updated = db.update_agent_type(agent_key, **fields)
-    await manager.broadcast({"event": "agent_type_updated", "agent_type": updated})
-    return updated
+    annotated = _annotate_agent_type(updated)
+    await manager.broadcast({"event": "agent_type_updated", "agent_type": annotated})
+    return annotated
 
 @app.delete("/agent-types/{agent_key}")
 async def delete_agent_type(agent_key: str, _admin: dict = Depends(require_admin)):
@@ -3897,7 +3979,7 @@ async def websocket_endpoint(
                     compact=True,
                 ),
                 "projects": projects,
-                "agent_types": db.list_agent_types(),
+                "agent_types": _annotate_agent_type_list(db.list_agent_types()),
                 "agent_outputs": _agent_outputs_snapshot(
                     user=user,
                     project_id=effective_scope_project_id,

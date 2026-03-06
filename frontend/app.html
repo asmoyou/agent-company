@@ -1298,10 +1298,10 @@
       <div id="agent-form-readonly-tip" class="hidden text-xs text-amber-300 bg-amber-900/20 border border-amber-700/40 rounded px-3 py-2">
         当前账号为普通用户，仅可查看，不能修改。
       </div>
-      <div class="grid grid-cols-2 gap-4">
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">名称 *</label>
-          <input id="af-name" type="text" placeholder="代码测试员"
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">名称 *</label>
+            <input id="af-name" type="text" placeholder="代码测试员"
             class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
         </div>
         <div>
@@ -1310,12 +1310,13 @@
             class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono" />
         </div>
       </div>
-      <div>
-        <label class="block text-xs text-slate-400 mb-1">用途描述（用于 AI 生成提示词）</label>
-        <input id="af-desc" type="text" placeholder="审查代码安全性，检查 OWASP Top 10 漏洞..."
-          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
-      </div>
-      <div class="grid grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">用途描述（用于 AI 生成提示词）</label>
+          <input id="af-desc" type="text" placeholder="审查代码安全性，检查 OWASP Top 10 漏洞..."
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+        </div>
+      <div id="agent-form-runtime" class="text-xs text-slate-300 bg-slate-900/40 border border-slate-700 rounded px-3 py-2"></div>
+      <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div>
           <label class="block text-xs text-slate-400 mb-1">轮询状态</label>
           <div id="af-poll-checkboxes" class="space-y-1 bg-slate-900/50 rounded-lg p-2 text-xs max-h-40 overflow-y-auto"></div>
@@ -1332,6 +1333,15 @@
             <option value="codex">codex</option>
             <option value="claude">claude</option>
           </select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">运行策略</label>
+          <select id="af-runtime-profile"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
+            <option value="generic">generic</option>
+            <option value="developer">developer</option>
+          </select>
+          <div id="af-runtime-profile-tip" class="text-[11px] text-slate-600 mt-1"></div>
         </div>
       </div>
       <div>
@@ -2490,6 +2500,111 @@ function parsePollStatuses(at) {
   }
 }
 
+function normalizeRuntimeProfile(value, key = "") {
+  const normalizedKey = String(key || "").trim();
+  if (["reviewer", "manager", "leader"].includes(normalizedKey)) return "";
+  const text = String(value || "").trim().toLowerCase();
+  if (text === "developer") return "developer";
+  if (normalizedKey === "developer") return "developer";
+  return "";
+}
+
+function getRuntimeAgentInfo(atOrKey) {
+  const at = (atOrKey && typeof atOrKey === "object") ? atOrKey : (agentTypes[String(atOrKey || "").trim()] || {});
+  const key = String(at?.key || atOrKey || "").trim();
+  const specialized = {
+    reviewer: {
+      runtime_class: "ReviewerAgent",
+      runtime_family: "specialized",
+      runtime_profile: "",
+      runtime_summary: "专用审查流程：基于 commit 精确审查，解析结构化结论，并处理系统重试/阻塞。",
+    },
+    manager: {
+      runtime_class: "ManagerAgent",
+      runtime_family: "specialized",
+      runtime_profile: "",
+      runtime_summary: "专用合并流程：只按目标 commit_hash 精确合并到 main，并处理冲突与验收交接。",
+    },
+    leader: {
+      runtime_class: "LeaderAgent",
+      runtime_family: "specialized",
+      runtime_profile: "",
+      runtime_summary: "专用主管流程：先补全需求，再判断简单执行或结构化分解子任务。",
+    },
+  };
+  const runtimeProfile = normalizeRuntimeProfile(at?.runtime_profile, key);
+  const fallback = specialized[key] || {
+    runtime_class: "GenericAgent",
+    runtime_family: "generic",
+    runtime_profile: runtimeProfile,
+    runtime_summary: runtimeProfile
+      ? "通用模板流程 + developer 策略：固定开发状态流转、完整 commit_hash、提交后状态同步重试。"
+      : "通用模板流程：按 agent_types 中的 prompt / poll_statuses / next_status / working_status 配置驱动。",
+  };
+  const base = fallback;
+  return {
+    runtime_class: String(at?.runtime_class || base.runtime_class),
+    runtime_family: String(at?.runtime_family || base.runtime_family),
+    runtime_profile: runtimeProfile,
+    runtime_summary: String(at?.runtime_summary || base.runtime_summary),
+  };
+}
+
+function runtimeFamilyChip(info) {
+  if (info.runtime_family === "specialized") {
+    return '<span class="text-xs bg-emerald-900/40 text-emerald-300 px-1.5 py-0.5 rounded">专用类</span>';
+  }
+  return '<span class="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded">通用类</span>';
+}
+
+function renderAgentRuntimeInfo(at, editingKey = "") {
+  const box = document.getElementById("agent-form-runtime");
+  if (!box) return;
+  const key = String(editingKey || at?.key || document.getElementById("af-key")?.value || "").trim();
+  const info = getRuntimeAgentInfo({...at, key});
+  const isSpecialized = info.runtime_family === "specialized";
+  const profileLine = info.runtime_profile
+    ? `<div class="text-slate-500 mt-1">策略: <span class="font-mono text-slate-300">${escHtml(info.runtime_profile)}</span></div>`
+    : "";
+  const forceDeveloper = key === "developer" && !isSpecialized;
+  const roleNote = isSpecialized
+    ? "该 key 会绑定到专用 Python 类。"
+    : (forceDeveloper
+      ? "developer 角色固定走 GenericAgent，并启用 developer 策略。"
+      : (info.runtime_profile
+      ? "该 Agent 运行时走 GenericAgent，但会启用对应 profile 策略。"
+      : "该 Agent 运行时走 GenericAgent，完全按 agent_types 配置驱动。"));
+  box.innerHTML = `
+    <div class="flex items-center gap-2 flex-wrap">
+      ${runtimeFamilyChip(info)}
+      <span class="font-mono text-slate-200">${escHtml(info.runtime_class)}</span>
+      <span class="text-slate-500">${escHtml(key || "未命名 key")}</span>
+    </div>
+    <div class="text-slate-400 mt-1">${escHtml(info.runtime_summary)}</div>
+    ${profileLine}
+    <div class="text-slate-500 mt-1">${escHtml(roleNote)}</div>
+  `;
+}
+
+function syncRuntimeProfileControl(at = null, editingKey = "") {
+  const input = document.getElementById("af-runtime-profile");
+  const tip = document.getElementById("af-runtime-profile-tip");
+  if (!input) return;
+  const key = String(editingKey || at?.key || document.getElementById("af-key")?.value || "").trim();
+  const readonly = !isAdminUser();
+  const specialized = ["reviewer", "manager", "leader"].includes(key);
+  const forceDeveloper = key === "developer";
+  input.value = normalizeRuntimeProfile(at?.runtime_profile || input.value, key) || "generic";
+  input.disabled = readonly || specialized || forceDeveloper;
+  if (tip) {
+    tip.textContent = specialized
+      ? "该 key 由专用类接管，运行策略不可修改。"
+      : (forceDeveloper
+        ? "developer 内置角色固定启用 developer 策略。"
+        : "generic 为纯配置驱动；developer 会启用开发流转增强。");
+  }
+}
+
 function runtimeAgentBaseKey(agentKey) {
   const meta = runtimeAgents[agentKey] || {};
   const direct = String(meta.agent_key || "").trim();
@@ -2716,6 +2831,8 @@ function renderAgentTypesList() {
   el.innerHTML = list.map(at => {
     const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]').join(', '); } catch { return at.poll_statuses||''; } })();
     const builtin = at.is_builtin ? '<span class="text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">内置</span>' : '';
+    const runtime = getRuntimeAgentInfo(at);
+    const runtimeChip = runtimeFamilyChip(runtime);
     const actions = editable
       ? `
       <button onclick="openAgentForm('${at.key}')" class="text-xs text-slate-400 hover:text-indigo-400 px-2 py-1 rounded hover:bg-slate-700 transition">编辑</button>
@@ -2728,8 +2845,12 @@ function renderAgentTypesList() {
           <span class="text-sm font-medium text-white">${escHtml(at.name)}</span>
           <span class="text-xs font-mono text-slate-500">(${escHtml(at.key)})</span>
           ${builtin}
+          ${runtimeChip}
+          <span class="text-xs font-mono text-slate-400">${escHtml(runtime.runtime_class)}</span>
+          ${runtime.runtime_profile ? `<span class="text-xs font-mono text-indigo-300">profile:${escHtml(runtime.runtime_profile)}</span>` : ""}
         </div>
         <div class="text-xs text-slate-500">${escHtml(at.description||'')}</div>
+        <div class="text-xs text-slate-600 mt-0.5">运行时: <span class="text-slate-400">${escHtml(runtime.runtime_summary)}</span></div>
         <div class="text-xs text-slate-600 mt-0.5">轮询: <span class="text-slate-500">${escHtml(polls)}</span> → <span class="text-slate-500">${escHtml(at.next_status)}</span></div>
         <div class="text-xs text-slate-600 mt-0.5">CLI: <span class="text-slate-500 font-mono">${escHtml(at.cli||'-')}</span></div>
       </div>
@@ -2753,7 +2874,7 @@ function _fillNextStatus(selected) {
 }
 
 function setAgentFormReadonly(readonly) {
-  const fieldIds = ["af-name", "af-key", "af-desc", "af-prompt", "af-cli", "af-next-status"];
+  const fieldIds = ["af-name", "af-key", "af-desc", "af-prompt", "af-cli", "af-next-status", "af-runtime-profile"];
   fieldIds.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -2796,9 +2917,12 @@ function openAgentForm(key) {
     document.getElementById("af-desc").value = at.description || "";
     document.getElementById("af-prompt").value = at.prompt || "";
     document.getElementById("af-cli").value = at.cli || "codex";
+    document.getElementById("af-runtime-profile").value = normalizeRuntimeProfile(at.runtime_profile, at.key) || "generic";
     const polls = (() => { try { return JSON.parse(at.poll_statuses||'[]'); } catch { return []; } })();
     _fillPollCheckboxes(polls);
     _fillNextStatus(at.next_status || "in_review");
+    syncRuntimeProfileControl(at, at.key);
+    renderAgentRuntimeInfo(at, at.key);
   } else {
     // Create mode
     document.getElementById("agent-form-title").textContent = "新建 Agent";
@@ -2807,11 +2931,43 @@ function openAgentForm(key) {
     document.getElementById("af-desc").value = "";
     document.getElementById("af-prompt").value = "";
     document.getElementById("af-cli").value = "codex";
+    document.getElementById("af-runtime-profile").value = "generic";
     _fillPollCheckboxes(["todo"]);
     _fillNextStatus("in_review");
+    syncRuntimeProfileControl(null, "");
+    renderAgentRuntimeInfo(null, "");
   }
   setAgentFormReadonly(readonly);
   document.getElementById("af-key").disabled = key ? true : readonly;
+  syncRuntimeProfileControl(agentTypes[_editingAgentKey] || null, key || document.getElementById("af-key").value);
+  const keyInput = document.getElementById("af-key");
+  if (keyInput) {
+    keyInput.oninput = () => {
+      const at = agentTypes[_editingAgentKey] || null;
+      syncRuntimeProfileControl(at, keyInput.value);
+      renderAgentRuntimeInfo(
+        {
+          ...(at || {}),
+          runtime_profile: document.getElementById("af-runtime-profile")?.value || "generic",
+        },
+        keyInput.value,
+      );
+    };
+  }
+  const profileInput = document.getElementById("af-runtime-profile");
+  if (profileInput) {
+    profileInput.onchange = () => {
+      const at = agentTypes[_editingAgentKey] || null;
+      syncRuntimeProfileControl(at, keyInput?.value || _editingAgentKey || "");
+      renderAgentRuntimeInfo(
+        {
+          ...(at || {}),
+          runtime_profile: profileInput.value,
+        },
+        keyInput?.value || _editingAgentKey || "",
+      );
+    };
+  }
 }
 function closeAgentForm() {
   document.getElementById("agents-list-view").classList.remove("hidden");
@@ -2859,6 +3015,7 @@ async function saveAgentType() {
     prompt:       document.getElementById("af-prompt").value,
     poll_statuses: polls,
     next_status:  document.getElementById("af-next-status").value,
+    runtime_profile: document.getElementById("af-runtime-profile").value,
     cli:          document.getElementById("af-cli").value,
   };
   try {

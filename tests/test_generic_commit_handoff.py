@@ -141,6 +141,44 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
         self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
 
+    async def test_prompt_includes_execution_contract_for_generic_worker(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, "done"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-3",
+            "title": "write FAQ",
+            "description": (
+                "## 任务目标\n- 输出客服 FAQ 初稿\n\n"
+                "## 交付物\n- docs/faq.md\n\n"
+                "## 验收标准\n- [ ] FAQ 至少覆盖 10 个常见问题\n- [ ] 结构清晰便于审查"
+            ),
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("## 执行基线（必须遵守）", prompt)
+        self.assertIn("docs/faq.md", prompt)
+        self.assertIn("FAQ 至少覆盖 10 个常见问题", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

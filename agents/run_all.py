@@ -12,7 +12,6 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from developer import DeveloperAgent
 from generic import GenericAgent
 from leader import LeaderAgent
 from manager import ManagerAgent
@@ -132,6 +131,7 @@ def make_signature(agent_type: dict | None, key: str, project_id: str, worker_in
         "poll_statuses": at.get("poll_statuses"),
         "next_status": at.get("next_status"),
         "working_status": at.get("working_status"),
+        "runtime_profile": at.get("runtime_profile"),
         "cli": at.get("cli"),
         "is_builtin": at.get("is_builtin"),
         "project_id": project_id,
@@ -141,15 +141,13 @@ def make_signature(agent_type: dict | None, key: str, project_id: str, worker_in
 
 
 def create_agent_instance(key: str, config: dict | None, shutdown_token: ShutdownToken):
-    if key == "developer":
-        return DeveloperAgent(shutdown_token, config)
     if key == "reviewer":
         return ReviewerAgent(shutdown_token, config)
     if key == "manager":
         return ManagerAgent(shutdown_token, config)
     if key == "leader":
         return LeaderAgent(shutdown_token, config)
-    cfg = config or {
+    cfg = dict(config or {
         "key": key,
         "name": key,
         "description": "",
@@ -159,7 +157,7 @@ def create_agent_instance(key: str, config: dict | None, shutdown_token: Shutdow
         "working_status": "in_progress",
         "cli": "codex",
         "is_builtin": 1,
-    }
+    })
     return GenericAgent(cfg, shutdown_token)
 
 
