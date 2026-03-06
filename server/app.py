@@ -81,6 +81,14 @@ STRICT_CLAIM_SCOPE = str(os.getenv("FEATURE_STRICT_CLAIM_SCOPE", "1")).strip().l
 }
 PER_PROJECT_MAX_WORKERS = int(os.getenv("PER_PROJECT_MAX_WORKERS", "0"))
 PER_AGENT_TYPE_MAX_WORKERS = int(os.getenv("PER_AGENT_TYPE_MAX_WORKERS", "0"))
+AGENT_OUTPUT_HISTORY_MAX_LINES = max(
+    100,
+    int(str(os.getenv("AGENT_OUTPUT_HISTORY_MAX_LINES", "1000")).strip() or "1000"),
+)
+AGENT_OUTPUT_INIT_MAX_LINES = max(
+    0,
+    int(str(os.getenv("AGENT_OUTPUT_INIT_MAX_LINES", "160")).strip() or "160"),
+)
 
 
 def _normalize_support_llm_base_url(raw_url: str) -> str:
@@ -141,7 +149,7 @@ SUPPORT_TUTORIAL = """
 - 非 completed/cancelled 的任务可 cancel（取消）
 
 [5] 任务详情信息面板
-- 可查看：日志（logs）、结构化交接（handoffs）、变更文件与分支信息、依赖与后续任务、审查反馈与反馈历史。
+- 可查看：结构化交接（handoffs）、变更文件与分支信息、依赖与后续任务、审查反馈与反馈历史。
 
 [6] Agent 与终端
 - 默认角色：leader、developer、reviewer、manager（也支持自定义 Agent 类型和提示词）。
@@ -772,7 +780,7 @@ def require_task_access(task_id: str, user: dict) -> dict:
 
 
 # ── In-memory agent state (auto-expands for custom agents) ────────────────────
-AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=1000))
+AGENT_OUTPUT: dict = defaultdict(lambda: deque(maxlen=AGENT_OUTPUT_HISTORY_MAX_LINES))
 AGENT_STATUS: dict = defaultdict(
     lambda: {
         "agent_key": "",
@@ -861,6 +869,8 @@ def _agent_outputs_snapshot(user: dict | None = None, project_id: str | None = N
             for entry in (_normalize_agent_output_entry(x) for x in list(AGENT_OUTPUT[name]))
             if visible_project(entry.get("project_id"))
         ]
+        if AGENT_OUTPUT_INIT_MAX_LINES and len(lines) > AGENT_OUTPUT_INIT_MAX_LINES:
+            lines = lines[-AGENT_OUTPUT_INIT_MAX_LINES:]
         state_visible = visible_project(state.get("project_id"))
         if not state_visible and not lines:
             continue
@@ -3869,25 +3879,32 @@ async def websocket_endpoint(
         return
     await manager.connect(ws)
     try:
+        projects = db.list_projects(user_id=user["id"], is_admin=_is_admin(user))
+        effective_scope_project_id = scope_project_id
+        if not effective_scope_project_id and projects:
+            # UI requires a selected project; defaulting scope avoids pushing
+            # all historical tasks on first load for users without local cache.
+            effective_scope_project_id = str(projects[0].get("id") or "").strip() or None
         await manager.send_init_and_subscribe(
             ws,
             user,
             lambda: {
                 "event": "init",
                 "tasks": db.list_tasks(
-                    project_id=scope_project_id,
+                    project_id=effective_scope_project_id,
                     user_id=user["id"],
                     is_admin=_is_admin(user),
+                    compact=True,
                 ),
-                "projects": db.list_projects(user_id=user["id"], is_admin=_is_admin(user)),
+                "projects": projects,
                 "agent_types": db.list_agent_types(),
                 "agent_outputs": _agent_outputs_snapshot(
                     user=user,
-                    project_id=scope_project_id,
+                    project_id=effective_scope_project_id,
                 ),
                 "user": user,
             },
-            project_id=scope_project_id,
+            project_id=effective_scope_project_id,
         )
         while True:
             await ws.receive_text()
