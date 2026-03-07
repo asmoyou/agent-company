@@ -5,25 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from base import BaseAgent, MANAGER_MERGE_MODE, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_status_list
-
-MANAGER_PROMPT_DEFAULT = (
-    "你是发布合并管理者。请优先将已审查 patchset(base..head) 以 deterministic squash merge 方式合并到 main；"
-    "只有缺少 patchset 时才回退到 commit 路径。\n\n"
-    "任务标题：{task_title}\n"
-    "目标 commit：{commit_hash}\n"
-    "来源分支：{dev_branch}\n"
-    "仓库路径：{project_path}\n\n"
-    "请执行：\n"
-    "1. 切换到 main（不存在则创建）。\n"
-    "2. 验证目标 commit 在来源分支上（git merge-base --is-ancestor）。\n"
-    "3. 仅合并目标 commit（不要合并整个分支 HEAD）。\n"
-    "4. 提交信息使用：{merge_message}\n\n"
-    "若冲突，停止并保留冲突现场，不要强行解决。\n"
-    "完成后把结果写入 JSON 文件：{decision_file}\n"
-    "JSON 格式：\n"
-    '{"decision":"merged|already_up_to_date|conflict|failed","message":"..."}\n'
-    "并在回复最后一行输出同一个 JSON 对象。"
-)
+from prompt_registry import MANAGER_PROMPT_DEFAULT
 
 
 def _utcnow_iso() -> str:

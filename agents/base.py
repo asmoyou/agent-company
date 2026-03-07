@@ -9,6 +9,7 @@ import pty
 import re
 import signal
 import shutil
+import sys
 import tempfile
 import termios
 import time
@@ -17,6 +18,12 @@ from pathlib import Path
 import httpx
 
 PROJECT_ROOT    = Path(__file__).parent.parent
+SERVER_ROOT     = PROJECT_ROOT / "server"
+if str(SERVER_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVER_ROOT))
+
+from task_intelligence import normalize_allowed_surface, normalize_issue_list, summarize_issue_list
+
 SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
 CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
@@ -306,6 +313,20 @@ class BaseAgent:
         return items
 
     def _extract_task_contract(self, task: dict | None) -> dict[str, object]:
+        current_contract = (task or {}).get("current_contract")
+        if isinstance(current_contract, dict):
+            return {
+                "goal": self._clip_prompt_text(str(current_contract.get("goal") or "").strip(), limit=TASK_PROMPT_TEXT_MAX_CHARS),
+                "parent_refs": [str(item).strip() for item in (current_contract.get("parent_refs") or []) if str(item).strip()],
+                "scope": [str(item).strip() for item in (current_contract.get("scope") or []) if str(item).strip()],
+                "non_scope": [str(item).strip() for item in (current_contract.get("non_scope") or []) if str(item).strip()],
+                "constraints": [str(item).strip() for item in (current_contract.get("constraints") or []) if str(item).strip()],
+                "todo_steps": [str(item).strip() for item in (current_contract.get("todo_steps") or []) if str(item).strip()],
+                "deliverables": [str(item).strip() for item in (current_contract.get("deliverables") or []) if str(item).strip()],
+                "acceptance": [str(item).strip() for item in (current_contract.get("acceptance") or []) if str(item).strip()],
+                "assumptions": [str(item).strip() for item in (current_contract.get("assumptions") or []) if str(item).strip()],
+                "evidence_required": [str(item).strip() for item in (current_contract.get("evidence_required") or []) if str(item).strip()],
+            }
         description = str((task or {}).get("description") or "").strip()
         if not description:
             return {}
@@ -381,6 +402,50 @@ class BaseAgent:
         lines.append("- 仅当所有验收项都有代码、测试、文档或行为证据支撑时，才能 approve。")
         lines.append("- TODO 步骤只是实现路径参考，不能替代验收标准本身。")
         lines.append("- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向。")
+        return "\n".join(lines)
+
+    def build_issue_ledger_block(self, task: dict | None) -> str:
+        if not task:
+            return ""
+        open_issues = task.get("open_issues")
+        if not isinstance(open_issues, list) or not open_issues:
+            return ""
+        lines = [
+            "## 未解决问题账本（必须逐项处理）",
+            "- 本轮只围绕以下 open issue 收敛；不要无依据扩展交付面。",
+            summarize_issue_list(open_issues, limit=10),
+        ]
+        latest_evidence = task.get("latest_evidence")
+        if isinstance(latest_evidence, dict):
+            summary = str(latest_evidence.get("summary") or "").strip()
+            if summary:
+                lines.append("### 最近一次证据包摘要")
+                lines.append(f"- {summary}")
+        return "\n".join(line for line in lines if str(line).strip())
+
+    def build_retry_strategy_block(self, task: dict | None) -> str:
+        if not task:
+            return ""
+        retry_strategy = str(task.get("retry_strategy") or "").strip()
+        same_fingerprint_streak = int(task.get("same_fingerprint_streak") or 0)
+        execution_phase = str(task.get("execution_phase") or "").strip()
+        cooldown_until = str(task.get("cooldown_until") or "").strip()
+        if not any([retry_strategy, same_fingerprint_streak, execution_phase, cooldown_until]):
+            return ""
+        lines = ["## 当前收敛策略"]
+        if execution_phase:
+            lines.append(f"- execution_phase: {execution_phase}")
+        if retry_strategy:
+            lines.append(f"- retry_strategy: {retry_strategy}")
+        if same_fingerprint_streak:
+            lines.append(f"- same_failure_streak: {same_fingerprint_streak}")
+        if cooldown_until:
+            lines.append(f"- cooldown_until: {cooldown_until}")
+        allowed_surface = normalize_allowed_surface(task.get("allowed_surface") or task.get("allowed_surface_json"))
+        if any(allowed_surface.values()):
+            roots = ", ".join((allowed_surface.get("roots") or [])[:8])
+            if roots:
+                lines.append(f"- allowed_surface_roots: {roots}")
         return "\n".join(lines)
 
     # ── HTTP helpers ─────────────────────────────────────────────────────────
@@ -2184,16 +2249,23 @@ class BaseAgent:
             "...",
         }
 
+        issues = normalize_issue_list(payload.get("issues"), default_status="open")
+
         if decision == "approve":
             comment = str(payload.get("comment") or "").strip()
             if not comment or comment in placeholder_values:
                 return None
-            return {"decision": "approve", "comment": comment}
+            return {"decision": "approve", "comment": comment, "issues": issues}
 
         feedback = str(payload.get("feedback") or "").strip()
         if not feedback or feedback in placeholder_values:
             return None
-        return {"decision": "request_changes", "feedback": feedback}
+        if not issues:
+            issues = normalize_issue_list(
+                [{"summary": feedback, "status": "open", "category": "other", "severity": "medium"}],
+                default_status="open",
+            )
+        return {"decision": "request_changes", "feedback": feedback, "issues": issues}
 
     def parse_json_decision(self, text: str) -> dict | None:
         # Only parse near the tail to avoid picking JSON examples echoed from the prompt.

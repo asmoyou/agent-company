@@ -5,61 +5,11 @@ import re
 from pathlib import Path
 
 from base import BaseAgent, get_project_dirs, normalize_agent_key, parse_status_list
-
-TRIAGE_PROMPT_DEFAULT = (
-    "你是项目主管，负责先完善任务需求，再评估是否需要分解与分派执行。请处理以下任务：\n\n"
-    "## 任务标题\n{task_title}\n\n"
-    "## 任务描述\n{task_description}\n\n"
-    "## 可用 Agent 类型\n{agent_list}\n\n"
-    "## 评估标准\n"
-    "- **简单任务**：可以由单个 agent 独立完成，工作量在 1-2 小时内\n"
-    "- **复杂任务**：涉及多个独立功能模块，或需要不同专业技能协作\n\n"
-    "## 输出格式（严格 JSON，不要任何其他文字）\n\n"
-    "如果是简单任务：\n"
-    '{"action": "simple", "reason": "一句话说明为何不需要分解", "assignee": "执行该任务的 agent key（如 art_designer）"}\n\n'
-    "如果是复杂任务：\n"
-    '{"action": "decompose", "subtasks": [\n'
-    '  {"title": "子任务标题", "objective":"子任务目标", "parent_refs":["R1"], "deliverables":["交付物1"], "acceptance_criteria":["验收1","验收2"], "agent": "developer"}\n'
-    "]}"
-)
-
-FORCE_DECOMPOSE_PROMPT = (
-    "你是项目主管。请在需求清晰的前提下，将以下任务分解为 2-5 个可执行子任务：\n\n"
-    "## 任务标题\n{task_title}\n\n"
-    "## 任务描述\n{task_description}\n\n"
-    "## 可用 Agent 类型\n{agent_list}\n\n"
-    "只输出 JSON 数组，不要任何其他文字，字段必须完整且具体：\n"
-    "[\n"
-    '  {"title": "子任务标题", "objective":"子任务目标", "parent_refs":["R1"], "deliverables":["交付物1"], "acceptance_criteria":["验收1","验收2"], "agent": "developer"}\n'
-    "]"
-)
-
-LEADER_PROMPT_QUALITY_BLOCK = (
-    "## 子任务质量门槛（必须满足）\n"
-    "1. 子任务必须是可独立验收的功能，不得空泛。\n"
-    "2. 每个子任务必须提供：\n"
-    "   - title: 明确功能点（不要“完善功能/优化体验/相关开发”）\n"
-    "   - objective: 具体目标（包含对象、行为、结果）\n"
-    "   - parent_refs: 必须引用父任务需求编号（如 [\"R1\",\"R3\"]）\n"
-    "   - todo_steps: 具体执行步骤清单（按顺序）\n"
-    "   - deliverables: 具体交付物清单（文件/接口/页面/脚本/测试）\n"
-    "   - acceptance_criteria: 可验证的验收标准，至少 2 条\n"
-    "3. parent_refs 只能引用给定的需求编号，禁止自造编号。\n"
-    "4. 禁止输出空泛词：如“完善功能”“相关逻辑”“进行优化”“处理需求”等。\n"
-)
-
-LEADER_REQUIREMENT_REFINEMENT_PROMPT = (
-    "你是需求分析师。请把原始任务描述整理为可执行、可验收的需求说明。\n\n"
-    "要求：\n"
-    "1. 只能基于已有信息重写，不得杜撰业务事实。\n"
-    "2. 缺失信息请明确标注“待确认：...”。\n"
-    "3. 输出 Markdown，必须包含以下小节（顺序固定）：\n"
-    "   - ## 任务目标\n"
-    "   - ## 范围\n"
-    "   - ## 非范围\n"
-    "   - ## 关键约束\n"
-    "   - ## 验收标准\n"
-    "4. 用清晰、具体的表述，避免空泛词（如“完善功能”“优化体验”）。\n"
+from prompt_registry import (
+    FORCE_DECOMPOSE_PROMPT,
+    LEADER_PROMPT_QUALITY_BLOCK,
+    LEADER_REQUIREMENT_REFINEMENT_PROMPT,
+    TRIAGE_PROMPT_DEFAULT,
 )
 
 LEADER_SUBTASK_SCHEMA = {
