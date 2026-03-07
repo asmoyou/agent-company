@@ -482,6 +482,12 @@
       cursor:not-allowed;
       transform:none;
     }
+    .fb-head-meta{
+      margin-top:6px;
+      font-size:11px;
+      color:#64748b;
+      line-height:1.5;
+    }
     .fb-preview-body{flex:1;min-height:0;overflow:auto;padding:12px;background:#020617;}
     .fb-preview-placeholder{height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:12px;text-align:center;padding:12px;}
     .fb-preview-pre{margin:0;white-space:pre;font-family:'SF Mono','Monaco','Menlo',monospace;font-size:12px;line-height:1.6;color:#d1d5db;}
@@ -2522,6 +2528,7 @@
         <div id="fb-project-path-text" class="fb-head-path" title=""></div>
         <button id="fb-project-path-copy" type="button" onclick="copyProjectPath()" class="fb-head-copy" title="复制项目路径">复制</button>
       </div>
+      <div id="fb-project-meta-text" class="fb-head-meta hidden"></div>
     </div>
     <div class="fb-toolbar flex items-center gap-1.5 shrink-0">
       <button onclick="fbDownloadCurrentPath()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="打包下载当前目录">⬇ 当前目录</button>
@@ -2742,10 +2749,10 @@
       </div>
       <div>
         <label id="proj-path-label" class="block text-xs text-slate-400 mb-1">项目目录（绝对路径）*</label>
-        <input id="proj-path" type="text" required placeholder="~/projects/my-awesome-project"
+        <input id="proj-path" type="text" required placeholder="~/projects/<username>/my-awesome-project"
           oninput="onProjPathInput()"
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono text-xs" />
-        <div id="proj-path-hint" class="text-xs text-slate-500 mt-1">目录不存在会自动创建，并初始化 git 仓库</div>
+        <div id="proj-path-hint" class="text-xs text-slate-500 mt-1">目录不存在会自动创建，并初始化 git 仓库。默认建议目录：~/projects/&lt;username&gt;/&lt;project-name&gt;</div>
         <div id="proj-pick-dir-row" class="hidden mt-2 flex justify-end">
           <button type="button" onclick="openDirPicker()"
             class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">
@@ -3098,6 +3105,7 @@ function setAuthUser(user) {
   refreshProfileModal();
   if (!isAdminUser()) closeUsersModal();
   if (typeof updateProjectModeAvailability === "function") updateProjectModeAvailability();
+  if (typeof setProjectMode === "function") setProjectMode(newProjectMode);
   if (typeof feedbackRequestHandleAuthChange === "function") feedbackRequestHandleAuthChange();
 }
 
@@ -3504,7 +3512,7 @@ function updateMobileTopbarState() {
   if (!projectEl || !createBtn) return;
   const proj = currentProjectId && projects[currentProjectId] ? projects[currentProjectId] : null;
   projectEl.textContent = proj
-    ? String(proj.name || currentProjectId || "当前项目")
+    ? formatProjectLabel(proj)
     : (Object.keys(projects).length ? "未选择项目" : "暂无项目");
   createBtn.disabled = !proj;
   createBtn.title = proj ? "创建任务" : "请先选择项目";
@@ -4742,12 +4750,48 @@ async function deleteAgentType(key) {
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
+function projectCreatorName(project) {
+  return String(project?.created_by_username || "").trim();
+}
+
+function formatProjectLabel(project) {
+  const name = String(project?.name || project?.id || "未命名项目").trim();
+  const creator = projectCreatorName(project);
+  return creator ? `${name} · 创建人：${creator}` : name;
+}
+
+function normalizeProjectDirSegment(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "");
+}
+
+function suggestedProjectBaseDir(forPlaceholder = false) {
+  const username = normalizeProjectDirSegment(currentUser?.username);
+  if (username) return `~/projects/${username}`;
+  return forPlaceholder ? "~/projects/<username>" : "~/projects";
+}
+
+function suggestedProjectPlaceholder() {
+  return `${suggestedProjectBaseDir(true)}/my-awesome-project`;
+}
+
+function suggestedProjectPath(projectName) {
+  const slug = normalizeProjectDirSegment(projectName);
+  if (!slug) return suggestedProjectBaseDir();
+  return `${suggestedProjectBaseDir()}/${slug}`;
+}
+
 function loadProjects(list) {
   projects = {};
   list.forEach(p => projects[p.id] = p);
   const sel = document.getElementById("project-select");
   sel.innerHTML = '<option value="">— 选择项目 —</option>' +
-    list.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join("");
+    list.map(p => `<option value="${p.id}">${escHtml(formatProjectLabel(p))}</option>`).join("");
   if (list.length > 0) {
     const storedProjectId = loadStoredProjectId();
     const preferredProjectId =
@@ -4768,10 +4812,10 @@ function upsertProjectOption(project) {
   const sel = document.getElementById("project-select");
   const existing = sel.querySelector(`option[value="${project.id}"]`);
   if (existing) {
-    existing.textContent = project.name;
+    existing.textContent = formatProjectLabel(project);
     return;
   }
-  sel.insertAdjacentHTML("beforeend", `<option value="${project.id}">${escHtml(project.name)}</option>`);
+  sel.insertAdjacentHTML("beforeend", `<option value="${project.id}">${escHtml(formatProjectLabel(project))}</option>`);
 }
 
 function onProjectChange() {
@@ -7861,11 +7905,14 @@ function setProjectMode(mode) {
   btnExisting.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"} ${isAdminUser() ? "" : "hidden"}`;
   title.textContent = isExisting ? "添加现有项目" : "新建项目";
   pathLabel.textContent = isExisting ? "现有项目目录（绝对路径）*" : "项目目录（绝对路径）*";
-  pathHint.textContent = isExisting ? "只会添加已存在目录；若目录没有 git，会自动初始化" : "目录不存在会自动创建，并初始化 git 仓库";
+  pathHint.textContent = isExisting
+    ? "只会添加已存在目录；若目录没有 git，会自动初始化"
+    : `目录不存在会自动创建，并初始化 git 仓库。默认建议目录：${suggestedProjectBaseDir(true)}/<project-name>`;
   submitBtn.textContent = isExisting ? "添加并检查 Git" : "创建并初始化";
-  pathInput.placeholder = isExisting ? "~/projects/existing-project" : "~/projects/my-awesome-project";
+  pathInput.placeholder = isExisting ? "~/projects/existing-project" : suggestedProjectPlaceholder();
   nameInput.required = !isExisting;
   pickDirRow.classList.toggle("hidden", !isExisting || !isAdminUser());
+  if (!isExisting && nameInput.value.trim()) updateProjPath();
 }
 function openDirPicker() {
   if (!isAdminUser()) return;
@@ -7929,9 +7976,8 @@ function selectDirFromPicker() {
 }
 function updateProjPath() {
   if (newProjectMode === "existing") return;
-  const name = document.getElementById("proj-name").value.trim()
-    .toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-_]/g,"");
-  if (name) document.getElementById("proj-path").value = `~/projects/${name}`;
+  const name = document.getElementById("proj-name").value.trim();
+  document.getElementById("proj-path").value = name ? suggestedProjectPath(name) : "";
 }
 function onProjPathInput() {
   if (newProjectMode !== "existing") return;
@@ -9212,6 +9258,7 @@ function escAttr(s) {
 function updateProjectPath() {
   const wrapEl = document.getElementById("fb-project-path-wrap");
   const textEl = document.getElementById("fb-project-path-text");
+  const metaEl = document.getElementById("fb-project-meta-text");
   const copyBtn = document.getElementById("fb-project-path-copy");
   const workspaceBtn = document.getElementById("btn-open-workspace");
   const proj = projects[currentProjectId];
@@ -9221,6 +9268,11 @@ function updateProjectPath() {
     if (textEl) {
       textEl.textContent = proj.path;
       textEl.title = proj.path;
+    }
+    if (metaEl) {
+      const creator = projectCreatorName(proj);
+      metaEl.textContent = creator ? `创建人：${creator}` : "";
+      metaEl.classList.toggle("hidden", !creator);
     }
     if (copyBtn) {
       copyBtn.disabled = false;
@@ -9232,6 +9284,10 @@ function updateProjectPath() {
     if (textEl) {
       textEl.textContent = "";
       textEl.title = "";
+    }
+    if (metaEl) {
+      metaEl.textContent = "";
+      metaEl.classList.add("hidden");
     }
     if (copyBtn) {
       copyBtn.disabled = true;
