@@ -94,6 +94,8 @@ GENERIC_SUBTASK_PATTERNS = [
 PARENT_REQUIREMENT_SPLIT_RE = re.compile(r"(?:[\n\r]+|[。！？!?；;]+)")
 LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、:]?)\s*")
 ASSUMPTION_SECTION_RE = re.compile(r"^\s{0,3}#{1,6}\s*(?:假设|assumptions?|待确认)\s*$", re.IGNORECASE | re.MULTILINE)
+EVIDENCE_SECTION_RE = re.compile(r"^\s{0,3}#{1,6}\s*(?:证据要求|evidence(?:\s+required)?)\s*$", re.IGNORECASE | re.MULTILINE)
+PARENT_REF_INLINE_RE = re.compile(r"(?<![A-Za-z0-9_])R\d+(?:\s*[、,，/]\s*R\d+)*(?![A-Za-z0-9_])")
 LEADER_SYSTEM_RETRY_MAX = int(os.getenv("LEADER_SYSTEM_RETRY_MAX", "2"))
 LEADER_SYSTEM_RETRY_BACKOFF_SECS = int(os.getenv("LEADER_SYSTEM_RETRY_BACKOFF_SECS", "20"))
 
@@ -349,18 +351,52 @@ class LeaderAgent(BaseAgent):
             return ""
         if "## " not in text and "# " not in text:
             return text
-        if ASSUMPTION_SECTION_RE.search(text):
+        append_sections: list[str] = []
+        if not ASSUMPTION_SECTION_RE.search(text):
+            assumption_lines = [
+                "## 假设",
+                "- 未明确说明的实现细节按最小可逆方案处理，不等待额外人工确认。",
+                "- 除非需求、约束或验收标准明确要求，否则不新增额外交付面、兼容入口或外部依赖。",
+            ]
+            if "待确认" in text:
+                assumption_lines.append(
+                    "- 描述中的“待确认”仅作为风险提示；在未收到补充信息前，仍按上述默认假设继续推进。"
+                )
+            append_sections.append("\n".join(assumption_lines))
+        if not EVIDENCE_SECTION_RE.search(text):
+            evidence_lines = [
+                "## 证据要求",
+                "- 提供至少一个可本地执行的验证命令、测试或冒烟脚本，用于覆盖关键验收路径。",
+            ]
+            if re.search(r"(网页|页面|浏览器|前端|游戏|交互|按钮|界面|动画)", text):
+                evidence_lines.append(
+                    "- 对交互/行为型任务，验证证据需覆盖开始、关键交互以及失败恢复路径。"
+                )
+            append_sections.append("\n".join(evidence_lines))
+        if not append_sections:
             return text
-        assumption_lines = [
-            "## 假设",
-            "- 未明确说明的实现细节按最小可逆方案处理，不等待额外人工确认。",
-            "- 除非需求、约束或验收标准明确要求，否则不新增额外交付面、兼容入口或外部依赖。",
-        ]
-        if "待确认" in text:
-            assumption_lines.append(
-                "- 描述中的“待确认”仅作为风险提示；在未收到补充信息前，仍按上述默认假设继续推进。"
-            )
-        return f"{text}\n\n" + "\n".join(assumption_lines)
+        return f"{text}\n\n" + "\n\n".join(append_sections)
+
+    def _sanitize_simple_refined_description(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        lines: list[str] = []
+        skip_parent_ref_section = False
+        for raw_line in cleaned.splitlines():
+            line = raw_line.rstrip()
+            heading = line.strip().lower()
+            if heading in {"## 关联父需求编号", "### 关联父需求编号"}:
+                skip_parent_ref_section = True
+                continue
+            if skip_parent_ref_section and line.strip().startswith("## "):
+                skip_parent_ref_section = False
+            if skip_parent_ref_section:
+                continue
+            line = PARENT_REF_INLINE_RE.sub("原始需求", line)
+            line = re.sub(r"原始需求(?:\s*[、,，/]\s*原始需求)+", "原始需求", line)
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     def _normalize_triage_decision(
         self,
@@ -378,6 +414,7 @@ class LeaderAgent(BaseAgent):
         if action == "simple":
             reason = str(raw_decision.get("reason") or "").strip() or "判定为简单任务"
             assignee = normalize_agent_key(str(raw_decision.get("assignee") or "").strip(), default="")
+            refined_description = self._sanitize_simple_refined_description(refined_description)
             return {
                 "action": "simple",
                 "reason": reason[:500],

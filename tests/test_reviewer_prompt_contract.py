@@ -213,6 +213,61 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["handoff"]["payload"]["patchset"]["changed_files"][0]["path"], "index.html")
         self.assertEqual(call.kwargs["handoff"]["payload"]["patchset"]["artifact_manifest"]["path"], ".opc/delivery.json")
 
+    async def test_process_task_blocks_approve_when_machine_evidence_still_has_blockers(self):
+        patchset = {
+            "id": "ps-review-blocked-1",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "source_branch": "agent/developer/task-blocked",
+            "commit_count": 1,
+            "commit_list": [],
+            "diff_stat": " smoke-test.js | 2 +-",
+            "status": "submitted",
+            "worktree_clean": True,
+        }
+        self.agent.resolve_task_patchset = mock.AsyncMock(return_value=patchset)
+        self.agent.enrich_patchset_snapshot = mock.AsyncMock(return_value=patchset)
+        self.agent.get_diff_for_patchset = mock.AsyncMock(return_value="diff --git a/a b/a\n+hello\n")
+        self.agent.run_cli = mock.AsyncMock(return_value=(0, '{"decision":"approve","comment":"ok"}'))
+        self.agent._load_decision_file = mock.Mock(return_value={"decision": "approve", "comment": "ok"})
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("status", "--porcelain"):
+                return ""
+            if args == ("rev-parse", "main"):
+                return "c" * 40
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-guard-1",
+            "title": "补全交互验证",
+            "description": "",
+            "status": "in_review",
+            "commit_hash": patchset["head_sha"],
+            "assigned_agent": "developer",
+            "dev_agent": "developer",
+            "current_patchset_id": patchset["id"],
+            "current_patchset_status": "submitted",
+            "latest_evidence": {
+                "summary": "预检仍缺证据",
+                "bundle": {
+                    "missing_evidence_required": [{"item": "node smoke-test.js", "status": "missing"}],
+                    "missing_acceptance_checks": [],
+                    "assumption_conflicts": [],
+                    "surface_violations": [],
+                },
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "review_to_dev")
+        self.assertIn("机器校验阻止通过", call.kwargs["fields"]["review_feedback"])
+
     async def test_process_task_falls_back_to_commit_review_when_delivery_model_is_commit(self):
         patchset = {
             "id": "ps-review-commit-1",

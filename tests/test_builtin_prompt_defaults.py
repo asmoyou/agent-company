@@ -79,6 +79,8 @@ class BuiltinPromptDefaultsTest(unittest.TestCase):
         self.assertIn("只有所有验收项都有代码、测试、文档或行为证据时，才能 approve", reviewer["prompt"])
         self.assertIn("不要因为存在 assumptions 本身而打回", reviewer["prompt"])
         self.assertIn("用最小可逆 assumptions 吸收普通细节缺口", leader["prompt"])
+        self.assertIn("编号只用于 subtasks.parent_refs", leader["prompt"])
+        self.assertIn("simple 任务的 refined_description", leader["prompt"])
 
     def test_init_db_migrates_legacy_builtin_prompts(self):
         db.update_agent_type("developer", prompt=LEGACY_DEVELOPER_PROMPT)

@@ -279,6 +279,36 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["delivery_retry_count"], 3)
         self.assertEqual(payload["latest_failure_stage"], "writer_commit_required")
 
+    async def test_resolve_task_patchset_ignores_conflicting_handoff_patchset(self):
+        self.agent.get_handoffs = mock.AsyncMock(
+            return_value=[
+                {
+                    "to_agent": "writer",
+                    "payload": {
+                        "patchset": {
+                            "id": "ps-stale-1",
+                            "head_sha": "a" * 40,
+                            "status": "submitted",
+                        }
+                    },
+                }
+            ]
+        )
+
+        resolved = await self.agent.resolve_task_patchset(
+            {
+                "id": "task-6",
+                "current_patchset_id": "ps-current-1",
+                "current_patchset_status": "approved",
+                "commit_hash": "b" * 40,
+            }
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["id"], "ps-current-1")
+        self.assertEqual(resolved["head_sha"], "b" * 40)
+        self.assertEqual(resolved["status"], "approved")
+
 
 if __name__ == "__main__":
     unittest.main()

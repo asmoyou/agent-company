@@ -5,6 +5,7 @@ from base import BaseAgent, is_review_enabled
 from task_intelligence import (
     compute_failure_fingerprint,
     detect_surface_from_changed_files,
+    evaluate_contract_evidence,
     find_surface_violations,
     next_retry_strategy,
     normalize_allowed_surface,
@@ -289,6 +290,7 @@ class GenericAgent(BaseAgent):
     def _build_pre_review_evidence_bundle(self, task: dict, patchset: dict) -> dict:
         contract = self._extract_task_contract(task)
         changed_files = patchset.get("changed_files") or []
+        artifact_manifest = patchset.get("artifact_manifest") or {}
         current_surface = detect_surface_from_changed_files(changed_files)
         allowed_surface = normalize_allowed_surface(
             task.get("allowed_surface") or task.get("allowed_surface_json")
@@ -380,9 +382,8 @@ class GenericAgent(BaseAgent):
                 }
             )
 
-        surface_violations: list[str] = []
+        surface_violations = find_surface_violations(allowed_surface, current_surface)
         if str(task.get("_claimed_from_status") or task.get("status") or "").strip().lower() == "needs_changes":
-            surface_violations = find_surface_violations(allowed_surface, current_surface)
             for violation in surface_violations:
                 issues.append(
                     {
@@ -399,10 +400,19 @@ class GenericAgent(BaseAgent):
                     }
                 )
 
+        evidence_result = evaluate_contract_evidence(
+            contract,
+            changed_files=changed_files,
+            current_surface=current_surface,
+            allowed_surface=allowed_surface,
+            artifact_manifest=artifact_manifest,
+        )
+        issues.extend(evidence_result["issues"])
         missing_checks = [item for item in acceptance_checks if item["status"] == "missing"]
         summary = (
             f"预检完成：changed_files={len(changed_paths)}，"
             f"missing_acceptance={len(missing_checks)}，"
+            f"missing_evidence={len(evidence_result['missing_evidence_required'])}，"
             f"surface_violations={len(surface_violations)}"
         )
         return {
@@ -411,10 +421,14 @@ class GenericAgent(BaseAgent):
                 "contract_version": int(((task.get("current_contract") or {}).get("version") or 0)),
                 "changed_files": changed_files,
                 "acceptance_checks": acceptance_checks,
+                "evidence_checks": evidence_result["evidence_checks"],
                 "current_surface": current_surface,
                 "allowed_surface": allowed_surface,
                 "surface_violations": surface_violations,
                 "missing_acceptance_checks": missing_checks,
+                "missing_evidence_required": evidence_result["missing_evidence_required"],
+                "assumption_conflicts": evidence_result["assumption_conflicts"],
+                "artifact_manifest": artifact_manifest if isinstance(artifact_manifest, dict) else {},
             },
             "issues": issues,
             "allowed_surface": current_surface if any(current_surface.values()) else allowed_surface,

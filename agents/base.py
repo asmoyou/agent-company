@@ -22,7 +22,12 @@ SERVER_ROOT     = PROJECT_ROOT / "server"
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from task_intelligence import normalize_allowed_surface, normalize_issue_list, summarize_issue_list
+from task_intelligence import (
+    UNRESOLVED_ISSUE_STATUSES,
+    normalize_allowed_surface,
+    normalize_issue_list,
+    summarize_issue_list,
+)
 
 SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
@@ -126,6 +131,11 @@ TASK_SECTION_ALIAS_MAP = {
 TASK_PROMPT_LIST_MAX_ITEMS = 8
 TASK_PROMPT_ITEM_MAX_CHARS = 180
 TASK_PROMPT_TEXT_MAX_CHARS = 360
+RUNTIME_GIT_EXCLUDE_PATTERNS = (
+    ".opc/decisions/",
+    "opc-codex-last-*",
+    "opc-codex-schema-*",
+)
 
 
 def build_cli_cmd(cli_name: str, prompt: str) -> list[str]:
@@ -255,6 +265,51 @@ class BaseAgent:
         if len(compact) <= limit:
             return compact
         return compact[: max(0, limit - 12)].rstrip() + " ..."
+
+    def _resolve_git_dir(self, repo_root: Path) -> Path | None:
+        dot_git = repo_root / ".git"
+        if dot_git.is_dir():
+            return dot_git
+        if not dot_git.is_file():
+            return None
+        try:
+            raw = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return None
+        match = re.match(r"gitdir:\s*(.+)$", raw, re.IGNORECASE)
+        if not match:
+            return None
+        git_dir = Path(match.group(1).strip())
+        if not git_dir.is_absolute():
+            git_dir = (repo_root / git_dir).resolve()
+        return git_dir
+
+    def _ensure_runtime_git_excludes(self, worktree: Path) -> None:
+        git_dir = self._resolve_git_dir(worktree)
+        if git_dir is None:
+            return
+        info_dir = git_dir / "info"
+        info_dir.mkdir(parents=True, exist_ok=True)
+        exclude_path = info_dir / "exclude"
+        try:
+            existing = exclude_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            existing = ""
+        except Exception:
+            return
+        lines = existing.splitlines()
+        changed = False
+        for pattern in RUNTIME_GIT_EXCLUDE_PATTERNS:
+            if pattern in lines:
+                continue
+            lines.append(pattern)
+            changed = True
+        if not changed:
+            return
+        payload = "\n".join(lines).strip()
+        if payload:
+            payload += "\n"
+        exclude_path.write_text(payload, encoding="utf-8")
 
     def _normalize_task_section_name(self, raw: str) -> str:
         cleaned = re.sub(r"[\s:：()（）/_-]+", "", str(raw or "")).strip().lower()
@@ -393,7 +448,7 @@ class BaseAgent:
         self._append_prompt_list_section(lines, "### 提交前必须满足的验收标准", contract.get("acceptance"), checkbox=True)
         self._append_prompt_list_section(lines, "### 关键约束", contract.get("constraints"))
         self._append_prompt_list_section(lines, "### 已批准的默认假设", contract.get("assumptions"))
-        self._append_prompt_list_section(lines, "### 建议补齐的证据", contract.get("evidence_required"))
+        self._append_prompt_list_section(lines, "### 提交前必须补齐的证据", contract.get("evidence_required"))
         return "\n".join(lines)
 
     def build_review_contract_block(self, task: dict | None) -> str:
@@ -415,7 +470,7 @@ class BaseAgent:
         self._append_prompt_list_section(lines, "### 必须逐项核验的验收标准", contract.get("acceptance"), checkbox=True)
         self._append_prompt_list_section(lines, "### 不得违反的约束", contract.get("constraints"))
         self._append_prompt_list_section(lines, "### 允许沿用的默认假设", contract.get("assumptions"))
-        self._append_prompt_list_section(lines, "### 建议核对的证据", contract.get("evidence_required"))
+        self._append_prompt_list_section(lines, "### 必须核对的证据", contract.get("evidence_required"))
         lines.append("### 审查判定规则")
         lines.append("- 仅当所有验收项都有代码、测试、文档或行为证据支撑时，才能 approve。")
         lines.append("- TODO 步骤只是实现路径参考，不能替代验收标准本身。")
@@ -1206,6 +1261,19 @@ class BaseAgent:
             "artifact_manifest": {},
         }
 
+    def _patchset_snapshots_match(self, primary: dict | None, secondary: dict | None) -> bool:
+        first = primary or {}
+        second = secondary or {}
+        first_id = str(first.get("id") or "").strip()
+        second_id = str(second.get("id") or "").strip()
+        if first_id and second_id:
+            return first_id == second_id
+        first_head = str(first.get("head_sha") or first.get("commit_hash") or "").strip()
+        second_head = str(second.get("head_sha") or second.get("commit_hash") or "").strip()
+        if first_head and second_head:
+            return first_head == second_head
+        return False
+
     async def resolve_task_patchset(self, task: dict) -> dict | None:
         patchset = self._task_patchset_from_task(task)
         task_id = str(task.get("id") or "").strip()
@@ -1215,6 +1283,8 @@ class BaseAgent:
         if handoff:
             handoff_patchset = self._extract_handoff_patchset(handoff)
             if handoff_patchset and patchset:
+                if not self._patchset_snapshots_match(patchset, handoff_patchset):
+                    return patchset
                 merged = dict(patchset)
                 for key, value in handoff_patchset.items():
                     if value not in ("", [], None):
@@ -2242,6 +2312,8 @@ class BaseAgent:
 
         await self.git("config", "user.email", "agent@opc-demo.local", cwd=worktree)
         await self.git("config", "user.name", "OPC Agent", cwd=worktree)
+        self._ensure_runtime_git_excludes(root)
+        self._ensure_runtime_git_excludes(worktree)
 
         if sync_with_main:
             sync_result = await self._sync_branch_with_main(root, worktree, branch)
@@ -2273,6 +2345,8 @@ class BaseAgent:
         if decision == "approve":
             comment = str(payload.get("comment") or "").strip()
             if not comment or comment in placeholder_values:
+                return None
+            if any(str(item.get("status") or "").strip().lower() in UNRESOLVED_ISSUE_STATUSES for item in issues):
                 return None
             return {"decision": "approve", "comment": comment, "issues": issues}
 

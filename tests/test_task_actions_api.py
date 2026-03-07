@@ -188,6 +188,61 @@ class TaskActionsApiTest(unittest.TestCase):
         del_res = self.client.delete(f"/users/{target['id']}", headers=user_headers)
         self.assertEqual(del_res.status_code, 403)
 
+    def test_non_admin_cannot_use_system_flow_routes(self):
+        created = self.client.post(
+            "/users",
+            json={"username": "flowuser", "password": "flowpass1"},
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "flowuser", "password": "flowpass1"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        task = self._create_task(status="todo")
+
+        transition = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={"fields": {"status": "todo"}},
+            headers=user_headers,
+        )
+        self.assertEqual(transition.status_code, 403)
+
+        patchset = self.client.post(
+            f"/tasks/{task['id']}/patchsets",
+            json={
+                "patchset": {
+                    "id": "ps-user-1",
+                    "task_id": task["id"],
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "status": "draft",
+                }
+            },
+            headers=user_headers,
+        )
+        self.assertEqual(patchset.status_code, 403)
+
+        handoff = self.client.post(
+            f"/tasks/{task['id']}/handoffs",
+            json={
+                "stage": "manual_note",
+                "from_agent": "user",
+                "status_from": "todo",
+                "status_to": "todo",
+                "title": "manual",
+                "summary": "manual",
+                "conclusion": "manual",
+                "payload": {},
+            },
+            headers=user_headers,
+        )
+        self.assertEqual(handoff.status_code, 403)
+
     def test_user_can_change_own_password_and_rotate_session(self):
         created = self.client.post(
             "/users",
@@ -957,6 +1012,16 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["task"]["status"], "todo")
 
+    def test_transition_rejects_critical_status_without_handoff_proof(self):
+        task = self._create_task(status="in_review", assigned_agent="reviewer", dev_agent="developer")
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={"fields": {"status": "approved", "assignee": None}},
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 422)
+        self.assertIn("关键流转必须携带 handoff", res.text)
+
     def test_transition_allows_description_update(self):
         task = self._create_task(status="triage")
         refined = (
@@ -1145,7 +1210,7 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(data["task"]["status"], "completed")
         self.assertTrue(data.get("forced"))
 
-    def test_add_handoff_without_fence_allows_active_lease(self):
+    def test_add_handoff_without_fence_rejects_active_lease(self):
         task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
         claim = self.client.post(
             "/tasks/claim",
@@ -1178,8 +1243,112 @@ class TaskActionsApiTest(unittest.TestCase):
             },
             headers=self._headers,
         )
+        self.assertEqual(res.status_code, 409)
+
+    def test_add_handoff_with_matching_fence_allows_active_lease(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claim = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(claim.status_code, 200)
+        claimed = claim.json()["task"]
+
+        res = self.client.post(
+            f"/tasks/{task['id']}/handoffs",
+            json={
+                "stage": "manual_repair_note",
+                "from_agent": "system",
+                "to_agent": "developer",
+                "status_from": "in_progress",
+                "status_to": "in_progress",
+                "title": "人工记录",
+                "summary": "带租约 fence 的交接补录",
+                "conclusion": "交接补录完成",
+                "payload": {"note": "recovery"},
+                "expected_run_id": claimed["claim_run_id"],
+                "expected_lease_token": claimed["lease_token"],
+            },
+            headers=self._headers,
+        )
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["stage"], "manual_repair_note")
+
+    def test_patchset_upsert_rejects_without_fence_on_active_lease(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claim = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(claim.status_code, 200)
+
+        res = self.client.post(
+            f"/tasks/{task['id']}/patchsets",
+            json={
+                "patchset": {
+                    "id": "ps-active-1",
+                    "task_id": task["id"],
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "status": "draft",
+                },
+                "update_task_refs": False,
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 409)
+
+    def test_patchset_upsert_accepts_matching_fence_on_active_lease(self):
+        task = self._create_task(status="todo", assigned_agent="developer", dev_agent="developer")
+        claim = self.client.post(
+            "/tasks/claim",
+            json={
+                "status": "todo",
+                "working_status": "in_progress",
+                "agent": "developer",
+                "agent_key": "developer",
+                "respect_assignment": True,
+                "project_id": self.project["id"],
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(claim.status_code, 200)
+        claimed = claim.json()["task"]
+
+        res = self.client.post(
+            f"/tasks/{task['id']}/patchsets",
+            json={
+                "patchset": {
+                    "id": "ps-active-2",
+                    "task_id": task["id"],
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "status": "draft",
+                },
+                "update_task_refs": False,
+                "expected_run_id": claimed["claim_run_id"],
+                "expected_lease_token": claimed["lease_token"],
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["id"], "ps-active-2")
 
     def test_task_files_branch_falls_back_to_assignee(self):
         task = self._create_task(status="in_progress")

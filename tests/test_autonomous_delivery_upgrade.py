@@ -174,6 +174,7 @@ class DeveloperPreReviewVerifierTest(unittest.IsolatedAsyncioTestCase):
             "title": "补全测试",
             "description": (
                 "## 任务目标\n- 补齐下载路径测试\n\n"
+                "## 证据要求\n- pytest tests/test_download.py\n\n"
                 "## 交付物\n- tests/test_download.py\n\n"
                 "## 验收标准\n- [ ] 新增真实下载路径测试\n"
             ),
@@ -184,6 +185,7 @@ class DeveloperPreReviewVerifierTest(unittest.IsolatedAsyncioTestCase):
                 "goal": "补齐下载路径测试",
                 "deliverables": ["tests/test_download.py"],
                 "acceptance": ["新增真实下载路径测试"],
+                "evidence_required": ["pytest tests/test_download.py"],
                 "allowed_surface": {"roots": ["tests"], "files": ["tests/test_download.py"]},
             },
             "allowed_surface": {"roots": ["tests"], "files": ["tests/test_download.py"]},
@@ -198,6 +200,41 @@ class DeveloperPreReviewVerifierTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["bundle"]["missing_acceptance_checks"])
         categories = {item["category"] for item in result["issues"]}
         self.assertIn("coverage", categories)
+        self.assertTrue(result["bundle"]["missing_evidence_required"])
+        self.assertIn("evidence", categories)
+
+    def test_pre_review_verifier_detects_assumption_conflict(self):
+        task = {
+            "id": "task-2",
+            "title": "单页前端实现",
+            "description": (
+                "## 任务目标\n- 交付单页前端页面\n\n"
+                "## 假设\n- 默认采用单页前端实现，不引入后端服务。\n\n"
+                "## 交付物\n- index.html\n\n"
+                "## 验收标准\n- [ ] 页面可打开\n"
+            ),
+            "status": "needs_changes",
+            "_claimed_from_status": "needs_changes",
+            "current_contract": {
+                "version": 1,
+                "goal": "交付单页前端页面",
+                "deliverables": ["index.html"],
+                "acceptance": ["页面可打开"],
+                "assumptions": ["默认采用单页前端实现，不引入后端服务。"],
+                "allowed_surface": {"roots": ["index.html"], "files": ["index.html"]},
+            },
+            "allowed_surface": {"roots": ["index.html"], "files": ["index.html"]},
+        }
+        patchset = {
+            "changed_files": [{"status": "A", "path": "backend/server.py"}],
+        }
+
+        result = self.agent._build_pre_review_evidence_bundle(task, patchset)
+
+        self.assertTrue(result["has_blockers"])
+        self.assertTrue(result["bundle"]["assumption_conflicts"])
+        summaries = {item["summary"] for item in result["issues"]}
+        self.assertTrue(any("假设" in summary for summary in summaries))
 
 
 if __name__ == "__main__":

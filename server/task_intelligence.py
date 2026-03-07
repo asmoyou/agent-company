@@ -44,6 +44,11 @@ RETRY_STRATEGY_ORDER = [
     "critic_pass",
     "alternate_model",
 ]
+EVIDENCE_PATH_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.(?:py|js|ts|sh|md|html|css)")
+BEHAVIORAL_TASK_HINT_RE = re.compile(r"(网页|页面|浏览器|前端|游戏|交互|按钮|界面|动画|移动|点击|重开|重新开始|显示|可玩)", re.IGNORECASE)
+TEST_LIKE_PATH_RE = re.compile(r"(^|/)(tests?|specs?|e2e|playwright|cypress)(/|$)|(^|/)(smoke|spec|test)[-_]", re.IGNORECASE)
+DEPENDENCY_FILE_RE = re.compile(r"(^|/)(package\.json|pnpm-lock\.yaml|yarn\.lock|package-lock\.json|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|Pipfile|Pipfile\.lock)$", re.IGNORECASE)
+BACKEND_ROOT_RE = re.compile(r"^(server|backend|api|db|migrations|services?)(/|$)", re.IGNORECASE)
 
 
 def _clip_text(text: str, *, limit: int = 400) -> str:
@@ -275,6 +280,244 @@ def find_surface_violations(allowed_surface, current_surface) -> list[str]:
         if allowed_cli and path not in allowed_cli:
             violations.append(f"新增命令/脚本入口: {path}")
     return violations[:32]
+
+
+def _changed_paths(changed_files: list[dict] | list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in changed_files or []:
+        if isinstance(item, dict):
+            path = str(item.get("path") or item.get("new_path") or "").strip()
+        else:
+            path = str(item or "").strip()
+        path = path.lstrip("./")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path[:500])
+    return out
+
+
+def _artifact_manifest_paths(artifact_manifest) -> list[str]:
+    if not isinstance(artifact_manifest, dict):
+        return []
+    out: list[str] = []
+    path = str(artifact_manifest.get("path") or "").strip().lstrip("./")
+    if path:
+        out.append(path[:500])
+    for key in ("files", "artifacts", "paths"):
+        items = artifact_manifest.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                raw = str(item.get("path") or "").strip()
+            else:
+                raw = str(item or "").strip()
+            raw = raw.lstrip("./")
+            if raw:
+                out.append(raw[:500])
+    # preserve order, dedupe
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for item in out:
+        if item in seen:
+            continue
+        seen.add(item)
+        uniq.append(item)
+    return uniq[:64]
+
+
+def _looks_like_behavioral_evidence_path(path: str) -> bool:
+    lowered = str(path or "").strip().lower()
+    if not lowered:
+        return False
+    if TEST_LIKE_PATH_RE.search(lowered):
+        return True
+    return lowered.endswith((".spec.js", ".spec.ts", ".test.js", ".test.ts"))
+
+
+def _looks_like_behavioral_contract(contract: dict | None) -> bool:
+    parts: list[str] = []
+    for key in ("goal",):
+        parts.append(str((contract or {}).get(key) or ""))
+    for key in ("scope", "deliverables", "acceptance", "constraints"):
+        parts.extend([str(item or "") for item in ((contract or {}).get(key) or [])])
+    text = " ".join(parts)
+    return bool(BEHAVIORAL_TASK_HINT_RE.search(text))
+
+
+def _extract_evidence_candidate_paths(text: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in EVIDENCE_PATH_RE.findall(str(text or "")):
+        path = str(raw or "").strip().lstrip("./")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        found.append(path[:500])
+    return found[:16]
+
+
+def evaluate_contract_evidence(
+    contract: dict | None,
+    *,
+    changed_files: list[dict] | list[str] | None,
+    current_surface: dict | None = None,
+    allowed_surface: dict | None = None,
+    artifact_manifest: dict | None = None,
+) -> dict[str, object]:
+    contract = contract or {}
+    changed_paths = _changed_paths(changed_files)
+    changed_paths_lower = [path.lower() for path in changed_paths]
+    artifact_paths = _artifact_manifest_paths(artifact_manifest)
+    artifact_paths_lower = [path.lower() for path in artifact_paths]
+    evidence_checks: list[dict] = []
+    missing_evidence_required: list[dict] = []
+    assumption_conflicts: list[str] = []
+    issues: list[dict] = []
+
+    current = normalize_allowed_surface(current_surface or detect_surface_from_changed_files(changed_files))
+    allowed = normalize_allowed_surface(allowed_surface or {})
+    surface_violations = find_surface_violations(allowed, current)
+
+    for item in contract.get("evidence_required", []) or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        matched_paths: list[str] = []
+        for candidate in _extract_evidence_candidate_paths(text):
+            candidate_lower = candidate.lower()
+            if any(
+                candidate_lower == path
+                or path.endswith(candidate_lower)
+                or candidate_lower.endswith(path)
+                for path in changed_paths_lower + artifact_paths_lower
+            ):
+                matched_paths.append(candidate)
+        if not matched_paths:
+            if any(token in lowered for token in ("pytest", "unit", "integration", "e2e", "playwright", "cypress", "smoke", "test")):
+                matched_paths = [path for path in changed_paths if _looks_like_behavioral_evidence_path(path)]
+            elif any(token in lowered for token in ("readme", "文档", "说明", ".md")):
+                matched_paths = [path for path in changed_paths if path.lower().endswith(".md")]
+        status = "provided" if matched_paths else "missing"
+        check = {
+            "item": text,
+            "status": status,
+            "matched_paths": matched_paths[:8],
+        }
+        evidence_checks.append(check)
+        if status == "missing":
+            missing_evidence_required.append(check)
+            issues.append(
+                {
+                    "issue_id": f"evidence-required-{len(missing_evidence_required)}",
+                    "acceptance_item": "证据要求",
+                    "severity": "high",
+                    "category": "evidence",
+                    "summary": f"预检未发现与证据要求对应的验证资产：{text}",
+                    "reproducer": "检查 patchset changed_files / artifact_manifest 是否包含对应测试、冒烟脚本或验证文件",
+                    "evidence_gap": text,
+                    "scope": ", ".join(_extract_evidence_candidate_paths(text)[:4]),
+                    "fix_hint": "补齐对应的测试、冒烟脚本或文档证据，并确保其进入 patchset",
+                    "status": "new",
+                }
+            )
+
+    if not evidence_checks and _looks_like_behavioral_contract(contract):
+        behavior_paths = [path for path in changed_paths if _looks_like_behavioral_evidence_path(path)]
+        if not behavior_paths:
+            summary = "交互/行为型任务缺少本地验证脚本或测试证据"
+            missing_evidence_required.append(
+                {
+                    "item": "至少一个覆盖关键交互路径的本地验证命令、测试或冒烟脚本",
+                    "status": "missing",
+                    "matched_paths": [],
+                }
+            )
+            issues.append(
+                {
+                    "issue_id": "behavioral-evidence-missing",
+                    "acceptance_item": "证据要求",
+                    "severity": "high",
+                    "category": "evidence",
+                    "summary": summary,
+                    "reproducer": "交互/前端/网页任务的 patchset 中未发现 smoke/test/spec/e2e/playwright/cypress 类验证文件",
+                    "evidence_gap": "缺少关键交互路径的本地验证证据",
+                    "scope": "tests",
+                    "fix_hint": "补充至少一个覆盖开始、关键交互和失败恢复路径的本地验证脚本或测试",
+                    "status": "new",
+                }
+            )
+
+    backend_paths = [path for path in changed_paths if BACKEND_ROOT_RE.search(path)]
+    dependency_paths = [path for path in changed_paths if DEPENDENCY_FILE_RE.search(path)]
+    for item in contract.get("assumptions", []) or []:
+        text = str(item or "").strip()
+        lowered = text.lower()
+        if not text:
+            continue
+        if surface_violations and any(token in lowered for token in ("不新增", "不引入", "不增加", "保持现有", "沿用现有")):
+            assumption_conflicts.append(f"假设与当前交付面冲突：{text}")
+        elif backend_paths and any(token in text for token in ("单页前端", "浏览器可直接运行", "纯前端", "网页")):
+            assumption_conflicts.append(f"假设与后端改动冲突：{text}")
+        elif dependency_paths and any(token in text for token in ("不新增依赖", "不引入外部依赖", "不增加依赖")):
+            assumption_conflicts.append(f"假设与依赖变更冲突：{text}")
+    for conflict in assumption_conflicts[:16]:
+        issues.append(
+            {
+                "issue_id": f"assumption-conflict-{hashlib.sha1(conflict.encode('utf-8')).hexdigest()[:10]}",
+                "acceptance_item": "假设",
+                "severity": "high",
+                "category": "scope",
+                "summary": conflict,
+                "reproducer": "对比 assumptions 与当前交付面/变更文件",
+                "evidence_gap": conflict,
+                "scope": conflict,
+                "fix_hint": "收敛交付面或调整需求合同中的 assumptions 后再送审",
+                "status": "new",
+            }
+        )
+
+    return {
+        "evidence_checks": evidence_checks,
+        "missing_evidence_required": missing_evidence_required,
+        "assumption_conflicts": assumption_conflicts[:16],
+        "issues": issues[:32],
+    }
+
+
+def evidence_bundle_has_blockers(bundle: dict | None) -> bool:
+    data = bundle or {}
+    return bool(
+        (data.get("missing_acceptance_checks") or [])
+        or (data.get("missing_evidence_required") or [])
+        or (data.get("assumption_conflicts") or [])
+        or (data.get("surface_violations") or [])
+    )
+
+
+def summarize_evidence_blockers(bundle: dict | None, *, limit: int = 4) -> list[str]:
+    data = bundle or {}
+    lines: list[str] = []
+    for item in (data.get("missing_acceptance_checks") or [])[:limit]:
+        label = str(item.get("item") or "").strip()
+        if label:
+            lines.append(f"缺少验收证据：{label}")
+    for item in (data.get("missing_evidence_required") or [])[:limit]:
+        label = str(item.get("item") or "").strip()
+        if label:
+            lines.append(f"缺少要求证据：{label}")
+    for item in (data.get("assumption_conflicts") or [])[:limit]:
+        text = str(item or "").strip()
+        if text:
+            lines.append(text)
+    for item in (data.get("surface_violations") or [])[:limit]:
+        text = str(item or "").strip()
+        if text:
+            lines.append(text)
+    return lines[: max(1, limit)]
 
 
 def normalize_issue_payload(issue: dict, *, default_status: str = "open") -> dict | None:
