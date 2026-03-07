@@ -21,7 +21,9 @@ class TaskActionsApiTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._old_db_path = db.DB_PATH
+        self._old_projects_base_dir = app_module.PROJECTS_BASE_DIR
         db.DB_PATH = Path(self._tmp.name) / "tasks-api-test.db"
+        app_module.PROJECTS_BASE_DIR = (Path(self._tmp.name) / "projects").resolve()
         db.init_db()
         app_module._TASK_WORKSPACE_CLEANUP_INFLIGHT.clear()
         app_module._TASK_WORKSPACE_CLEANUP_STATE.clear()
@@ -52,6 +54,7 @@ class TaskActionsApiTest(unittest.TestCase):
     def tearDown(self):
         self.client.close()
         db.DB_PATH = self._old_db_path
+        app_module.PROJECTS_BASE_DIR = self._old_projects_base_dir
         self._tmp.cleanup()
 
     def _create_task(self, status: str, **extra) -> dict:
@@ -325,6 +328,46 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(second.status_code, 403)
         self.assertIn("项目创建上限", second.json().get("detail", ""))
+
+    def test_non_admin_project_create_uses_default_isolated_path(self):
+        created = self.client.post(
+            "/users",
+            json={
+                "username": "path_user",
+                "password": "devpass3",
+            },
+            headers=self._headers,
+        )
+        self.assertEqual(created.status_code, 201)
+
+        login = self.client.post(
+            "/auth/login",
+            json={"username": "path_user", "password": "devpass3"},
+        )
+        self.assertEqual(login.status_code, 200)
+        user_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        custom_path = Path(self._tmp.name) / "custom-user-path"
+        created_project = self.client.post(
+            "/projects",
+            json={"name": "My Demo Project", "path": str(custom_path)},
+            headers=user_headers,
+        )
+        self.assertEqual(created_project.status_code, 201)
+        payload = created_project.json()
+        expected_path = (app_module.PROJECTS_BASE_DIR / "path_user" / "my-demo-project").resolve()
+        self.assertEqual(Path(payload["path"]), expected_path)
+
+    def test_admin_project_create_keeps_custom_path(self):
+        custom_path = Path(self._tmp.name) / "admin-custom-project"
+        created_project = self.client.post(
+            "/projects",
+            json={"name": "admin-project", "path": str(custom_path)},
+            headers=self._headers,
+        )
+        self.assertEqual(created_project.status_code, 201)
+        payload = created_project.json()
+        self.assertEqual(Path(payload["path"]), custom_path.resolve())
 
     def test_user_task_quota_blocks_create_task(self):
         created = self.client.post(

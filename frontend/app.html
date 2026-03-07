@@ -7922,6 +7922,7 @@ function setProjectMode(mode) {
   if (mode === "existing" && !isAdminUser()) mode = "new";
   newProjectMode = mode === "existing" ? "existing" : "new";
   const isExisting = newProjectMode === "existing";
+  const canCustomizePath = isExisting || isAdminUser();
   const btnNew = document.getElementById("proj-mode-new");
   const btnExisting = document.getElementById("proj-mode-existing");
   const title = document.getElementById("modal-project-title");
@@ -7935,12 +7936,21 @@ function setProjectMode(mode) {
   btnNew.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800" : "bg-slate-700 text-white"}`;
   btnExisting.className = `flex-1 text-xs px-3 py-1.5 rounded-md transition ${isExisting ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"} ${isAdminUser() ? "" : "hidden"}`;
   title.textContent = isExisting ? "添加现有项目" : "新建项目";
-  pathLabel.textContent = isExisting ? "现有项目目录（绝对路径）*" : "项目目录（绝对路径）*";
+  pathLabel.textContent = isExisting
+    ? "现有项目目录（绝对路径）*"
+    : (canCustomizePath ? "项目目录（绝对路径）*" : "项目目录（系统生成）");
   pathHint.textContent = isExisting
     ? "只会添加已存在目录；若目录没有 git，会自动初始化"
-    : `目录不存在会自动创建，并初始化 git 仓库。默认建议目录：${suggestedProjectBaseDir(true)}/<project-name>`;
+    : (
+      canCustomizePath
+        ? `目录不存在会自动创建，并初始化 git 仓库。管理员可自定义项目地址；默认建议目录：${suggestedProjectBaseDir(true)}/<project-name>`
+        : `普通用户使用系统默认目录，无需自定义。目录将自动创建在 ${suggestedProjectBaseDir(true)}/<project-name>`
+    );
   submitBtn.textContent = isExisting ? "添加并检查 Git" : "创建并初始化";
   pathInput.placeholder = isExisting ? "~/projects/existing-project" : suggestedProjectPlaceholder();
+  pathInput.readOnly = !canCustomizePath;
+  pathInput.classList.toggle("opacity-70", !canCustomizePath);
+  pathInput.classList.toggle("cursor-not-allowed", !canCustomizePath);
   nameInput.required = !isExisting;
   pickDirRow.classList.toggle("hidden", !isExisting || !isAdminUser());
   if (!isExisting && nameInput.value.trim()) updateProjPath();
@@ -8023,7 +8033,7 @@ function onProjPathInput() {
 async function submitNewProject(e) {
   e.preventDefault();
   let name = document.getElementById("proj-name").value.trim();
-  const path = document.getElementById("proj-path").value.trim();
+  let path = document.getElementById("proj-path").value.trim();
   const importExisting = newProjectMode === "existing" && isAdminUser();
   if (!name && importExisting) {
     const normalized = path.replace(/[\\/]+$/g, "");
@@ -8031,6 +8041,13 @@ async function submitNewProject(e) {
     if (parts.length > 0) {
       name = parts[parts.length - 1];
       document.getElementById("proj-name").value = name;
+    }
+  }
+  if (!importExisting) {
+    path = path || suggestedProjectPath(name);
+    if (!isAdminUser()) {
+      path = suggestedProjectPath(name);
+      document.getElementById("proj-path").value = path;
     }
   }
   if (!name||!path) return;

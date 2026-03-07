@@ -92,6 +92,13 @@ AGENT_OUTPUT_INIT_MAX_LINES = max(
     0,
     int(str(os.getenv("AGENT_OUTPUT_INIT_MAX_LINES", "160")).strip() or "160"),
 )
+PROJECTS_BASE_DIR = Path(
+    str(os.getenv("PROJECTS_BASE_DIR", "~/projects")).strip() or "~/projects"
+).expanduser()
+if not PROJECTS_BASE_DIR.is_absolute():
+    PROJECTS_BASE_DIR = (PROJECT_ROOT / PROJECTS_BASE_DIR).resolve()
+else:
+    PROJECTS_BASE_DIR = PROJECTS_BASE_DIR.resolve()
 
 
 def _normalize_support_llm_base_url(raw_url: str) -> str:
@@ -769,6 +776,23 @@ def _enforce_project_quota(user: dict):
     used = db.count_projects_by_owner(user["id"])
     if used >= limit:
         raise HTTPException(403, f"已达到项目创建上限（{limit}）")
+
+
+def _normalize_project_dir_segment(value: str | None, fallback: str = "") -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", text)
+    text = re.sub(r"-+", "-", text).strip("-_")
+    return text or fallback
+
+
+def _default_new_project_path(user: dict, project_name: str | None) -> Path:
+    username = _normalize_project_dir_segment(
+        str(user.get("username") or ""),
+        fallback=str(user.get("id") or "user").strip() or "user",
+    )
+    project_slug = _normalize_project_dir_segment(project_name, fallback="project")
+    return (PROJECTS_BASE_DIR / username / project_slug).resolve()
 
 
 def _enforce_task_quota(user: dict):
@@ -2481,17 +2505,26 @@ async def workspace_cleanup_sweep(
 @app.post("/projects", status_code=201)
 async def create_project(body: ProjectCreate, user: dict = Depends(require_user)):
     _enforce_project_quota(user)
-    path = Path(body.path).expanduser().resolve()
-    all_projects = db.list_projects()
-    if any(p["path"] == str(path) for p in all_projects):
-        raise HTTPException(400, "Path already used by another project")
+    requested_path = str(body.path or "").strip()
     if body.import_existing:
         if not _is_admin(user):
             raise HTTPException(403, "导入现有项目仅管理员可操作")
+        path = Path(requested_path).expanduser().resolve()
         if not path.exists():
             raise HTTPException(400, "Existing project path does not exist")
         if not path.is_dir():
             raise HTTPException(400, "Existing project path must be a directory")
+    elif _is_admin(user):
+        path = (
+            Path(requested_path).expanduser().resolve()
+            if requested_path
+            else _default_new_project_path(user, body.name)
+        )
+    else:
+        path = _default_new_project_path(user, body.name)
+    all_projects = db.list_projects()
+    if any(p["path"] == str(path) for p in all_projects):
+        raise HTTPException(400, "Path already used by another project")
     project = db.create_project(body.name, str(path), created_by_user_id=user["id"])
     await manager.broadcast({"event": "project_created", "project": project})
     return project
