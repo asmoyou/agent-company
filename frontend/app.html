@@ -27,7 +27,10 @@
       --accent-glow:rgba(124,137,255,.34);
       --success:#34d399;
       --danger:#fb7185;
+      --mobile-topbar-height:58px;
+      --mobile-nav-width:min(86vw, 360px);
       --ease-smooth:cubic-bezier(.22,.61,.36,1);
+      --mobile-terminal-offset:52px;
       --elev-1:0 12px 30px rgba(2,6,23,.36);
       --elev-2:0 20px 44px rgba(2,6,23,.46);
     }
@@ -245,6 +248,86 @@
       box-shadow:none;
       cursor:not-allowed;
     }
+    .mobile-topbar,
+    .mobile-nav-overlay,
+    .mobile-nav-close{
+      display:none;
+    }
+    .mobile-topbar{
+      position:fixed;
+      top:0;
+      left:0;
+      right:0;
+      z-index:130;
+      align-items:center;
+      gap:10px;
+      height:var(--mobile-topbar-height);
+      padding:10px 12px;
+      background:linear-gradient(160deg, rgba(15,23,42,.96), rgba(2,6,23,.94));
+      border-bottom:1px solid rgba(100,116,139,.36);
+      box-shadow:0 10px 24px rgba(2,6,23,.32);
+      backdrop-filter:blur(10px);
+    }
+    .mobile-topbar-btn,
+    .mobile-topbar-create,
+    .mobile-nav-close{
+      border:1px solid rgba(100,116,139,.58);
+      background:rgba(15,23,42,.84);
+      color:#e2e8f0;
+      border-radius:12px;
+      min-height:38px;
+      min-width:38px;
+      padding:0 12px;
+      font-size:13px;
+      line-height:1;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    .mobile-topbar-main{
+      min-width:0;
+      flex:1 1 auto;
+    }
+    .mobile-topbar-title{
+      font-size:12px;
+      font-weight:700;
+      color:#f8fafc;
+      line-height:1.2;
+      letter-spacing:.02em;
+    }
+    .mobile-topbar-project{
+      margin-top:3px;
+      font-size:11px;
+      color:#94a3b8;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .mobile-topbar-create{
+      background:linear-gradient(135deg, var(--accent-strong), var(--accent));
+      border-color:rgba(129,140,248,.46);
+      color:#fff;
+      padding:0 14px;
+      white-space:nowrap;
+    }
+    .mobile-topbar-create:disabled{
+      opacity:.4;
+      box-shadow:none;
+    }
+    .mobile-nav-close{
+      display:none;
+    }
+    .mobile-nav-overlay{
+      position:fixed;
+      inset:0;
+      z-index:110;
+      background:rgba(2,6,23,.64);
+      backdrop-filter:none;
+      opacity:0;
+      pointer-events:none;
+      transition:opacity .2s var(--ease-smooth);
+    }
     .app-header .workspace-trigger{
       background:linear-gradient(180deg, rgba(14,116,144,.2), rgba(30,41,59,.9));
       border-color:rgba(103,232,249,.5);
@@ -284,6 +367,38 @@
       background:linear-gradient(180deg, rgba(127,29,29,.8), rgba(69,10,10,.95));
       border-color:rgba(251,113,133,.64);
       color:#ffe4e6;
+    }
+    .header-brand-row,
+    .header-primary,
+    .header-secondary,
+    .header-toggle-row,
+    .fb-toolbar,
+    .fb-preview-actions,
+    .panel-acceptance-actions,
+    .panel-files-head,
+    .panel-file-actions,
+    .modal-card,
+    .form-grid-2,
+    .form-grid-4,
+    .modal-actions,
+    .agent-form-prompt-head,
+    .agent-form-prompt-tools{
+      min-width:0;
+    }
+    .task-card{
+      min-height:94px;
+    }
+    .task-card-title{
+      display:-webkit-box;
+      -webkit-line-clamp:2;
+      -webkit-box-orient:vertical;
+      overflow:hidden;
+    }
+    .task-card-feedback{
+      display:-webkit-box;
+      -webkit-line-clamp:1;
+      -webkit-box-orient:vertical;
+      overflow:hidden;
     }
     .app-header button:not(:disabled):hover{transform:translateY(-1px);}
     .app-header button:not(:disabled):active{transform:translateY(0);}
@@ -1307,20 +1422,420 @@
       filter:brightness(1.06);
     }
     @media (max-width:768px){
+      body{
+        height:100svh;
+        overflow:hidden;
+      }
+      .mobile-topbar{display:flex;}
+      .mobile-nav-close{
+        display:inline-flex;
+        padding:0;
+        min-width:38px;
+      }
+      .app-main{
+        min-height:0;
+        position:fixed;
+        inset:var(--mobile-topbar-height) 0 var(--mobile-terminal-offset) 0;
+        overflow-x:auto;
+        overflow-y:auto;
+        overscroll-behavior:none;
+        -webkit-overflow-scrolling:touch;
+        touch-action:pan-x pan-y;
+        margin-top:0;
+        padding:4px 10px 14px;
+        z-index:1;
+      }
+      #board{
+        padding-bottom:8px;
+        min-width:max-content;
+      }
+      .app-header{
+        position:fixed;
+        top:0;
+        left:0;
+        right:0;
+        bottom:0;
+        height:100svh;
+        height:100dvh;
+        min-height:100dvh;
+        box-sizing:border-box;
+        z-index:135;
+        width:100vw;
+        max-width:none;
+        padding:calc(env(safe-area-inset-top) + 14px) 16px calc(20px + env(safe-area-inset-bottom));
+        gap:14px;
+        flex-wrap:nowrap;
+        flex-direction:column;
+        align-items:stretch;
+        overflow-x:hidden;
+        overflow-y:auto;
+        white-space:normal;
+        transform:translateX(-100%);
+        transition:transform .24s var(--ease-smooth);
+        box-shadow:none;
+        border-right:0;
+        background:linear-gradient(180deg, #0a1220 0%, #09111d 100%);
+        backdrop-filter:none;
+        isolation:isolate;
+        visibility:hidden;
+        pointer-events:none;
+      }
+      body.mobile-nav-open .app-header{
+        transform:translateX(0);
+        visibility:visible;
+        pointer-events:auto;
+      }
+      .app-header .header-brand-row,
+      .app-header .header-primary,
+      .app-header .header-secondary{
+        width:100%;
+        min-width:0;
+        margin-left:0;
+      }
+      .app-header .header-brand-row{
+        display:grid;
+        grid-template-columns:auto minmax(0,1fr) auto;
+        align-items:center;
+        gap:10px;
+        padding-bottom:10px;
+        border-bottom:1px solid rgba(71,85,105,.46);
+      }
+      .app-header .header-primary,
+      .app-header .header-secondary{
+        display:flex;
+        flex-direction:column;
+        align-items:stretch;
+        gap:8px;
+      }
+      .app-header .header-primary{
+        flex:1 1 auto;
+        min-height:0;
+      }
+      .app-header .header-secondary{
+        flex:0 0 auto;
+        margin-top:auto;
+        padding-top:12px;
+        border-top:1px solid rgba(71,85,105,.46);
+        align-content:start;
+      }
+      .app-header .header-toggle-row{
+        grid-column:1 / -1;
+        display:flex;
+        flex-direction:column;
+        gap:10px;
+        padding:4px 0 2px;
+      }
+      .app-header .header-toggle-row label{
+        min-width:0;
+      }
+      .app-header .header-connection{
+        justify-content:flex-start;
+        min-width:0;
+      }
+      .app-header #project-select{
+        width:100%;
+      }
+      .app-header button,
+      .app-header select,
+      .app-header #auth-user-badge{
+        min-height:40px;
+        width:100%;
+        text-align:center;
+        white-space:normal;
+      }
+      .terminal-shell-head{
+        gap:10px;
+        padding:10px 12px;
+        flex-wrap:wrap;
+      }
+      #agent-status-badges{
+        flex-wrap:wrap;
+        gap:8px;
+      }
+      #terminal-popout-btn{margin-left:0;}
+      .terminal-panel{height:180px!important;}
+      .terminal-grid{padding:0 12px 12px!important;}
+      .terminal-grid > .term-card{min-width:260px!important;}
+      #agent-terminal-shell{
+        position:fixed;
+        left:0;
+        right:0;
+        bottom:0;
+        z-index:100;
+        margin:0;
+        padding-bottom:env(safe-area-inset-bottom);
+        background:linear-gradient(180deg, rgba(15,23,42,.98), rgba(2,6,23,.98));
+      }
+      .term-agent-select{
+        flex:1 1 180px;
+        max-width:100%;
+      }
+      #panel{
+        top:var(--mobile-topbar-height)!important;
+        bottom:0;
+        height:auto;
+        width:100vw!important;
+        max-width:100vw;
+        z-index:125;
+        border-left:0;
+        border-top:1px solid rgba(100,116,139,.28);
+      }
+      #panel > .flex-1{
+        padding:16px 16px 20px;
+      }
+      #panel-overlay{
+        top:var(--mobile-topbar-height);
+        bottom:0;
+        z-index:115;
+      }
+      #modal-task{
+        z-index:140;
+        align-items:stretch;
+        justify-content:flex-start;
+        padding:calc(var(--mobile-topbar-height) + 8px) 8px 8px;
+      }
+      #modal-task > .modal-card{
+        display:flex;
+        flex-direction:column;
+        width:100%;
+        max-height:calc(100svh - var(--mobile-topbar-height) - 16px)!important;
+        margin:0;
+      }
+      #modal-task > .modal-card > form{
+        flex:1 1 auto;
+        min-height:0;
+        overflow-y:auto;
+        -webkit-overflow-scrolling:touch;
+      }
+      .panel-acceptance-actions,
+      .panel-files-head,
+      .panel-file-actions{
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .panel-acceptance-actions > *,
+      .panel-file-actions > *{
+        width:100%;
+      }
+      .fb-head{
+        padding:12px;
+        gap:12px;
+      }
+      .fb-head,
+      .fb-head-path-wrap,
+      .fb-toolbar,
+      .fb-preview-actions{
+        flex-wrap:wrap;
+      }
+      .fb-toolbar,
+      .fb-preview-actions{
+        width:100%;
+      }
+      .fb-toolbar > *,
+      .fb-preview-actions > *{
+        flex:1 1 calc(50% - 4px);
+        text-align:center;
+      }
+      .fb-head-path{
+        flex-basis:100%;
+      }
+      .fb-item{
+        flex-wrap:wrap;
+        align-items:flex-start;
+      }
+      .fb-item-main{
+        width:100%;
+      }
+      .fb-item .fb-actions{
+        width:100%;
+        margin-left:0;
+      }
+      .fb-action-btn{
+        flex:1 1 auto;
+        text-align:center;
+      }
+      #fb-statusbar{
+        flex-direction:column;
+        align-items:flex-start;
+        gap:4px;
+      }
+      .fb-sheet-head{
+        flex-direction:column;
+        align-items:flex-start;
+      }
+      #modal-agents,
+      #modal-project,
+      #modal-dir-picker,
+      #modal-profile,
+      #modal-users,
+      #modal-user-edit,
+      #modal-patchset-metrics,
+      #modal-task{
+        inset:0;
+        align-items:stretch;
+        justify-content:flex-start;
+        padding:calc(env(safe-area-inset-top) + 8px) 8px calc(8px + env(safe-area-inset-bottom));
+      }
+      #modal-agents,
+      #modal-project,
+      #modal-profile,
+      #modal-users,
+      #modal-patchset-metrics,
+      #modal-task,
+      #file-panel{
+        z-index:150!important;
+      }
+      #modal-dir-picker,
+      #modal-user-edit{
+        z-index:160!important;
+      }
+      #file-overlay{
+        z-index:145!important;
+      }
+      #modal-agents > .modal-card,
+      #modal-project > .modal-card,
+      #modal-dir-picker > .modal-card,
+      #modal-profile > .modal-card,
+      #modal-users > .modal-card,
+      #modal-user-edit > .modal-card,
+      #modal-patchset-metrics > .modal-card,
+      #modal-task > .modal-card{
+        display:flex;
+        flex-direction:column;
+        width:100%;
+        max-width:none!important;
+        max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px)!important;
+        margin:0;
+        overflow:hidden;
+      }
+      #modal-agents > .modal-card > #agents-list-view,
+      #modal-agents > .modal-card > #agents-form-view,
+      #modal-patchset-metrics > .modal-card > .flex-1,
+      #modal-project > .modal-card > form,
+      #modal-dir-picker > .modal-card > .p-5,
+      #modal-profile > .modal-card > form,
+      #modal-users > .modal-card > .p-6,
+      #modal-user-edit > .modal-card > form,
+      #modal-task > .modal-card > form{
+        flex:1 1 auto;
+        min-height:0;
+        overflow-y:auto;
+        -webkit-overflow-scrolling:touch;
+      }
+      .msg-dialog-overlay,
+      #onboarding-overlay{
+        z-index:165;
+        align-items:stretch;
+        justify-content:flex-start;
+        padding:calc(env(safe-area-inset-top) + 8px) 8px calc(8px + env(safe-area-inset-bottom));
+      }
+      .msg-dialog,
+      .onboarding-card{
+        width:100%;
+        max-width:none;
+        max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px);
+        margin:0;
+      }
+      .onboarding-card{
+        overflow:auto;
+      }
+      .msg-dialog-actions{
+        flex-direction:column;
+      }
+      .msg-btn{
+        width:100%;
+      }
+      .modal-card{
+        width:min(100%, calc(100vw - 16px));
+        max-width:none!important;
+        max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px)!important;
+      }
+      .form-grid-2,
+      .form-grid-4,
+      #patchset-metrics-grid{
+        grid-template-columns:minmax(0,1fr)!important;
+      }
+      .agent-form-prompt-head,
+      .agent-form-prompt-tools{
+        flex-direction:column;
+        align-items:flex-start;
+        gap:8px;
+      }
+      #patchset-metrics-window-tabs{
+        flex-wrap:wrap;
+      }
+      .modal-actions{
+        flex-direction:column;
+      }
+      .modal-actions > *{
+        width:100%;
+      }
       .support-chat{
         right:10px;
         --support-chat-base-bottom:10px;
+      }
+      #file-overlay{
+        inset:0;
+        background:rgba(2,6,23,.66);
+        backdrop-filter:none;
+      }
+      #file-panel{
+        top:0;
+        bottom:0;
+        left:0;
+        height:100dvh;
+        width:100vw!important;
+        max-width:none!important;
+        border-right:0;
+        padding-bottom:env(safe-area-inset-bottom);
+      }
+      #file-panel .fb-head{
+        padding-top:calc(env(safe-area-inset-top) + 12px);
+      }
+      .support-chat-panel,
+      .rqf-panel{
+        position:fixed;
+        top:calc(var(--mobile-topbar-height) + 8px);
+        right:8px;
+        bottom:8px;
+        left:8px;
+        width:auto;
+        height:auto;
+        min-height:0;
+        max-height:none;
+        margin:0;
+      }
+      .support-chat-head,
+      .rqf-head{
+        padding:12px 12px 10px;
+      }
+      .support-chat-subtitle{
+        display:flex;
+        flex-wrap:wrap;
+        gap:6px;
+      }
+      .support-chat-body{
+        padding:12px;
+      }
+      .support-chat-compose{
+        padding:10px 12px 12px;
+      }
+      .rqf-tabs{
+        padding:8px 12px 0;
+        flex-wrap:wrap;
+      }
+      .rqf-body{
+        padding:10px 12px 12px;
+      }
+      .rqf-list-head{
+        flex-direction:column;
+        align-items:stretch;
       }
       .support-chat-fabs{gap:8px;}
       .rqf-fab{
         min-width:auto;
         height:34px;
         padding:0 12px;
-      }
-      .rqf-panel{
-        width:min(100vw - 16px, 460px);
-        height:min(80vh, 720px);
-        min-height:420px;
       }
       .rqf-submit-row{
         flex-direction:column;
@@ -1336,15 +1851,26 @@
         flex-direction:column;
         align-items:stretch;
       }
-      .support-chat-panel{
-        width:min(100vw - 16px, 440px);
-        height:min(78vh, 670px);
-        min-height:360px;
-      }
       .support-chat-fab{
         width:50px;
         height:50px;
         font-size:22px;
+      }
+      .task-card{
+        min-height:118px;
+        padding:12px;
+        border-radius:14px;
+      }
+      .task-card-title{
+        -webkit-line-clamp:3;
+        font-size:13px;
+        line-height:1.45;
+        margin-bottom:6px;
+      }
+      .task-card-feedback{
+        -webkit-line-clamp:2;
+        font-size:11px;
+        line-height:1.5;
       }
       .support-chat-bubble{max-width:92%;}
       .support-chat-tip{display:none;}
@@ -1364,13 +1890,13 @@
     }
     @keyframes toast-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
     .lane {
-      width: var(--lane-normal-width, 12rem);
-      min-width: var(--lane-normal-width, 12rem);
+      width: var(--lane-normal-width, 14rem);
+      min-width: var(--lane-normal-width, 14rem);
       transition: width .26s var(--ease-smooth), min-width .26s var(--ease-smooth);
     }
     .lane.compact {
-      width: var(--lane-compact-width, 3.75rem);
-      min-width: var(--lane-compact-width, 3.75rem);
+      width: var(--lane-compact-width, 5.5rem);
+      min-width: var(--lane-compact-width, 5.5rem);
     }
     .lane.compact .lane-label { display: none; }
     .lane.compact .lane-body { display: none; }
@@ -1434,6 +1960,8 @@
     body.terminal-only .term-stream{max-width:140px;}
     body.terminal-only #terminal-agent-filter { display:inline-block!important; }
     body.terminal-only > header,
+    body.terminal-only .mobile-topbar,
+    body.terminal-only #mobile-nav-overlay,
     body.terminal-only > main,
     body.terminal-only #toast-wrap,
     body.terminal-only #file-panel,
@@ -1467,6 +1995,34 @@
 
     body.onboarding-active {
       overflow: hidden;
+    }
+    body.mobile-nav-open,
+    body.mobile-float-open {
+      overflow: hidden;
+    }
+    body.mobile-nav-open .mobile-nav-overlay {
+      display: none;
+    }
+    body.mobile-nav-open .app-main {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    body.mobile-nav-open .mobile-topbar {
+      opacity: 0;
+      pointer-events: none;
+    }
+    body.mobile-nav-open .support-chat,
+    body.mobile-nav-open #agent-terminal-shell,
+    body.mobile-viewport.task-panel-open #agent-terminal-shell,
+    body.mobile-viewport.task-modal-open #agent-terminal-shell,
+    body.mobile-viewport.mobile-modal-open #agent-terminal-shell {
+      display: none !important;
+    }
+    body.mobile-float-open #agent-terminal-shell {
+      display: none !important;
+    }
+    body.mobile-float-open .support-chat-fabs {
+      display: none;
     }
     #onboarding-overlay {
       position: fixed;
@@ -1567,12 +2123,29 @@
 </head>
 <body class="min-h-screen font-sans flex flex-col">
 
+<div id="mobile-topbar" class="mobile-topbar">
+  <button id="mobile-nav-toggle" type="button" class="mobile-topbar-btn" aria-label="打开导航">☰</button>
+  <div class="mobile-topbar-main">
+    <div class="mobile-topbar-title">LinX 协作平台</div>
+    <div id="mobile-topbar-project" class="mobile-topbar-project">未选择项目</div>
+  </div>
+  <button id="mobile-topbar-create" type="button" class="mobile-topbar-create" disabled>+ 任务</button>
+</div>
+<div id="mobile-nav-overlay" class="mobile-nav-overlay hidden" onclick="closeMobileNav()"></div>
+
 <!-- Header -->
 <header class="app-header bg-slate-900 border-b border-slate-700 px-4 py-2.5 flex items-center gap-3 sticky top-0 z-10 flex-nowrap overflow-x-auto overflow-y-hidden whitespace-nowrap">
-  <div class="w-7 h-7 bg-indigo-500 rounded-lg flex items-center justify-center text-xs font-bold shrink-0">AI</div>
+  <div class="header-brand-row flex items-center gap-3 shrink-0">
+    <div class="w-7 h-7 bg-indigo-500 rounded-lg flex items-center justify-center text-xs font-bold shrink-0">AI</div>
+    <div class="header-connection flex items-center gap-1.5 text-xs text-slate-400 shrink-0">
+      <span class="ws-dot disconnected" id="ws-dot"></span>
+      <span id="ws-label">连接中...</span>
+    </div>
+    <button id="mobile-nav-close" type="button" class="mobile-nav-close" aria-label="关闭导航" onclick="closeMobileNav()">&times;</button>
+  </div>
 
   <!-- Project selector -->
-  <div class="flex items-center gap-2 shrink-0">
+  <div class="header-primary flex items-center gap-2 shrink-0">
     <select id="project-select"
       onchange="onProjectChange()"
       class="bg-slate-800 border border-slate-600 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
@@ -1611,21 +2184,18 @@
     </button>
   </div>
 
-  <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-1 shrink-0">
-    <span class="ws-dot disconnected" id="ws-dot"></span>
-    <span id="ws-label">连接中...</span>
-  </div>
-
-  <div class="ml-auto flex items-center gap-2.5 shrink-0">
+  <div class="header-secondary ml-auto flex items-center gap-2.5 shrink-0">
     <!-- Archive toggle -->
-    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
-      <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
-      显示已归档
-    </label>
-    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
-      <input type="checkbox" id="auto-collapse-empty-cols" onchange="refreshBoard()" class="rounded" checked>
-      自动压缩空列
-    </label>
+    <div class="header-toggle-row flex items-center gap-2.5 shrink-0">
+      <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
+        <input type="checkbox" id="show-archived" onchange="refreshBoard()" class="rounded">
+        显示已归档
+      </label>
+      <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none whitespace-nowrap">
+        <input type="checkbox" id="auto-collapse-empty-cols" onchange="refreshBoard()" class="rounded" checked>
+        自动压缩空列
+      </label>
+    </div>
     <!-- Agent management -->
     <button onclick="openAgentsModal()"
       class="header-btn text-xs px-3 py-1.5 rounded-lg transition"
@@ -1788,7 +2358,7 @@
 </div>
 
 <!-- Board -->
-<main class="flex-1 p-3 overflow-x-auto">
+<main class="app-main flex-1 p-3 overflow-x-auto">
   <div id="no-project-hint" class="flex flex-col items-center justify-center h-64 text-slate-500">
     <div class="text-4xl mb-3">📂</div>
     <div class="text-lg font-medium mb-1">还没有项目</div>
@@ -1803,7 +2373,7 @@
 
 <!-- Agent Terminals -->
 <div id="agent-terminal-shell" class="border-t border-slate-700 bg-slate-900 sticky bottom-0 z-10">
-  <div class="flex items-center gap-4 px-4 py-2 cursor-pointer select-none" onclick="toggleTerminals()">
+  <div class="terminal-shell-head flex items-center gap-4 px-4 py-2 cursor-pointer select-none" onclick="toggleTerminals()">
     <span class="text-xs font-semibold text-slate-400 uppercase tracking-widest">🖥 Agent 终端</span>
     <div id="agent-status-badges" class="flex items-center gap-4"></div>
     <select id="terminal-agent-filter" class="term-agent-select hidden" onchange="onTerminalAgentFilterChange()"></select>
@@ -1812,14 +2382,14 @@
     </button>
     <span id="terminal-chevron" class="text-slate-500 text-sm">▼</span>
   </div>
-  <div id="terminal-panel" class="collapsed" style="height:200px;">
-    <div id="terminal-grid" class="flex gap-3 px-4 pb-3 overflow-x-auto" style="height:184px;"></div>
+  <div id="terminal-panel" class="terminal-panel collapsed" style="height:200px;">
+    <div id="terminal-grid" class="terminal-grid flex gap-3 px-4 pb-3 overflow-x-auto" style="height:184px;"></div>
   </div>
 </div>
 
 <!-- Agent Management Modal -->
 <div id="modal-agents" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl flex flex-col" style="max-height:85vh;">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl flex flex-col" style="max-height:85vh;">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
       <h3 class="font-semibold text-white">🤖 Agent 管理</h3>
       <button onclick="closeAgentsModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
@@ -1840,7 +2410,7 @@
       <div id="agent-form-readonly-tip" class="hidden text-xs text-amber-300 bg-amber-900/20 border border-amber-700/40 rounded px-3 py-2">
         当前账号为普通用户，仅可查看，不能修改。
       </div>
-        <div class="grid grid-cols-2 gap-4">
+        <div class="form-grid-2 grid grid-cols-2 gap-4">
           <div>
             <label class="block text-xs text-slate-400 mb-1">名称 *</label>
             <input id="af-name" type="text" placeholder="代码测试员"
@@ -1858,7 +2428,7 @@
             class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
         </div>
       <div id="agent-form-runtime" class="text-xs text-slate-300 bg-slate-900/40 border border-slate-700 rounded px-3 py-2"></div>
-      <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div class="form-grid-4 grid grid-cols-2 gap-4 md:grid-cols-4">
         <div>
           <label class="block text-xs text-slate-400 mb-1">轮询状态</label>
           <div id="af-poll-checkboxes" class="space-y-1 bg-slate-900/50 rounded-lg p-2 text-xs max-h-40 overflow-y-auto"></div>
@@ -1887,9 +2457,9 @@
         </div>
       </div>
       <div>
-        <div class="flex items-center justify-between mb-1">
+        <div class="agent-form-prompt-head flex items-center justify-between mb-1">
           <label class="text-xs text-slate-400">提示词模板</label>
-          <div class="flex items-center gap-3">
+          <div class="agent-form-prompt-tools flex items-center gap-3">
             <span class="text-xs text-slate-600">变量: <code>{task_title}</code> <code>{task_description}</code> <code>{rework_section}</code></span>
             <button onclick="aiGeneratePrompt()" id="btn-ai-gen"
               class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-2 py-1 rounded transition">
@@ -1900,7 +2470,7 @@
         <textarea id="af-prompt" rows="8" placeholder="在此输入提示词，或点击「✨ AI 生成」..."
           class="w-full bg-slate-900/70 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:border-indigo-500 font-mono resize-y"></textarea>
       </div>
-      <div class="flex justify-end gap-3">
+      <div class="modal-actions flex justify-end gap-3">
         <button onclick="closeAgentForm()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button id="btn-agent-save" onclick="saveAgentType()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
       </div>
@@ -1913,7 +2483,7 @@
 
 <!-- Patchset Metrics Modal -->
 <div id="modal-patchset-metrics" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl shadow-2xl flex flex-col" style="max-height:85vh;">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl shadow-2xl flex flex-col" style="max-height:85vh;">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between gap-3 shrink-0">
       <div>
         <h3 class="font-semibold text-white">Patchset 指标</h3>
@@ -1953,7 +2523,7 @@
         <button id="fb-project-path-copy" type="button" onclick="copyProjectPath()" class="fb-head-copy" title="复制项目路径">复制</button>
       </div>
     </div>
-    <div class="flex items-center gap-1.5 shrink-0">
+    <div class="fb-toolbar flex items-center gap-1.5 shrink-0">
       <button onclick="fbDownloadCurrentPath()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="打包下载当前目录">⬇ 当前目录</button>
       <button onclick="fbCreateFolder()" class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition" title="新建文件夹">+📁</button>
       <label class="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition cursor-pointer" title="上传文件">
@@ -1989,7 +2559,7 @@
           <div class="text-[11px] text-slate-500 uppercase tracking-wide">文件预览</div>
           <div id="fb-preview-title" class="text-xs text-slate-200 truncate">未选择文件</div>
         </div>
-        <div class="flex items-center gap-1.5 shrink-0">
+        <div class="fb-preview-actions flex items-center gap-1.5 shrink-0">
           <button id="fb-preview-mode-btn" onclick="fbTogglePreviewMode()" class="fb-action-btn disabled:opacity-40" disabled>源码</button>
           <button id="fb-preview-download-btn" onclick="fbDownloadPreviewFile()" class="fb-action-btn disabled:opacity-40" disabled>下载</button>
           <button onclick="fbClearPreview(true)" class="fb-action-btn">清空</button>
@@ -2030,7 +2600,7 @@
     <!-- 用户验收区 (pending_acceptance only) -->
     <div id="panel-acceptance" class="hidden space-y-3">
       <div class="text-xs font-semibold text-teal-400 uppercase tracking-wide border-t border-slate-700 pt-3">用户验收</div>
-      <div class="flex gap-2">
+      <div class="panel-acceptance-actions flex gap-2">
         <button onclick="acceptTask()"
           class="flex-1 bg-teal-600 hover:bg-teal-500 text-white text-sm font-medium py-2 rounded-lg">
           ✅ 接受，标记完成
@@ -2101,9 +2671,9 @@
 
     <!-- 交付文件 -->
     <div id="panel-files-wrap">
-      <div class="text-xs text-slate-400 mb-1 flex items-center justify-between gap-2">
+      <div class="panel-files-head text-xs text-slate-400 mb-1 flex items-center justify-between gap-2">
         <span>交付文件</span>
-        <div class="flex items-center gap-1.5">
+        <div class="panel-file-actions flex items-center gap-1.5">
           <button id="panel-open-workspace-btn" onclick="openPanelWorkspace()" class="text-[11px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 transition">
             打开项目办公区
           </button>
@@ -2152,7 +2722,7 @@
 
 <!-- New Project Modal -->
 <div id="modal-project" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
       <h3 id="modal-project-title" class="font-semibold text-white">新建项目</h3>
       <button onclick="closeNewProjectModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
@@ -2183,7 +2753,7 @@
           </button>
         </div>
       </div>
-      <div class="flex justify-end gap-3">
+      <div class="modal-actions flex justify-end gap-3">
         <button type="button" onclick="closeNewProjectModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button id="proj-submit-btn" type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建并初始化</button>
       </div>
@@ -2193,7 +2763,7 @@
 
 <!-- Directory Picker Modal -->
 <div id="modal-dir-picker" class="hidden fixed inset-0 bg-black/70 z-40 flex items-center justify-center p-4" onclick="closeDirPicker()">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl" onclick="event.stopPropagation()">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl shadow-2xl" onclick="event.stopPropagation()">
     <div class="px-5 py-3 border-b border-slate-700 flex items-center justify-between">
       <h3 class="font-semibold text-white">选择项目目录</h3>
       <button type="button" onclick="closeDirPicker()" class="text-slate-400 hover:text-white text-xl">&times;</button>
@@ -2209,7 +2779,7 @@
       <div id="dp-current-path" class="text-xs font-mono text-slate-300 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 break-all"></div>
       <div id="dp-list" class="max-h-80 overflow-y-auto border border-slate-700 rounded-lg bg-slate-900"></div>
     </div>
-    <div class="px-5 py-3 border-t border-slate-700 flex justify-end gap-3">
+    <div class="modal-actions px-5 py-3 border-t border-slate-700 flex justify-end gap-3">
       <button type="button" onclick="closeDirPicker()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
       <button type="button" onclick="selectDirFromPicker()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">选择当前目录</button>
     </div>
@@ -2218,7 +2788,7 @@
 
 <!-- Profile Modal -->
 <div id="modal-profile" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
     <div class="px-6 py-4 border-b border-slate-700 flex items-start justify-between gap-4">
       <div>
         <h3 class="font-semibold text-white">个人信息</h3>
@@ -2256,7 +2826,7 @@
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
         <div class="text-[11px] text-slate-500 mt-1">改密后会让其他设备重新登录</div>
       </div>
-      <div class="flex justify-end gap-3">
+      <div class="modal-actions flex justify-end gap-3">
         <button type="button" onclick="closeProfileModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">修改密码</button>
       </div>
@@ -2266,7 +2836,7 @@
 
 <!-- User Management Modal -->
 <div id="modal-users" class="hidden fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-xl shadow-2xl flex flex-col" style="max-height:85vh;">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-xl shadow-2xl flex flex-col" style="max-height:85vh;">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between shrink-0">
       <h3 class="font-semibold text-white">用户管理</h3>
       <button onclick="closeUsersModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
@@ -2274,7 +2844,7 @@
     <div class="p-6 space-y-4 overflow-y-auto">
       <form onsubmit="submitCreateUser(event)" class="space-y-3 bg-slate-900/50 border border-slate-700 rounded-lg p-4">
         <div class="text-xs text-slate-400">新建普通用户</div>
-        <div class="grid grid-cols-2 gap-3">
+        <div class="form-grid-2 grid grid-cols-2 gap-3">
           <input id="new-user-username" type="text" placeholder="用户名，如 dev01"
             class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
           <input id="new-user-password" type="password" placeholder="密码（至少 6 位）"
@@ -2298,7 +2868,7 @@
 
 <!-- User Edit Modal -->
 <div id="modal-user-edit" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
       <h3 class="font-semibold text-white">编辑用户</h3>
       <button onclick="closeUserEditModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
@@ -2317,7 +2887,7 @@
           <option value="admin">管理员</option>
         </select>
       </div>
-      <div class="grid grid-cols-2 gap-3">
+      <div class="form-grid-2 grid grid-cols-2 gap-3">
         <div>
           <label class="block text-xs text-slate-400 mb-1">项目上限</label>
           <input id="edit-user-max-projects" type="number" min="0" step="1" placeholder="留空不限"
@@ -2335,7 +2905,7 @@
           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
         <div class="text-[11px] text-slate-500 mt-1">填写后将重置该用户密码，至少 6 位</div>
       </div>
-      <div class="flex justify-end gap-3">
+      <div class="modal-actions flex justify-end gap-3">
         <button type="button" onclick="closeUserEditModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">保存</button>
       </div>
@@ -2344,8 +2914,8 @@
 </div>
 
 <!-- Create Task Modal -->
-<div id="modal-task" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4">
-  <div class="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl">
+<div id="modal-task" class="hidden fixed inset-0 bg-black/60 z-30 flex items-center justify-center p-4" onclick="closeCreateModal()">
+  <div class="modal-card bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md shadow-2xl" onclick="event.stopPropagation()">
     <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
       <h3 class="font-semibold text-white">创建任务
         <span id="modal-task-project" class="ml-2 text-xs text-indigo-400 font-normal"></span>
@@ -2405,7 +2975,7 @@
         </label>
         <div class="text-xs text-slate-500">默认开启。关闭后任务会跳过审查，开发完成后直达合并流程</div>
       </div>
-      <div class="flex justify-end gap-3">
+      <div class="modal-actions flex justify-end gap-3">
         <button type="button" onclick="closeCreateModal()" class="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button>
         <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">创建</button>
       </div>
@@ -2675,6 +3245,7 @@ function closeOnboarding() {
     overlay.setAttribute("aria-hidden", "true");
   }
   document.body.classList.remove("onboarding-active");
+  syncMobileOverlayState();
 }
 
 async function finishOnboarding() {
@@ -2736,6 +3307,7 @@ function bindOnboardingUI() {
 }
 
 function startOnboarding(force = false) {
+  closeMobileNav();
   bindOnboardingUI();
   if (!force && isOnboardingCompletedForUser()) return;
   onboardingState.active = true;
@@ -2746,6 +3318,7 @@ function startOnboarding(force = false) {
     overlay.setAttribute("aria-hidden", "false");
   }
   document.body.classList.add("onboarding-active");
+  syncMobileOverlayState();
   renderOnboardingStep();
 }
 
@@ -2830,20 +3403,23 @@ function updateBoardLaneWidths() {
   if (!board || !container) return;
   const lanes = COLUMNS.map(col => document.getElementById(`lane-${col.status}`)).filter(Boolean);
   if (!lanes.length) return;
+  const visibleLanes = lanes.filter(lane => !lane.classList.contains("hidden"));
+  const activeLanes = visibleLanes.length ? visibleLanes : lanes;
 
-  const total = lanes.length;
-  const compactCount = lanes.filter(l => l.classList.contains("compact")).length;
+  const mobile = window.matchMedia("(max-width: 768px)").matches;
+  const total = activeLanes.length;
+  const compactCount = activeLanes.filter(l => l.classList.contains("compact")).length;
   const normalCount = Math.max(1, total - compactCount);
   const gapPx = 6; // Tailwind gap-1.5
   const available = Math.max(320, container.clientWidth - 2);
 
-  // Empty lanes use narrower width; active lanes consume remaining width.
-  const compactWidth = 50;
+  // Keep cards readable on narrow viewports; horizontal scrolling is preferred over collapsing into slivers.
+  const compactWidth = mobile ? 92 : 82;
   const remaining = available - (total - 1) * gapPx - compactCount * compactWidth;
   let normalWidth = Math.floor(remaining / normalCount);
-  normalWidth = Math.max(48, Math.min(180, normalWidth));
+  normalWidth = Math.max(mobile ? 240 : 220, Math.min(mobile ? 320 : 280, normalWidth));
 
-  const adaptiveCompactWidth = Math.max(36, Math.min(56, Math.round(normalWidth * 0.58)));
+  const adaptiveCompactWidth = Math.max(mobile ? 84 : 76, Math.min(mobile ? 108 : 96, Math.round(normalWidth * (mobile ? 0.38 : 0.34))));
   board.style.setProperty("--lane-normal-width", `${normalWidth}px`);
   board.style.setProperty("--lane-compact-width", `${adaptiveCompactWidth}px`);
 }
@@ -2900,6 +3476,252 @@ let newProjectMode = "new";    // "new" | "existing"
 let dpCurrentPath = "";
 let dpParentPath = null;
 let _activeColTipTarget = null;
+let mobileNavBound = false;
+let mobileScrollGuardBound = false;
+let mobileScrollStartX = 0;
+let mobileScrollStartY = 0;
+let mobileTerminalLayoutBound = false;
+let mobileTerminalLayoutRaf = 0;
+const MOBILE_OVERLAY_IDS = [
+  "modal-agents",
+  "modal-project",
+  "modal-dir-picker",
+  "modal-profile",
+  "modal-users",
+  "modal-user-edit",
+  "modal-patchset-metrics",
+  "modal-task",
+];
+let mobileModalBackdropBound = false;
+
+function isMobileViewport() {
+  return !terminalOnlyMode && window.matchMedia("(max-width: 768px)").matches;
+}
+
+function updateMobileTopbarState() {
+  const projectEl = document.getElementById("mobile-topbar-project");
+  const createBtn = document.getElementById("mobile-topbar-create");
+  if (!projectEl || !createBtn) return;
+  const proj = currentProjectId && projects[currentProjectId] ? projects[currentProjectId] : null;
+  projectEl.textContent = proj
+    ? String(proj.name || currentProjectId || "当前项目")
+    : (Object.keys(projects).length ? "未选择项目" : "暂无项目");
+  createBtn.disabled = !proj;
+  createBtn.title = proj ? "创建任务" : "请先选择项目";
+}
+
+function syncMobileNavState() {
+  const mobile = isMobileViewport();
+  document.body.classList.toggle("mobile-viewport", mobile);
+  if (!mobile) document.body.classList.remove("mobile-nav-open");
+  const overlay = document.getElementById("mobile-nav-overlay");
+  if (overlay) {
+    overlay.classList.toggle("hidden", !(mobile && document.body.classList.contains("mobile-nav-open")));
+  }
+  updateMobileTopbarState();
+  syncMobileOverlayState();
+  scheduleMobileTerminalLayout();
+  if (typeof supportChatScheduleBottomOffset === "function") supportChatScheduleBottomOffset();
+}
+
+function openMobileNav() {
+  if (!isMobileViewport()) return;
+  document.body.classList.add("mobile-nav-open");
+  syncMobileNavState();
+}
+
+function closeMobileNav() {
+  document.body.classList.remove("mobile-nav-open");
+  syncMobileNavState();
+}
+
+function toggleMobileNav() {
+  if (document.body.classList.contains("mobile-nav-open")) closeMobileNav();
+  else openMobileNav();
+}
+
+function syncMobileFloatingState() {
+  const mobile = isMobileViewport();
+  const floatingOpen = mobile && (supportChatState.open || feedbackRequestState.open);
+  document.body.classList.toggle("mobile-float-open", floatingOpen);
+  if (!mobile) document.body.classList.remove("mobile-float-open");
+  scheduleMobileTerminalLayout();
+  if (typeof supportChatScheduleBottomOffset === "function") supportChatScheduleBottomOffset();
+}
+
+function hasActiveMobileOverlay() {
+  const filePanel = document.getElementById("file-panel");
+  const taskPanel = document.getElementById("panel");
+  const msgDialog = document.getElementById("msg-dialog-overlay");
+  const modalOpen = MOBILE_OVERLAY_IDS.some((id) => {
+    const el = document.getElementById(id);
+    return !!el && !el.classList.contains("hidden");
+  });
+  const fileOpen = !!filePanel && filePanel.classList.contains("open");
+  const taskDetailOpen = !!taskPanel && !taskPanel.classList.contains("hidden-panel");
+  const dialogOpen = !!msgDialog && !msgDialog.classList.contains("hidden");
+  return modalOpen || fileOpen || taskDetailOpen || dialogOpen || onboardingState.active;
+}
+
+function syncMobileOverlayState() {
+  const mobile = isMobileViewport();
+  const active = mobile && hasActiveMobileOverlay();
+  document.body.classList.toggle("mobile-modal-open", active);
+  if (!mobile) document.body.classList.remove("mobile-modal-open");
+  scheduleMobileTerminalLayout();
+}
+
+function initMobileModalBackdrops() {
+  if (mobileModalBackdropBound) return;
+  mobileModalBackdropBound = true;
+  const closers = {
+    "modal-agents": closeAgentsModal,
+    "modal-project": closeNewProjectModal,
+    "modal-dir-picker": closeDirPicker,
+    "modal-profile": closeProfileModal,
+    "modal-users": closeUsersModal,
+    "modal-user-edit": closeUserEditModal,
+    "modal-patchset-metrics": closePatchsetMetricsModal,
+    "modal-task": closeCreateModal,
+  };
+  Object.entries(closers).forEach(([id, closeFn]) => {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    modal.addEventListener("click", (event) => {
+      if (event.target !== modal) return;
+      closeFn();
+    });
+  });
+}
+
+function updateMobileTerminalLayout() {
+  const root = document.documentElement;
+  if (!root) return;
+  if (!isMobileViewport()) {
+    root.style.setProperty("--mobile-terminal-offset", "0px");
+    return;
+  }
+  if (
+    document.body.classList.contains("mobile-nav-open") ||
+    document.body.classList.contains("mobile-float-open") ||
+    document.body.classList.contains("mobile-modal-open") ||
+    document.body.classList.contains("task-panel-open") ||
+    document.body.classList.contains("task-modal-open")
+  ) {
+    root.style.setProperty("--mobile-terminal-offset", "0px");
+    return;
+  }
+  const shell = document.getElementById("agent-terminal-shell");
+  if (!shell) {
+    root.style.setProperty("--mobile-terminal-offset", "0px");
+    return;
+  }
+  const rect = shell.getBoundingClientRect();
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  let overlap = 0;
+  if (rect.top < viewportH && rect.bottom > 0) {
+    overlap = Math.max(0, Math.min(viewportH, rect.bottom) - Math.max(0, rect.top));
+  }
+  root.style.setProperty("--mobile-terminal-offset", `${Math.ceil(overlap)}px`);
+}
+
+function scheduleMobileTerminalLayout() {
+  if (mobileTerminalLayoutRaf) return;
+  mobileTerminalLayoutRaf = window.requestAnimationFrame(() => {
+    mobileTerminalLayoutRaf = 0;
+    updateMobileTerminalLayout();
+  });
+}
+
+function initMobileTerminalLayout() {
+  if (mobileTerminalLayoutBound) return;
+  mobileTerminalLayoutBound = true;
+  const shell = document.getElementById("agent-terminal-shell");
+  if (!shell) return;
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(() => scheduleMobileTerminalLayout());
+    observer.observe(shell);
+  }
+  window.addEventListener("resize", scheduleMobileTerminalLayout);
+  scheduleMobileTerminalLayout();
+}
+
+function findMobileVerticalScroller(target, fallback) {
+  let node = target instanceof Element ? target : null;
+  while (node && node !== fallback && node !== document.body) {
+    const style = window.getComputedStyle(node);
+    const canScrollY = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
+    if (canScrollY) return node;
+    node = node.parentElement;
+  }
+  return fallback;
+}
+
+function initMobileScrollGuard() {
+  if (mobileScrollGuardBound) return;
+  mobileScrollGuardBound = true;
+  const main = document.querySelector("main.app-main");
+  if (!main) return;
+
+  main.addEventListener("touchstart", (event) => {
+    if (!isMobileViewport() || event.touches.length !== 1) return;
+    mobileScrollStartX = event.touches[0].clientX;
+    mobileScrollStartY = event.touches[0].clientY;
+  }, {passive:true});
+
+  main.addEventListener("touchmove", (event) => {
+    if (!isMobileViewport() || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const deltaX = touch.clientX - mobileScrollStartX;
+    const deltaY = touch.clientY - mobileScrollStartY;
+    if (Math.abs(deltaX) >= Math.abs(deltaY)) return;
+
+    const scroller = findMobileVerticalScroller(event.target, main);
+    const atTop = scroller.scrollTop <= 0;
+    const atBottom = Math.ceil(scroller.scrollTop + scroller.clientHeight) >= scroller.scrollHeight;
+    if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
+      event.preventDefault();
+    }
+  }, {passive:false});
+}
+
+function initMobileNav() {
+  if (mobileNavBound) return;
+  mobileNavBound = true;
+  const header = document.querySelector("header.app-header");
+  const toggleBtn = document.getElementById("mobile-nav-toggle");
+  const closeBtn = document.getElementById("mobile-nav-close");
+  const createBtn = document.getElementById("mobile-topbar-create");
+  if (toggleBtn) toggleBtn.addEventListener("click", toggleMobileNav);
+  if (closeBtn) closeBtn.addEventListener("click", closeMobileNav);
+  if (createBtn) {
+    createBtn.addEventListener("click", () => {
+      if (createBtn.disabled) return;
+      openCreateModal();
+    });
+  }
+  if (header) {
+    header.addEventListener("click", (event) => {
+      if (!isMobileViewport()) return;
+      const button = event.target.closest("button");
+      if (!button || button.id === "mobile-nav-close") return;
+      window.setTimeout(closeMobileNav, 0);
+    });
+    header.addEventListener("change", (event) => {
+      if (!isMobileViewport()) return;
+      if (!event.target.matches("select, input[type='checkbox']")) return;
+      window.setTimeout(closeMobileNav, 0);
+    });
+  }
+  window.addEventListener("resize", () => {
+    syncMobileNavState();
+    syncMobileFloatingState();
+    syncMobileOverlayState();
+  });
+  syncMobileNavState();
+  syncMobileFloatingState();
+  syncMobileOverlayState();
+}
 
 function parseQuotaInput(rawValue, fieldLabel) {
   const raw = String(rawValue ?? "").trim();
@@ -2959,15 +3781,18 @@ function refreshProfileModal() {
 
 function openProfileModal() {
   if (!currentUser) return;
+  closeMobileNav();
   refreshProfileModal();
   clearProfilePasswordForm();
   document.getElementById("modal-profile").classList.remove("hidden");
+  syncMobileOverlayState();
   setTimeout(() => document.getElementById("profile-current-password")?.focus(), 20);
 }
 
 function closeProfileModal() {
   document.getElementById("modal-profile").classList.add("hidden");
   clearProfilePasswordForm();
+  syncMobileOverlayState();
 }
 
 function openUsersModalFromProfile() {
@@ -3028,13 +3853,16 @@ async function submitChangePassword(e) {
 
 function openUsersModal() {
   if (!isAdminUser()) return;
+  closeMobileNav();
   document.getElementById("modal-users").classList.remove("hidden");
+  syncMobileOverlayState();
   loadUsers();
 }
 
 function closeUsersModal() {
   document.getElementById("modal-users").classList.add("hidden");
   closeUserEditModal();
+  syncMobileOverlayState();
 }
 
 async function loadUsers() {
@@ -3089,6 +3917,7 @@ function openUserEditModal(userId) {
   document.getElementById("edit-user-max-tasks").value = normalizeQuotaValue(user.max_tasks) ?? "";
   document.getElementById("edit-user-password").value = "";
   document.getElementById("modal-user-edit").classList.remove("hidden");
+  syncMobileOverlayState();
   setTimeout(() => document.getElementById("edit-user-username").focus(), 20);
 }
 
@@ -3101,6 +3930,7 @@ function closeUserEditModal() {
   const maxTasksInput = document.getElementById("edit-user-max-tasks");
   if (maxProjectsInput) maxProjectsInput.value = "";
   if (maxTasksInput) maxTasksInput.value = "";
+  syncMobileOverlayState();
 }
 
 async function submitEditUser(e) {
@@ -3548,22 +4378,28 @@ function ensureAgentTerminal(key, rawMeta = null) {
 
 // ── Agent modal ───────────────────────────────────────────────────────────────
 function openAgentsModal() {
+  closeMobileNav();
   renderAgentTypesList();
   document.getElementById("modal-agents").classList.remove("hidden");
   document.getElementById("agents-list-view").classList.remove("hidden");
   document.getElementById("agents-form-view").classList.add("hidden");
+  syncMobileOverlayState();
 }
 function closeAgentsModal() {
   document.getElementById("modal-agents").classList.add("hidden");
+  syncMobileOverlayState();
 }
 
 function openPatchsetMetricsModal() {
+  closeMobileNav();
   document.getElementById("modal-patchset-metrics").classList.remove("hidden");
+  syncMobileOverlayState();
   loadPatchsetMetrics(true);
 }
 
 function closePatchsetMetricsModal() {
   document.getElementById("modal-patchset-metrics").classList.add("hidden");
+  syncMobileOverlayState();
 }
 
 function fmtMetricPercent(value) {
@@ -3965,6 +4801,7 @@ function updateProjectUI() {
     document.getElementById("no-project-hint").classList.remove("hidden");
   }
   updateProjectPath();
+  updateMobileTopbarState();
   if (typeof feedbackRequestHandleProjectChange === "function") feedbackRequestHandleProjectChange();
 }
 
@@ -4146,10 +4983,9 @@ function renderCard(task) {
     : "";
 
   return `
-    <div class="card relative bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
+    <div class="task-card card relative bg-slate-800 border border-slate-700 rounded-lg p-2 cursor-pointer ${task.archived?'archived-card':''}"
          onclick="openPanel('${task.id}')">
-      <div class="text-[11px] font-medium text-white mb-1 leading-snug"
-           style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${escHtml(task.title)}</div>
+      <div class="task-card-title text-[11px] font-medium text-white mb-1 leading-snug">${escHtml(task.title)}</div>
       <div class="flex items-center gap-1 flex-wrap">
         ${priorityBadge}
         <span class="badge px-2 py-0.5 rounded-full ${b}">${l}</span>
@@ -4157,17 +4993,18 @@ function renderCard(task) {
         ${task.commit_hash?`<span class="text-[10px] font-mono text-green-600">${escHtml(String(task.commit_hash).slice(0,7))}</span>`:""}
         ${pendingBadge}${reviewBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}${dependencyBadge}
       </div>
-      ${feedbackSnippet}
+      ${feedbackSnippet.replace('mt-1 text-[10px]', 'task-card-feedback mt-1 text-[10px]')}
     </div>`;
 }
 
 function refreshBoard() {
   if (!currentProjectId) return;
   const autoCollapse = document.getElementById("auto-collapse-empty-cols")?.checked !== false;
+  const mobile = isMobileViewport();
   COLUMNS.forEach(col => {
     document.getElementById(`col-${col.status}`).innerHTML = "";
     document.getElementById(`count-${col.status}`).textContent = "0";
-    document.getElementById(`lane-${col.status}`)?.classList.remove("compact");
+    document.getElementById(`lane-${col.status}`)?.classList.remove("compact", "hidden");
   });
   const counts = {};
   Object.values(tasks)
@@ -4182,12 +5019,16 @@ function refreshBoard() {
         counts[task.status] = (counts[task.status]||0) + 1;
       }
     });
+  const hasAnyTask = Object.values(counts).some(n => Number(n || 0) > 0);
   COLUMNS.forEach(col => {
     const n = counts[col.status] || 0;
     const countEl = document.getElementById(`count-${col.status}`);
     if (countEl) countEl.textContent = String(n);
     const laneEl = document.getElementById(`lane-${col.status}`);
-    if (laneEl) laneEl.classList.toggle("compact", autoCollapse && n === 0);
+    if (!laneEl) return;
+    const hideEmpty = mobile && hasAnyTask && n === 0;
+    laneEl.classList.toggle("hidden", hideEmpty);
+    laneEl.classList.toggle("compact", !mobile && autoCollapse && n === 0);
   });
   updateBoardLaneWidths();
 }
@@ -4373,6 +5214,7 @@ function runMessageDialog(options = {}) {
   hintEl.classList.toggle("hidden", !inputHint);
   overlay.classList.remove("hidden");
   overlay.setAttribute("aria-hidden", "false");
+  syncMobileOverlayState();
 
   return new Promise((resolve) => {
     let settled = false;
@@ -4386,6 +5228,7 @@ function runMessageDialog(options = {}) {
       overlay.removeEventListener("click", onOverlayClick);
       overlay.classList.add("hidden");
       overlay.setAttribute("aria-hidden", "true");
+      syncMobileOverlayState();
       if (_activeDialogState && _activeDialogState.done === done) _activeDialogState = null;
       resolve(result);
     };
@@ -4849,6 +5692,7 @@ function feedbackRequestSetOpen(nextOpen) {
   refs.panel.classList.toggle("hidden", !feedbackRequestState.open);
   refs.fab.classList.toggle("open", feedbackRequestState.open);
   if (feedbackRequestState.open) {
+    closeMobileNav();
     if (typeof supportChatSetOpen === "function") supportChatSetOpen(false);
     feedbackRequestSyncRoleUI();
     feedbackRequestRefreshProjectScope();
@@ -4862,6 +5706,7 @@ function feedbackRequestSetOpen(nextOpen) {
   } else {
     feedbackRequestRenderDetail();
   }
+  syncMobileFloatingState();
 }
 
 function feedbackRequestToggleOpen() {
@@ -5189,6 +6034,10 @@ function supportChatUpdateBottomOffset() {
   const refs = supportChatState.refs;
   const root = refs?.root;
   if (!root) return;
+  if (document.body.classList.contains("mobile-float-open")) {
+    root.style.setProperty("--support-chat-extra-bottom", "0px");
+    return;
+  }
   const shell = document.getElementById("agent-terminal-shell");
   if (!shell) {
     root.style.setProperty("--support-chat-extra-bottom", "0px");
@@ -5290,12 +6139,14 @@ function supportChatSetOpen(nextOpen) {
   refs.fab.classList.toggle("open", supportChatState.open);
   supportChatScheduleBottomOffset();
   if (supportChatState.open) {
+    closeMobileNav();
     if (typeof feedbackRequestSetOpen === "function") feedbackRequestSetOpen(false);
     supportChatState.autoFollow = true;
     supportChatAutoResizeInput();
     supportChatScrollToBottom(true);
     setTimeout(() => refs.input?.focus(), 0);
   }
+  syncMobileFloatingState();
 }
 
 function supportChatToggleOpen() {
@@ -5628,7 +6479,9 @@ function syncTerminalVisibility() {
   const chevron = document.getElementById("terminal-chevron");
   if (panel) panel.classList.toggle("collapsed", !terminalsVisible);
   if (chevron) chevron.textContent = terminalsVisible ? "▲" : "▼";
+  scheduleMobileTerminalLayout();
   supportChatScheduleBottomOffset();
+  window.setTimeout(() => scheduleMobileTerminalLayout(), 280);
   window.setTimeout(() => supportChatScheduleBottomOffset(), 280);
 }
 
@@ -6220,8 +7073,11 @@ async function openPanel(id) {
   } else { cmWrap.classList.add("hidden"); }
   renderTaskPatchset(task);
 
+  document.body.classList.add("task-panel-open");
   document.getElementById("panel").classList.remove("hidden-panel");
   document.getElementById("panel-overlay").classList.remove("hidden");
+  syncMobileOverlayState();
+  scheduleMobileTerminalLayout();
 
   // Heavy panels are loaded lazily in parallel to keep opening snappy.
   loadTaskFiles(id, task.status);
@@ -6961,18 +7817,26 @@ async function taskAction(id, action, extra = {}) {
   return await res.json();
 }
 function closePanel() {
+  document.body.classList.remove("task-panel-open");
   document.getElementById("panel").classList.add("hidden-panel");
   document.getElementById("panel-overlay").classList.add("hidden");
+  syncMobileOverlayState();
+  scheduleMobileTerminalLayout();
   currentTaskId=null;
 }
 
 // ── New Project Modal ─────────────────────────────────────────────────────────
 function openNewProjectModal()  {
+  closeMobileNav();
   updateProjectModeAvailability();
   setProjectMode("new");
   document.getElementById("modal-project").classList.remove("hidden");
+  syncMobileOverlayState();
 }
-function closeNewProjectModal() { document.getElementById("modal-project").classList.add("hidden"); }
+function closeNewProjectModal() {
+  document.getElementById("modal-project").classList.add("hidden");
+  syncMobileOverlayState();
+}
 function updateProjectModeAvailability() {
   const existingBtn = document.getElementById("proj-mode-existing");
   const canImport = isAdminUser();
@@ -7007,10 +7871,12 @@ function openDirPicker() {
   if (!isAdminUser()) return;
   const rawPath = document.getElementById("proj-path").value.trim();
   document.getElementById("modal-dir-picker").classList.remove("hidden");
+  syncMobileOverlayState();
   dpLoadDirectories(rawPath || "~");
 }
 function closeDirPicker() {
   document.getElementById("modal-dir-picker").classList.add("hidden");
+  syncMobileOverlayState();
 }
 function dpRefresh() {
   dpLoadDirectories(dpCurrentPath || "~");
@@ -7295,6 +8161,7 @@ function renderTaskDependencyOptions() {
 
 function openCreateModal() {
   if (!currentProjectId) return;
+  closeMobileNav();
   const proj = projects[currentProjectId];
   document.getElementById("modal-task-project").textContent = proj?`@ ${proj.name}`:"";
   renderTaskAssigneeOptions();
@@ -7307,9 +8174,17 @@ function openCreateModal() {
   if (prioritySel) prioritySel.value = "2";
   const reviewToggle = document.getElementById("task-review-enabled");
   if (reviewToggle) reviewToggle.checked = true;
+  document.body.classList.add("task-modal-open");
   document.getElementById("modal-task").classList.remove("hidden");
+  syncMobileOverlayState();
+  scheduleMobileTerminalLayout();
 }
-function closeCreateModal() { document.getElementById("modal-task").classList.add("hidden"); }
+function closeCreateModal() {
+  document.body.classList.remove("task-modal-open");
+  document.getElementById("modal-task").classList.add("hidden");
+  syncMobileOverlayState();
+  scheduleMobileTerminalLayout();
+}
 async function submitTask(e) {
   e.preventDefault();
   const title=document.getElementById("task-title").value.trim();
@@ -7604,10 +8479,12 @@ function fbHasDraggedFiles(event) {
 
 function openFileBrowser(path = "") {
   if (!currentProjectId) return;
+  closeMobileNav();
   const panel = document.getElementById("file-panel");
   const wasOpen = panel.classList.contains("open");
   panel.classList.add("open");
   document.getElementById("file-overlay").classList.add("open");
+  syncMobileOverlayState();
   fbDragDepth = 0;
   fbSetDropOverlay(false);
   if (!wasOpen) fbClearPreview(true);
@@ -7617,6 +8494,7 @@ function openFileBrowser(path = "") {
 function closeFileBrowser() {
   document.getElementById("file-panel").classList.remove("open");
   document.getElementById("file-overlay").classList.remove("open");
+  syncMobileOverlayState();
   fbDragDepth = 0;
   fbSetDropOverlay(false);
   fbClearPreview(true);
@@ -8385,6 +9263,10 @@ async function initApp() {
     buildBoard();
     initFeedbackRequests();
     initSupportChat();
+    initMobileNav();
+    initMobileModalBackdrops();
+    initMobileScrollGuard();
+    initMobileTerminalLayout();
     applyTerminalOnlyMode();
     updateBoardLaneWidths();
     window.addEventListener("resize", updateBoardLaneWidths);
