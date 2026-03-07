@@ -333,7 +333,125 @@ class ManagerAgent(BaseAgent):
             main_head_before = (await self.git("rev-parse", "HEAD", cwd=proj_root)).strip()
         except Exception:
             main_head_before = ""
+        try:
+            dirty_status = (await self.git("status", "--porcelain", cwd=proj_root)).strip()
+        except Exception:
+            dirty_status = ""
+        if dirty_status:
+            feedback = (
+                "[合并前置检查失败] main 工作区存在未提交改动，无法安全合并 patchset。"
+                "请先清理主仓库工作区后再重试。"
+            )
+            await self.add_alert(
+                summary="合并前主仓库工作区不干净",
+                task_id=task_id,
+                message=feedback,
+                kind="error",
+                code="manager_dirty_main_worktree",
+                stage="merge_blocked",
+                metadata={"dirty_status": dirty_status[:1200]},
+            )
+            await self.transition_task(
+                task_id,
+                fields={
+                    "status": "blocked",
+                    "assignee": None,
+                    "assigned_agent": self.name,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback[:1000],
+                    "feedback_source": self.name,
+                    "feedback_stage": "merge_blocked",
+                    "feedback_actor": self.name,
+                    "current_patchset_id": patchset_id or None,
+                    "current_patchset_status": "approved",
+                },
+                handoff={
+                    "stage": "merge_blocked",
+                    "to_agent": self.name,
+                    "status_from": "approved",
+                    "status_to": "blocked",
+                    "title": "合并前置检查阻塞",
+                    "summary": feedback,
+                    "commit_hash": head_sha,
+                    "conclusion": "主仓库工作区不干净，合并流程阻塞",
+                    "payload": {
+                        "reason": "dirty_main_worktree",
+                        "dirty_status": dirty_status[:1200],
+                        "patchset": {
+                            **patchset,
+                            "status": "approved",
+                            "summary": feedback[:300],
+                            "queue_status": "",
+                            "queue_reason": "dirty_main_worktree",
+                            "queue_main_sha": main_head_before,
+                        },
+                    },
+                },
+                log_message=feedback,
+            )
+            return True
         reviewed_main_sha = str(patchset.get("reviewed_main_sha") or "").strip()
+        if reviewed_main_sha and main_head_before and reviewed_main_sha != main_head_before:
+            queue_finished_at = _utcnow_iso()
+            queue_reason = "main_advanced_before_merge"
+            refresh_hint = self._build_patchset_refresh_hint(
+                patchset=patchset,
+                reviewed_main_sha=reviewed_main_sha,
+                latest_main_sha=main_head_before,
+                queue_reason=queue_reason,
+                conflicts=[],
+            )
+            feedback = self._build_patchset_conflict_feedback(
+                patchset=patchset,
+                dev_branch=dev_branch,
+                conflicts=[],
+                refresh_hint=refresh_hint,
+            )
+            await self.transition_task(
+                task_id,
+                fields={
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": dev_agent,
+                    "dev_agent": dev_agent,
+                    "review_feedback": feedback[:1000],
+                    "feedback_source": self.name,
+                    "feedback_stage": "merge_to_dev",
+                    "feedback_actor": self.name,
+                    "current_patchset_id": patchset_id or None,
+                    "current_patchset_status": "stale",
+                },
+                handoff={
+                    "stage": "merge_to_dev",
+                    "to_agent": dev_agent,
+                    "status_from": "approved",
+                    "status_to": "needs_changes",
+                    "title": "合并退回开发",
+                    "summary": feedback[:300],
+                    "commit_hash": head_sha,
+                    "conclusion": "patchset 审查基线已过期，需基于最新 main 刷新后重提",
+                    "payload": {
+                        "reason": queue_reason,
+                        "commit_hash": head_sha,
+                        "refresh_hint": refresh_hint,
+                        "patchset": {
+                            **patchset,
+                            "status": "stale",
+                            "merge_strategy": "squash",
+                            "summary": feedback[:300],
+                            "queue_status": "stale",
+                            "queue_reason": queue_reason,
+                            "queue_started_at": queue_started_at,
+                            "queue_finished_at": queue_finished_at,
+                            "queue_main_sha": main_head_before,
+                            "reviewed_main_sha": reviewed_main_sha,
+                        },
+                        "conflicts": [],
+                    },
+                },
+                log_message=feedback[:300],
+            )
+            return True
 
         try:
             await self.git("cat-file", "-e", f"{head_sha}^{{commit}}", cwd=proj_root)

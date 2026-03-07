@@ -847,6 +847,12 @@ def require_admin(user: dict = Depends(require_user)) -> dict:
     return user
 
 
+def _require_system_flow_access(principal: dict):
+    auth_type = str(principal.get("auth_type") or "").strip().lower()
+    if auth_type == "user" and not _is_admin(principal):
+        raise HTTPException(403, "仅 agent 或管理员可操作")
+
+
 def require_project_access(project_id: str, user: dict) -> dict:
     project = db.get_project(project_id, user_id=user["id"], is_admin=_is_admin(user))
     if not project:
@@ -1676,6 +1682,16 @@ COMMIT_REQUIRED_STAGES = {
     "merge_failed",
 }
 
+CRITICAL_TRANSITION_HANDOFF_STAGES: dict[str, set[str]] = {
+    "in_review": {"dev_to_review"},
+    "approved": {"review_to_manager", "dev_to_approved"},
+    "needs_changes": {"review_to_dev", "merge_to_dev", "user_to_dev"},
+    "pending_acceptance": {"merge_to_acceptance"},
+    "completed": {"acceptance_complete"},
+}
+
+PATCHSET_REQUIRED_STATUSES = {"in_review", "approved", "pending_acceptance"}
+
 
 STATUS_FLOW: dict[str, set[str]] = {
     "triage": {"triage", "triaging", "decompose", "decomposed", "todo", "blocked", "cancelled"},
@@ -2036,6 +2052,39 @@ def _build_handoff_row(task_for_handoff: dict, handoff: HandoffCreate | None) ->
         "payload": payload,
         "artifact_path": handoff.artifact_path,
     }, patchset
+
+
+def _validate_transition_artifacts(
+    before: dict,
+    fields: dict,
+    *,
+    handoff_row: dict | None = None,
+    patchset_row: dict | None = None,
+):
+    prev = _norm_status(before.get("status"))
+    nxt = _norm_status(fields.get("status"))
+    if not nxt or prev == nxt:
+        return
+
+    handoff_stage = _norm_status((handoff_row or {}).get("stage"))
+    handoff_status_from = _norm_status((handoff_row or {}).get("status_from"))
+    handoff_status_to = _norm_status((handoff_row or {}).get("status_to"))
+    if handoff_row:
+        if handoff_status_from and handoff_status_from != prev:
+            raise HTTPException(422, f"handoff.status_from 与任务当前状态不一致: {handoff_status_from} != {prev}")
+        if handoff_status_to and handoff_status_to != nxt:
+            raise HTTPException(422, f"handoff.status_to 与目标状态不一致: {handoff_status_to} != {nxt}")
+
+    allowed_stages = CRITICAL_TRANSITION_HANDOFF_STAGES.get(nxt)
+    if allowed_stages:
+        if not handoff_row:
+            raise HTTPException(422, f"status={nxt} 的关键流转必须携带 handoff")
+        if handoff_stage not in allowed_stages:
+            stages = ", ".join(sorted(allowed_stages))
+            raise HTTPException(422, f"status={nxt} 的关键流转要求 handoff.stage 属于: {stages}")
+
+    if nxt in PATCHSET_REQUIRED_STATUSES and not patchset_row:
+        raise HTTPException(422, f"status={nxt} 的关键流转必须包含 patchset/commit 证据")
 
 
 async def _apply_transition_and_broadcast(
@@ -2891,14 +2940,16 @@ async def update_task(task_id: str, body: TaskUpdate, user: dict = Depends(requi
 async def transition_task(
     task_id: str,
     body: TaskTransitionRequest,
-    _principal: dict = Depends(require_agent_or_user),
+    principal: dict = Depends(require_agent_or_user),
 ):
+    _require_system_flow_access(principal)
     before = db.get_task(task_id)
     if not before:
         raise HTTPException(404, "Task not found")
 
     fields = body.fields.model_dump(exclude_unset=True) if body.fields else {}
     normalized_fields = _normalize_transition_fields(before, fields)
+    _validate_status_transition(before, normalized_fields)
 
     log_row = None
     if body.log:
@@ -2907,6 +2958,12 @@ async def transition_task(
     task_for_handoff = dict(before)
     task_for_handoff.update(normalized_fields)
     handoff_row, patchset_row = _build_handoff_row(task_for_handoff, body.handoff)
+    _validate_transition_artifacts(
+        before,
+        normalized_fields,
+        handoff_row=handoff_row,
+        patchset_row=patchset_row,
+    )
 
     return await _apply_transition_and_broadcast(
         task_id,
@@ -3325,22 +3382,22 @@ async def upsert_task_patchset(
     body: PatchsetUpsertRequest,
     principal: dict = Depends(require_agent_or_user),
 ):
+    _require_system_flow_access(principal)
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if principal.get("auth_type") == "user":
         require_task_access(task_id, principal)
-    if body.expected_run_id or body.expected_lease_token:
-        ok, reason = db.validate_task_lease(
-            task_id=task_id,
-            expected_run_id=body.expected_run_id,
-            expected_lease_token=body.expected_lease_token,
-            strict_if_active=False,
-        )
-        if not ok:
-            if reason == "task_not_found":
-                raise HTTPException(404, "Task not found")
-            raise HTTPException(409, reason)
+    ok, reason = db.validate_task_lease(
+        task_id=task_id,
+        expected_run_id=body.expected_run_id,
+        expected_lease_token=body.expected_lease_token,
+        strict_if_active=True,
+    )
+    if not ok:
+        if reason == "task_not_found":
+            raise HTTPException(404, "Task not found")
+        raise HTTPException(409, reason)
 
     payload = dict(body.patchset or {})
     payload.setdefault("task_id", task_id)
@@ -3380,17 +3437,17 @@ async def get_runtime_patchset_metrics(
 async def add_handoff(
     task_id: str,
     body: HandoffCreate,
-    _principal: dict = Depends(require_agent_or_user),
+    principal: dict = Depends(require_agent_or_user),
 ):
+    _require_system_flow_access(principal)
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    has_fence = bool(str(body.expected_run_id or "").strip() and str(body.expected_lease_token or "").strip())
     ok, reason = db.validate_task_lease(
         task_id=task_id,
         expected_run_id=body.expected_run_id,
         expected_lease_token=body.expected_lease_token,
-        strict_if_active=has_fence,
+        strict_if_active=True,
     )
     if not ok:
         if reason == "task_not_found":

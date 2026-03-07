@@ -31,9 +31,11 @@ class AssumptionContractFlowTest(unittest.TestCase):
         )
 
         self.assertIn("## 假设", refined)
+        self.assertIn("## 证据要求", refined)
         self.assertIn("最小可逆方案处理", refined)
         contract = extract_task_contract_from_description(refined)
         self.assertTrue(contract.get("assumptions"))
+        self.assertTrue(contract.get("evidence_required"))
 
     def test_review_contract_treats_assumptions_as_allowed_baseline(self):
         agent = reviewer_module.ReviewerAgent()
@@ -56,6 +58,32 @@ class AssumptionContractFlowTest(unittest.TestCase):
         self.assertIn("允许沿用的默认假设", block)
         self.assertIn("不要因为“存在 assumptions”本身打回", block)
         self.assertIn("pytest tests/test_download.py", block)
+
+    def test_leader_simple_decision_strips_parent_requirement_ids_from_description(self):
+        agent = leader_module.LeaderAgent()
+
+        decision, issues = agent._normalize_triage_decision(
+            {
+                "action": "simple",
+                "reason": "单个开发者可完成",
+                "assignee": "developer",
+                "refined_description": (
+                    "## 任务目标\n- 基于 R1、R2，交付一个可玩的网页小游戏。\n\n"
+                    "## 范围\n- 页面整体视觉需围绕 R2 的甜美可爱要求设计。\n\n"
+                    "## 关键约束\n- 必须满足 R1：交付物是网页游戏。\n\n"
+                    "## 假设\n- 默认采用单页前端实现。\n\n"
+                    "## 交付物\n- index.html\n\n"
+                    "## 验收标准\n- [ ] 可以打开游玩\n- [ ] 视觉风格统一"
+                ),
+            },
+            fallback_description="",
+        )
+
+        self.assertEqual(issues, [])
+        self.assertEqual(decision["action"], "simple")
+        self.assertNotIn("R1", decision["refined_description"])
+        self.assertNotIn("R2", decision["refined_description"])
+        self.assertIn("原始需求", decision["refined_description"])
 
 
 if __name__ == "__main__":

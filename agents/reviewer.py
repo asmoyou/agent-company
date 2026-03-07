@@ -9,8 +9,10 @@ from base import BaseAgent, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_statu
 from prompt_registry import REVIEWER_PROMPT_DEFAULT
 from task_intelligence import (
     build_feedback_from_issues,
+    evidence_bundle_has_blockers,
     next_retry_strategy,
     normalize_issue_list,
+    summarize_evidence_blockers,
 )
 
 REVIEW_DECISION_SCHEMA = {
@@ -754,6 +756,40 @@ class ReviewerAgent(BaseAgent):
                 patchset_for_handoff = patchset
         review_timestamp = datetime.now(UTC).isoformat()
         issues = normalize_issue_list(decision.get("issues"), default_status="open")
+        latest_bundle = {}
+        latest_evidence = task.get("latest_evidence")
+        if isinstance(latest_evidence, dict) and isinstance(latest_evidence.get("bundle"), dict):
+            latest_bundle = latest_evidence.get("bundle") or {}
+
+        if decision["decision"] == "approve":
+            machine_blockers = summarize_evidence_blockers(latest_bundle, limit=4)
+            unresolved_issue_count = sum(
+                1 for item in issues if str(item.get("status") or "").strip().lower() != "resolved"
+            )
+            if evidence_bundle_has_blockers(latest_bundle) or unresolved_issue_count:
+                details = machine_blockers or ["模型给出了 approve，但机器校验仍存在未闭环问题。"]
+                feedback = "[机器校验阻止通过] " + "；".join(details[:4])
+                if unresolved_issue_count and not machine_blockers:
+                    feedback += f"；仍有 {unresolved_issue_count} 个 unresolved issues"
+                issues = normalize_issue_list(
+                    issues
+                    or [
+                        {
+                            "issue_id": "machine-review-blocker",
+                            "acceptance_item": "机器校验",
+                            "severity": "high",
+                            "category": "evidence",
+                            "summary": feedback,
+                            "reproducer": "检查 latest_evidence.bundle 与 reviewer 决策是否一致",
+                            "evidence_gap": "latest_evidence.bundle 仍存在 blocker",
+                            "scope": "review gate",
+                            "fix_hint": "先消除机器校验 blocker，再重新送审",
+                            "status": "open",
+                        }
+                    ],
+                    default_status="open",
+                )
+                decision = {"decision": "request_changes", "feedback": feedback, "issues": issues}
 
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")
