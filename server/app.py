@@ -1501,6 +1501,12 @@ class TaskUpdate(BaseModel):
     assignee: str | None = None
     assigned_agent: str | None = None
     dev_agent: str | None = None
+    execution_phase: str | None = None
+    retry_strategy: str | None = None
+    failure_fingerprint: str | None = None
+    same_fingerprint_streak: int | None = None
+    cooldown_until: str | None = None
+    allowed_surface_json: dict[str, Any] | None = None
     review_enabled: bool | None = None
     review_feedback: str | None = None
     commit_hash: str | None = None
@@ -3266,6 +3272,45 @@ async def get_handoffs(task_id: str):
     if not task:
         raise HTTPException(404, "Task not found")
     return [_format_handoff(h) for h in db.get_handoffs(task_id)]
+
+
+@app.get("/tasks/{task_id}/contract")
+async def get_task_contract(task_id: str, user: dict = Depends(require_user)):
+    require_task_access(task_id, user)
+    contract = db.get_task_contract(task_id)
+    if not contract:
+        raise HTTPException(404, "Task contract not found")
+    return contract
+
+
+@app.get("/tasks/{task_id}/issues")
+async def get_task_issues(
+    task_id: str,
+    include_resolved: bool = Query(default=False),
+    user: dict = Depends(require_user),
+):
+    require_task_access(task_id, user)
+    return db.list_task_issues(task_id, include_resolved=include_resolved)
+
+
+@app.get("/tasks/{task_id}/attempts")
+async def get_task_attempts(
+    task_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    user: dict = Depends(require_user),
+):
+    require_task_access(task_id, user)
+    return db.list_task_attempts(task_id, limit=limit)
+
+
+@app.get("/tasks/{task_id}/evidence")
+async def get_task_evidence(
+    task_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    user: dict = Depends(require_user),
+):
+    require_task_access(task_id, user)
+    return db.list_task_evidence(task_id, limit=limit)
 
 
 @app.get("/tasks/{task_id}/patchsets")

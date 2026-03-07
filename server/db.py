@@ -9,6 +9,17 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import prompt_registry
+from task_intelligence import (
+    RETRY_STRATEGY_DEFAULT,
+    UNRESOLVED_ISSUE_STATUSES,
+    compute_failure_fingerprint,
+    cooldown_until_for_streak,
+    extract_task_contract_from_description,
+    normalize_allowed_surface,
+    normalize_issue_list,
+)
+
 DB_PATH = Path(__file__).parent.parent / "tasks.db"
 CANCELLED_STATUS = "cancelled"
 ACTIONABLE_FEEDBACK_STATUSES = {"needs_changes", "blocked"}
@@ -376,25 +387,7 @@ PROCUREMENT_SPECIALIST_PROMPT_DEFAULT = (
     "直接开始执行，不需要解释计划。"
 )
 
-BUILTIN_PROMPTS = {
-    "developer": DEVELOPER_PROMPT_DEFAULT,
-    "reviewer": REVIEWER_PROMPT_DEFAULT,
-    "manager": MANAGER_PROMPT_DEFAULT,
-    "leader": LEADER_PROMPT_DEFAULT,
-    "product_manager": PRODUCT_MANAGER_PROMPT_DEFAULT,
-    "finance_officer": FINANCE_OFFICER_PROMPT_DEFAULT,
-    "legal_counsel": LEGAL_COUNSEL_PROMPT_DEFAULT,
-    "business_manager": BUSINESS_MANAGER_PROMPT_DEFAULT,
-    "bid_writer": BID_WRITER_PROMPT_DEFAULT,
-    "risk_compliance_officer": RISK_COMPLIANCE_PROMPT_DEFAULT,
-    "admin_specialist": ADMIN_SPECIALIST_PROMPT_DEFAULT,
-    "marketing_specialist": MARKETING_SPECIALIST_PROMPT_DEFAULT,
-    "art_designer": ART_DESIGNER_PROMPT_DEFAULT,
-    "hr_specialist": HR_SPECIALIST_PROMPT_DEFAULT,
-    "operations_specialist": OPERATIONS_SPECIALIST_PROMPT_DEFAULT,
-    "customer_service_specialist": CUSTOMER_SERVICE_SPECIALIST_PROMPT_DEFAULT,
-    "procurement_specialist": PROCUREMENT_SPECIALIST_PROMPT_DEFAULT,
-}
+BUILTIN_PROMPTS = dict(prompt_registry.BUILTIN_PROMPTS)
 
 
 def get_conn():
@@ -470,6 +463,11 @@ def init_db():
             claim_run_id    TEXT,
             lease_token     TEXT,
             lease_expires_at TEXT,
+            execution_phase TEXT NOT NULL DEFAULT 'contract_ready',
+            retry_strategy  TEXT NOT NULL DEFAULT 'default_implement',
+            failure_fingerprint TEXT NOT NULL DEFAULT '',
+            same_fingerprint_streak INTEGER NOT NULL DEFAULT 0,
+            cooldown_until  TEXT,
             review_enabled  INTEGER NOT NULL DEFAULT 1,
             review_feedback TEXT,
             review_feedback_history TEXT NOT NULL DEFAULT '[]',
@@ -477,6 +475,10 @@ def init_db():
             current_patchset_id TEXT,
             current_patchset_status TEXT NOT NULL DEFAULT '',
             merged_patchset_id TEXT,
+            current_contract_id TEXT,
+            latest_evidence_id TEXT,
+            latest_attempt_id TEXT,
+            allowed_surface_json TEXT NOT NULL DEFAULT '{}',
             archived        INTEGER NOT NULL DEFAULT 0,
             cancel_reason   TEXT NOT NULL DEFAULT '',
             created_at      TEXT NOT NULL,
@@ -583,6 +585,81 @@ def init_db():
             created_at     TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS task_contracts (
+            id                  TEXT PRIMARY KEY,
+            task_id             TEXT NOT NULL,
+            version             INTEGER NOT NULL DEFAULT 1,
+            source_hash         TEXT NOT NULL DEFAULT '',
+            goal                TEXT NOT NULL DEFAULT '',
+            scope_json          TEXT NOT NULL DEFAULT '[]',
+            non_scope_json      TEXT NOT NULL DEFAULT '[]',
+            constraints_json    TEXT NOT NULL DEFAULT '[]',
+            deliverables_json   TEXT NOT NULL DEFAULT '[]',
+            acceptance_json     TEXT NOT NULL DEFAULT '[]',
+            assumptions_json    TEXT NOT NULL DEFAULT '[]',
+            evidence_required_json TEXT NOT NULL DEFAULT '[]',
+            allowed_surface_json TEXT NOT NULL DEFAULT '{}',
+            created_by          TEXT NOT NULL DEFAULT 'system',
+            created_at          TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE (task_id, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_issues (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL,
+            issue_key       TEXT NOT NULL,
+            source          TEXT NOT NULL DEFAULT 'system',
+            stage           TEXT NOT NULL DEFAULT '',
+            acceptance_item TEXT NOT NULL DEFAULT '',
+            severity        TEXT NOT NULL DEFAULT 'medium',
+            category        TEXT NOT NULL DEFAULT 'other',
+            summary         TEXT NOT NULL DEFAULT '',
+            reproducer      TEXT NOT NULL DEFAULT '',
+            evidence_gap    TEXT NOT NULL DEFAULT '',
+            scope           TEXT NOT NULL DEFAULT '',
+            fix_hint        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'open',
+            resolution      TEXT NOT NULL DEFAULT '',
+            attempt_id      TEXT,
+            first_seen_at   TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL,
+            resolved_at     TEXT,
+            metadata_json   TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE (task_id, issue_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_attempts (
+            id                  TEXT PRIMARY KEY,
+            task_id             TEXT NOT NULL,
+            stage               TEXT NOT NULL DEFAULT '',
+            outcome             TEXT NOT NULL DEFAULT '',
+            execution_phase     TEXT NOT NULL DEFAULT '',
+            retry_strategy      TEXT NOT NULL DEFAULT '',
+            failure_fingerprint TEXT NOT NULL DEFAULT '',
+            same_fingerprint_streak INTEGER NOT NULL DEFAULT 0,
+            summary             TEXT NOT NULL DEFAULT '',
+            artifact_path       TEXT,
+            metadata_json       TEXT NOT NULL DEFAULT '{}',
+            created_by          TEXT NOT NULL DEFAULT 'system',
+            created_at          TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS task_evidence (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL,
+            stage           TEXT NOT NULL DEFAULT '',
+            attempt_id      TEXT,
+            summary         TEXT NOT NULL DEFAULT '',
+            evidence_json   TEXT NOT NULL DEFAULT '{}',
+            artifact_path   TEXT,
+            created_by      TEXT NOT NULL DEFAULT 'system',
+            created_at      TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+
     """)
 
     # Migrations for existing DBs: ensure all runtime-required columns exist.
@@ -637,6 +714,11 @@ def init_db():
         ("claim_run_id", "TEXT"),
         ("lease_token", "TEXT"),
         ("lease_expires_at", "TEXT"),
+        ("execution_phase", "TEXT NOT NULL DEFAULT 'contract_ready'"),
+        ("retry_strategy", "TEXT NOT NULL DEFAULT 'default_implement'"),
+        ("failure_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("same_fingerprint_streak", "INTEGER NOT NULL DEFAULT 0"),
+        ("cooldown_until", "TEXT"),
         ("review_enabled", "INTEGER NOT NULL DEFAULT 1"),
         ("review_feedback", "TEXT"),
         ("review_feedback_history", "TEXT NOT NULL DEFAULT '[]'"),
@@ -644,6 +726,10 @@ def init_db():
         ("current_patchset_id", "TEXT"),
         ("current_patchset_status", "TEXT NOT NULL DEFAULT ''"),
         ("merged_patchset_id", "TEXT"),
+        ("current_contract_id", "TEXT"),
+        ("latest_evidence_id", "TEXT"),
+        ("latest_attempt_id", "TEXT"),
+        ("allowed_surface_json", "TEXT NOT NULL DEFAULT '{}'"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("cancel_reason", "TEXT NOT NULL DEFAULT ''"),
         ("parent_task_id", "TEXT"),
@@ -733,6 +819,67 @@ def init_db():
         ("is_builtin", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
+    _ensure_columns(conn, "task_contracts", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("source_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("goal", "TEXT NOT NULL DEFAULT ''"),
+        ("scope_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("non_scope_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("constraints_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("deliverables_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("acceptance_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("assumptions_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("evidence_required_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("allowed_surface_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("created_by", "TEXT NOT NULL DEFAULT 'system'"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "task_issues", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("issue_key", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT 'system'"),
+        ("stage", "TEXT NOT NULL DEFAULT ''"),
+        ("acceptance_item", "TEXT NOT NULL DEFAULT ''"),
+        ("severity", "TEXT NOT NULL DEFAULT 'medium'"),
+        ("category", "TEXT NOT NULL DEFAULT 'other'"),
+        ("summary", "TEXT NOT NULL DEFAULT ''"),
+        ("reproducer", "TEXT NOT NULL DEFAULT ''"),
+        ("evidence_gap", "TEXT NOT NULL DEFAULT ''"),
+        ("scope", "TEXT NOT NULL DEFAULT ''"),
+        ("fix_hint", "TEXT NOT NULL DEFAULT ''"),
+        ("status", "TEXT NOT NULL DEFAULT 'open'"),
+        ("resolution", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt_id", "TEXT"),
+        ("first_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ("last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ("resolved_at", "TEXT"),
+        ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ])
+    _ensure_columns(conn, "task_attempts", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("stage", "TEXT NOT NULL DEFAULT ''"),
+        ("outcome", "TEXT NOT NULL DEFAULT ''"),
+        ("execution_phase", "TEXT NOT NULL DEFAULT ''"),
+        ("retry_strategy", "TEXT NOT NULL DEFAULT ''"),
+        ("failure_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("same_fingerprint_streak", "INTEGER NOT NULL DEFAULT 0"),
+        ("summary", "TEXT NOT NULL DEFAULT ''"),
+        ("artifact_path", "TEXT"),
+        ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("created_by", "TEXT NOT NULL DEFAULT 'system'"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
+    _ensure_columns(conn, "task_evidence", [
+        ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        ("stage", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt_id", "TEXT"),
+        ("summary", "TEXT NOT NULL DEFAULT ''"),
+        ("evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("artifact_path", "TEXT"),
+        ("created_by", "TEXT NOT NULL DEFAULT 'system'"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ])
 
     # Build indexes after column backfill to keep old DBs migration-safe.
     conn.execute(
@@ -751,13 +898,19 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_project_id ON agent_outputs(project_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_created_at ON agent_outputs(created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_priority_updated ON tasks(project_id, priority, updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim_cooldown ON tasks(status, archived, cooldown_until, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_task ON task_dependencies(task_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_contracts_task_version ON task_contracts(task_id, version DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_issues_task_status ON task_issues(task_id, status, last_seen_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_attempts_task_created ON task_attempts(task_id, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_evidence_task_created ON task_evidence(task_id, created_at DESC)")
 
     _seed_admin_user(conn)
     _cleanup_expired_sessions(conn)
     _seed_builtin_agents(conn)
     _cleanup_orphan_agent_outputs(conn)
+    _backfill_task_contracts(conn)
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
     _backfill_subtask_order(conn)
@@ -1978,6 +2131,542 @@ def _append_feedback_entry(
     return True
 
 
+def _coerce_json_list(raw) -> list:
+    data = raw
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            return []
+        try:
+            data = json.loads(txt)
+        except Exception:
+            return []
+    return data if isinstance(data, list) else []
+
+
+def _coerce_json_dict(raw) -> dict:
+    data = raw
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            return {}
+        try:
+            data = json.loads(txt)
+        except Exception:
+            return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _json_dump(value) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _normalize_contract_row(row) -> dict | None:
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "task_id": str(data.get("task_id") or "").strip(),
+        "version": int(data.get("version") or 0),
+        "source_hash": str(data.get("source_hash") or "").strip(),
+        "goal": str(data.get("goal") or "").strip(),
+        "scope": _coerce_json_list(data.get("scope_json")),
+        "non_scope": _coerce_json_list(data.get("non_scope_json")),
+        "constraints": _coerce_json_list(data.get("constraints_json")),
+        "deliverables": _coerce_json_list(data.get("deliverables_json")),
+        "acceptance": _coerce_json_list(data.get("acceptance_json")),
+        "assumptions": _coerce_json_list(data.get("assumptions_json")),
+        "evidence_required": _coerce_json_list(data.get("evidence_required_json")),
+        "allowed_surface": normalize_allowed_surface(data.get("allowed_surface_json")),
+        "created_by": str(data.get("created_by") or "").strip() or "system",
+        "created_at": str(data.get("created_at") or "").strip(),
+    }
+
+
+def _task_contract_source_hash(title: str, description: str) -> str:
+    seed = f"{str(title or '').strip()}\n{str(description or '').strip()}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+
+def _latest_task_contract_in_conn(conn, task_id: str):
+    return conn.execute(
+        """
+        SELECT *
+          FROM task_contracts
+         WHERE task_id=?
+         ORDER BY version DESC, created_at DESC
+         LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+
+
+def _sync_task_contract_in_conn(
+    conn,
+    *,
+    task_id: str,
+    title: str,
+    description: str,
+    created_by: str = "system",
+) -> dict | None:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+    normalized_description = str(description or "").strip()
+    if not normalized_description:
+        return None
+
+    source_hash = _task_contract_source_hash(title, normalized_description)
+    latest = _latest_task_contract_in_conn(conn, task_id)
+    latest_normalized = _normalize_contract_row(latest)
+    if latest_normalized and latest_normalized.get("source_hash") == source_hash:
+        contract_row = latest_normalized
+    else:
+        contract = extract_task_contract_from_description(normalized_description)
+        version = int((latest["version"] if latest else 0) or 0) + 1
+        cid = str(uuid.uuid4())
+        now = _now()
+        conn.execute(
+            """
+            INSERT INTO task_contracts (
+                id, task_id, version, source_hash, goal,
+                scope_json, non_scope_json, constraints_json,
+                deliverables_json, acceptance_json, assumptions_json,
+                evidence_required_json, allowed_surface_json,
+                created_by, created_at
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                cid,
+                task_id,
+                version,
+                source_hash,
+                str(contract.get("goal") or "").strip(),
+                _json_dump(contract.get("scope") or []),
+                _json_dump(contract.get("non_scope") or []),
+                _json_dump(contract.get("constraints") or []),
+                _json_dump(contract.get("deliverables") or []),
+                _json_dump(contract.get("acceptance") or []),
+                _json_dump(contract.get("assumptions") or []),
+                _json_dump(contract.get("evidence_required") or []),
+                _json_dump(contract.get("allowed_surface") or {}),
+                str(created_by or "system")[:80] or "system",
+                now,
+            ),
+        )
+        contract_row = _normalize_contract_row(
+            conn.execute("SELECT * FROM task_contracts WHERE id=?", (cid,)).fetchone()
+        )
+
+    task_row = conn.execute(
+        "SELECT allowed_surface_json FROM tasks WHERE id=?",
+        (task_id,),
+    ).fetchone()
+    existing_allowed_surface = normalize_allowed_surface(
+        task_row["allowed_surface_json"] if task_row else {}
+    )
+    next_allowed_surface = existing_allowed_surface
+    if not any(existing_allowed_surface.values()):
+        next_allowed_surface = normalize_allowed_surface(contract_row.get("allowed_surface") or {})
+    conn.execute(
+        """
+        UPDATE tasks
+           SET current_contract_id=?,
+               allowed_surface_json=?,
+               updated_at=?
+         WHERE id=?
+        """,
+        (
+            contract_row.get("id"),
+            _json_dump(next_allowed_surface),
+            _now(),
+            task_id,
+        ),
+    )
+    return contract_row
+
+
+def _backfill_task_contracts(conn) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, title, description
+          FROM tasks
+         WHERE TRIM(COALESCE(description, '')) != ''
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            _sync_task_contract_in_conn(
+                conn,
+                task_id=row["id"],
+                title=row["title"],
+                description=row["description"],
+                created_by="migration",
+            )
+        except Exception:
+            continue
+
+
+def _normalize_issue_row(row) -> dict | None:
+    if not row:
+        return None
+    data = dict(row)
+    resolved_at = str(data.get("resolved_at") or "").strip()
+    status = str(data.get("status") or "open").strip().lower() or "open"
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "task_id": str(data.get("task_id") or "").strip(),
+        "issue_id": str(data.get("issue_key") or "").strip(),
+        "source": str(data.get("source") or "").strip() or "system",
+        "stage": str(data.get("stage") or "").strip(),
+        "acceptance_item": str(data.get("acceptance_item") or "").strip(),
+        "severity": str(data.get("severity") or "medium").strip().lower(),
+        "category": str(data.get("category") or "other").strip().lower(),
+        "summary": str(data.get("summary") or "").strip(),
+        "reproducer": str(data.get("reproducer") or "").strip(),
+        "evidence_gap": str(data.get("evidence_gap") or "").strip(),
+        "scope": str(data.get("scope") or "").strip(),
+        "fix_hint": str(data.get("fix_hint") or "").strip(),
+        "status": status,
+        "resolution": str(data.get("resolution") or "").strip(),
+        "attempt_id": str(data.get("attempt_id") or "").strip(),
+        "first_seen_at": str(data.get("first_seen_at") or "").strip(),
+        "last_seen_at": str(data.get("last_seen_at") or "").strip(),
+        "resolved_at": resolved_at,
+        "metadata": _coerce_json_dict(data.get("metadata_json")),
+        "resolved": bool(resolved_at) or status not in UNRESOLVED_ISSUE_STATUSES,
+    }
+
+
+def _list_task_issues_in_conn(
+    conn,
+    task_id: str,
+    *,
+    include_resolved: bool = True,
+) -> list[dict]:
+    sql = "SELECT * FROM task_issues WHERE task_id=?"
+    params: list[object] = [task_id]
+    if not include_resolved:
+        sql += " AND (resolved_at IS NULL OR TRIM(COALESCE(resolved_at, ''))='') AND status NOT IN ('resolved', 'wont_fix')"
+    sql += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, last_seen_at DESC, first_seen_at ASC"
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [item for item in (_normalize_issue_row(row) for row in rows) if item]
+
+
+def _resolve_task_issues_in_conn(
+    conn,
+    task_id: str,
+    *,
+    source: str | None = None,
+    stage: str | None = None,
+    resolution: str,
+    attempt_id: str = "",
+) -> int:
+    where = [
+        "task_id=?",
+        "(resolved_at IS NULL OR TRIM(COALESCE(resolved_at, ''))='')",
+        "status NOT IN ('resolved', 'wont_fix')",
+    ]
+    params: list[object] = [task_id]
+    if source:
+        where.append("source=?")
+        params.append(source)
+    if stage:
+        where.append("stage=?")
+        params.append(stage)
+    now = _now()
+    sql = (
+        "UPDATE task_issues SET status='resolved', resolution=?, resolved_at=?, "
+        "last_seen_at=?, attempt_id=CASE WHEN ? != '' THEN ? ELSE attempt_id END "
+        f"WHERE {' AND '.join(where)}"
+    )
+    cur = conn.execute(sql, (resolution[:160], now, now, attempt_id, attempt_id, *params))
+    return int(cur.rowcount or 0)
+
+
+def _sync_task_issues_in_conn(
+    conn,
+    *,
+    task_id: str,
+    source: str,
+    stage: str,
+    issues: list[dict],
+    attempt_id: str = "",
+    resolve_missing: bool = True,
+) -> list[dict]:
+    normalized = normalize_issue_list(issues)
+    existing_rows = conn.execute(
+        "SELECT * FROM task_issues WHERE task_id=? AND source=? AND stage=?",
+        (task_id, source, stage),
+    ).fetchall()
+    existing_by_key = {str(row["issue_key"] or "").strip(): row for row in existing_rows}
+    now = _now()
+    seen_keys: set[str] = set()
+    for item in normalized:
+        issue_key = str(item.get("issue_id") or "").strip()
+        if not issue_key:
+            continue
+        seen_keys.add(issue_key)
+        existing = existing_by_key.get(issue_key)
+        status = str(item.get("status") or "open").strip().lower()
+        if status not in {"resolved", "wont_fix"}:
+            if existing and not str(existing["resolved_at"] or "").strip():
+                if status == "new":
+                    status = "persisting"
+            elif status not in {"new", "persisting"}:
+                status = "new"
+        resolved_at = now if status in {"resolved", "wont_fix"} else None
+        resolution = "reviewer_marked_resolved" if status == "resolved" else ("wont_fix" if status == "wont_fix" else "")
+        metadata_json = _json_dump({"raw_status": item.get("status") or status})
+        if existing:
+            conn.execute(
+                """
+                UPDATE task_issues
+                   SET acceptance_item=?,
+                       severity=?,
+                       category=?,
+                       summary=?,
+                       reproducer=?,
+                       evidence_gap=?,
+                       scope=?,
+                       fix_hint=?,
+                       status=?,
+                       resolution=?,
+                       attempt_id=CASE WHEN ? != '' THEN ? ELSE attempt_id END,
+                       last_seen_at=?,
+                       resolved_at=?,
+                       metadata_json=?
+                 WHERE id=?
+                """,
+                (
+                    item.get("acceptance_item", ""),
+                    item.get("severity", "medium"),
+                    item.get("category", "other"),
+                    item.get("summary", ""),
+                    item.get("reproducer", ""),
+                    item.get("evidence_gap", ""),
+                    item.get("scope", ""),
+                    item.get("fix_hint", ""),
+                    status,
+                    resolution,
+                    attempt_id,
+                    attempt_id,
+                    now,
+                    resolved_at,
+                    metadata_json,
+                    existing["id"],
+                ),
+            )
+        else:
+            issue_row_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO task_issues (
+                    id, task_id, issue_key, source, stage,
+                    acceptance_item, severity, category, summary,
+                    reproducer, evidence_gap, scope, fix_hint,
+                    status, resolution, attempt_id,
+                    first_seen_at, last_seen_at, resolved_at, metadata_json
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    issue_row_id,
+                    task_id,
+                    issue_key,
+                    source,
+                    stage,
+                    item.get("acceptance_item", ""),
+                    item.get("severity", "medium"),
+                    item.get("category", "other"),
+                    item.get("summary", ""),
+                    item.get("reproducer", ""),
+                    item.get("evidence_gap", ""),
+                    item.get("scope", ""),
+                    item.get("fix_hint", ""),
+                    status,
+                    resolution,
+                    attempt_id or None,
+                    now,
+                    now,
+                    resolved_at,
+                    metadata_json,
+                ),
+            )
+    if resolve_missing:
+        for row in existing_rows:
+            issue_key = str(row["issue_key"] or "").strip()
+            if issue_key in seen_keys:
+                continue
+            if str(row["resolved_at"] or "").strip():
+                continue
+            conn.execute(
+                """
+                UPDATE task_issues
+                   SET status='resolved',
+                       resolution='absent_from_latest_review',
+                       resolved_at=?,
+                       last_seen_at=?,
+                       attempt_id=CASE WHEN ? != '' THEN ? ELSE attempt_id END
+                 WHERE id=?
+                """,
+                (now, now, attempt_id, attempt_id, row["id"]),
+            )
+    return _list_task_issues_in_conn(conn, task_id, include_resolved=False)
+
+
+def _normalize_attempt_row(row) -> dict | None:
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "task_id": str(data.get("task_id") or "").strip(),
+        "stage": str(data.get("stage") or "").strip(),
+        "outcome": str(data.get("outcome") or "").strip(),
+        "execution_phase": str(data.get("execution_phase") or "").strip(),
+        "retry_strategy": str(data.get("retry_strategy") or "").strip(),
+        "failure_fingerprint": str(data.get("failure_fingerprint") or "").strip(),
+        "same_fingerprint_streak": int(data.get("same_fingerprint_streak") or 0),
+        "summary": str(data.get("summary") or "").strip(),
+        "artifact_path": str(data.get("artifact_path") or "").strip(),
+        "metadata": _coerce_json_dict(data.get("metadata_json")),
+        "created_by": str(data.get("created_by") or "").strip() or "system",
+        "created_at": str(data.get("created_at") or "").strip(),
+    }
+
+
+def _add_task_attempt_in_conn(
+    conn,
+    *,
+    task_id: str,
+    stage: str,
+    outcome: str,
+    execution_phase: str = "",
+    retry_strategy: str = "",
+    failure_fingerprint: str = "",
+    same_fingerprint_streak: int = 0,
+    summary: str = "",
+    artifact_path: str | None = None,
+    metadata: dict | None = None,
+    created_by: str = "system",
+) -> dict:
+    attempt_id = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO task_attempts (
+            id, task_id, stage, outcome, execution_phase, retry_strategy,
+            failure_fingerprint, same_fingerprint_streak, summary, artifact_path,
+            metadata_json, created_by, created_at
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            attempt_id,
+            task_id,
+            str(stage or "")[:120],
+            str(outcome or "")[:80],
+            str(execution_phase or "")[:80],
+            str(retry_strategy or "")[:80],
+            str(failure_fingerprint or "")[:80],
+            max(0, int(same_fingerprint_streak or 0)),
+            str(summary or "")[:1200],
+            str(artifact_path or "")[:1000] or None,
+            _json_dump(metadata or {}),
+            str(created_by or "system")[:80] or "system",
+            now,
+        ),
+    )
+    conn.execute(
+        "UPDATE tasks SET latest_attempt_id=?, updated_at=? WHERE id=?",
+        (attempt_id, now, task_id),
+    )
+    row = conn.execute("SELECT * FROM task_attempts WHERE id=?", (attempt_id,)).fetchone()
+    normalized = _normalize_attempt_row(row) or {}
+    open_issues = _list_task_issues_in_conn(conn, task_id, include_resolved=False)
+    conn.execute(
+        """
+        UPDATE tasks
+           SET retry_strategy=?,
+               failure_fingerprint=?,
+               same_fingerprint_streak=?,
+               cooldown_until=?,
+               execution_phase=?
+         WHERE id=?
+        """,
+        (
+            retry_strategy or RETRY_STRATEGY_DEFAULT,
+            failure_fingerprint,
+            max(0, int(same_fingerprint_streak or 0)),
+            cooldown_until_for_streak(same_fingerprint_streak),
+            execution_phase or ("converge" if open_issues else "explore"),
+            task_id,
+        ),
+    )
+    return normalized
+
+
+def _normalize_evidence_row(row) -> dict | None:
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "task_id": str(data.get("task_id") or "").strip(),
+        "stage": str(data.get("stage") or "").strip(),
+        "attempt_id": str(data.get("attempt_id") or "").strip(),
+        "summary": str(data.get("summary") or "").strip(),
+        "bundle": _coerce_json_dict(data.get("evidence_json")),
+        "artifact_path": str(data.get("artifact_path") or "").strip(),
+        "created_by": str(data.get("created_by") or "").strip() or "system",
+        "created_at": str(data.get("created_at") or "").strip(),
+    }
+
+
+def _add_task_evidence_in_conn(
+    conn,
+    *,
+    task_id: str,
+    stage: str,
+    summary: str,
+    bundle: dict,
+    attempt_id: str = "",
+    artifact_path: str | None = None,
+    created_by: str = "system",
+) -> dict:
+    evidence_id = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO task_evidence (
+            id, task_id, stage, attempt_id, summary,
+            evidence_json, artifact_path, created_by, created_at
+        )
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            evidence_id,
+            task_id,
+            str(stage or "")[:120],
+            attempt_id or None,
+            str(summary or "")[:1200],
+            _json_dump(bundle or {}),
+            str(artifact_path or "")[:1000] or None,
+            str(created_by or "system")[:80] or "system",
+            now,
+        ),
+    )
+    conn.execute(
+        "UPDATE tasks SET latest_evidence_id=?, updated_at=? WHERE id=?",
+        (evidence_id, now, task_id),
+    )
+    row = conn.execute("SELECT * FROM task_evidence WHERE id=?", (evidence_id,)).fetchone()
+    return _normalize_evidence_row(row) or {}
+
+
 def reset_stuck_tasks():
     """
     On server startup, reset tasks left in transient agent states
@@ -2774,6 +3463,124 @@ def _fill_cancel_reasons_from_logs_in_conn(
         )
 
 
+def _attach_autonomy_metadata_to_tasks_in_conn(conn, task_rows: list[dict]) -> None:
+    task_ids = [str(item.get("id") or "").strip() for item in (task_rows or []) if str(item.get("id") or "").strip()]
+    if not task_ids:
+        return
+
+    placeholders = ",".join("?" for _ in task_ids)
+    issue_rows = conn.execute(
+        f"""
+        SELECT task_id, COUNT(1) AS cnt
+          FROM task_issues
+         WHERE task_id IN ({placeholders})
+           AND (resolved_at IS NULL OR TRIM(COALESCE(resolved_at, ''))='')
+           AND status NOT IN ('resolved', 'wont_fix')
+         GROUP BY task_id
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    open_issue_counts = {str(row["task_id"]): int(row["cnt"] or 0) for row in issue_rows}
+
+    full_rows = [item for item in task_rows if "description" in item]
+    latest_contract_rows = conn.execute(
+        f"""
+        SELECT c.*
+          FROM task_contracts c
+          JOIN (
+            SELECT task_id, MAX(version) AS max_version
+              FROM task_contracts
+             WHERE task_id IN ({placeholders})
+             GROUP BY task_id
+          ) latest
+            ON latest.task_id = c.task_id
+           AND latest.max_version = c.version
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    latest_contract_by_task = {
+        str(row["task_id"]): normalized
+        for row in latest_contract_rows
+        if (normalized := _normalize_contract_row(row))
+    }
+
+    latest_evidence_rows = conn.execute(
+        f"""
+        SELECT e.*
+          FROM task_evidence e
+          JOIN (
+            SELECT task_id, MAX(created_at) AS created_at
+              FROM task_evidence
+             WHERE task_id IN ({placeholders})
+             GROUP BY task_id
+          ) latest
+            ON latest.task_id = e.task_id
+           AND latest.created_at = e.created_at
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    latest_evidence_by_task = {
+        str(row["task_id"]): normalized
+        for row in latest_evidence_rows
+        if (normalized := _normalize_evidence_row(row))
+    }
+
+    latest_attempt_rows = conn.execute(
+        f"""
+        SELECT a.*
+          FROM task_attempts a
+          JOIN (
+            SELECT task_id, MAX(created_at) AS created_at
+              FROM task_attempts
+             WHERE task_id IN ({placeholders})
+             GROUP BY task_id
+          ) latest
+            ON latest.task_id = a.task_id
+           AND latest.created_at = a.created_at
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    latest_attempt_by_task = {
+        str(row["task_id"]): normalized
+        for row in latest_attempt_rows
+        if (normalized := _normalize_attempt_row(row))
+    }
+
+    open_issue_rows = conn.execute(
+        f"""
+        SELECT *
+          FROM task_issues
+         WHERE task_id IN ({placeholders})
+           AND (resolved_at IS NULL OR TRIM(COALESCE(resolved_at, ''))='')
+           AND status NOT IN ('resolved', 'wont_fix')
+         ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                  last_seen_at DESC,
+                  first_seen_at ASC
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    open_issues_by_task: dict[str, list[dict]] = {}
+    for row in open_issue_rows:
+        issue = _normalize_issue_row(row)
+        if not issue:
+            continue
+        open_issues_by_task.setdefault(str(issue["task_id"]), []).append(issue)
+
+    for item in task_rows:
+        task_id = str(item.get("id") or "").strip()
+        if not task_id:
+            continue
+        item["open_issue_count"] = open_issue_counts.get(task_id, 0)
+        if "allowed_surface_json" in item:
+            item["allowed_surface"] = normalize_allowed_surface(item.get("allowed_surface_json"))
+        if "description" not in item:
+            continue
+        item["current_contract"] = latest_contract_by_task.get(task_id)
+        item["open_issues"] = open_issues_by_task.get(task_id, [])[:12]
+        item["latest_evidence"] = latest_evidence_by_task.get(task_id)
+        item["latest_attempt"] = latest_attempt_by_task.get(task_id)
+
+
 def _enrich_task_rows_in_conn(
     conn,
     task_rows: list[dict],
@@ -2786,6 +3593,7 @@ def _enrich_task_rows_in_conn(
         persist=persist_cancel_reason,
     )
     _attach_dependency_state_to_tasks_in_conn(conn, task_rows)
+    _attach_autonomy_metadata_to_tasks_in_conn(conn, task_rows)
 
 
 def _backfill_cancel_reasons_from_logs(conn) -> None:
@@ -2859,6 +3667,13 @@ def create_task(title: str, description: str, project_id: str | None = None,
                 dependencies=dependencies,
                 created_by=created_by,
             )
+        _sync_task_contract_in_conn(
+            conn,
+            task_id=tid,
+            title=title,
+            description=description,
+            created_by=str(created_by or "system")[:80] or "system",
+        )
         row = conn.execute(
             _join_project("SELECT * FROM tasks WHERE id=?"), (tid,)
         ).fetchone()
@@ -3130,6 +3945,8 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     current = conn.execute(
         """
         SELECT
+            title,
+            description,
             status,
             assignee,
             assigned_agent,
@@ -3137,6 +3954,13 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
             claim_run_id,
             lease_token,
             lease_expires_at,
+            execution_phase,
+            retry_strategy,
+            failure_fingerprint,
+            same_fingerprint_streak,
+            cooldown_until,
+            current_contract_id,
+            allowed_surface_json,
             review_feedback,
             review_feedback_history
         FROM tasks
@@ -3164,9 +3988,26 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
 
     if "priority" in fields:
         fields["priority"] = _normalize_priority_value(fields.get("priority"), default=DEFAULT_TASK_PRIORITY)
+    if "same_fingerprint_streak" in fields:
+        try:
+            fields["same_fingerprint_streak"] = max(0, int(fields.get("same_fingerprint_streak") or 0))
+        except Exception:
+            fields["same_fingerprint_streak"] = 0
+    if "allowed_surface_json" in fields:
+        fields["allowed_surface_json"] = _json_dump(normalize_allowed_surface(fields.get("allowed_surface_json")))
+    for key in ("execution_phase", "retry_strategy", "failure_fingerprint"):
+        if key in fields:
+            fields[key] = str(fields.get(key) or "").strip()
+    if "cooldown_until" in fields:
+        cooldown_until = str(fields.get("cooldown_until") or "").strip()
+        fields["cooldown_until"] = cooldown_until or None
 
     target_status = str(fields.get("status") or current["status"] or "").strip()
     now = _now()
+    needs_contract_sync = (
+        "description" in fields
+        or not str(current["current_contract_id"] or "").strip()
+    )
 
     # ── Feedback history maintenance ────────────────────────────────────────
     history = _parse_feedback_history(current["review_feedback_history"])
@@ -3228,6 +4069,14 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
     conn.execute(f"UPDATE tasks SET {set_clause} WHERE id=?", values)
+    if needs_contract_sync:
+        _sync_task_contract_in_conn(
+            conn,
+            task_id=task_id,
+            title=str(fields.get("title") if "title" in fields else current["title"] or ""),
+            description=str(fields.get("description") if "description" in fields else current["description"] or ""),
+            created_by=feedback_actor or feedback_source or "system",
+        )
     row = conn.execute(
         _join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)
     ).fetchone()
@@ -3460,8 +4309,13 @@ def claim_task(
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        where = ["t.status=?", "t.archived=0"]
-        params: list[str] = [status]
+        now = _now()
+        where = [
+            "t.status=?",
+            "t.archived=0",
+            "(TRIM(COALESCE(t.cooldown_until, ''))='' OR t.cooldown_until <= ?)",
+        ]
+        params: list[str] = [status, now]
         normalized_agent_key = str(agent_key or "").strip().lower()
 
         if project_id:
@@ -3576,7 +4430,6 @@ def claim_task(
             conn.rollback()
             return None
 
-        now = _now()
         run_id = str(uuid.uuid4())
         lease_token = str(uuid.uuid4())
         lease_expires_at = _lease_deadline_iso(lease_ttl_secs)
@@ -4690,6 +5543,9 @@ def transition_task(
         created_handoff = None
         created_log = None
         created_patchset = None
+        created_attempt = None
+        created_evidence = None
+        handoff_payload = handoff.get("payload") if isinstance((handoff or {}).get("payload"), dict) else {}
         if not is_cancelled and handoff:
             created_handoff = _add_handoff_in_conn(
                 conn,
@@ -4703,7 +5559,7 @@ def transition_task(
                 summary=str(handoff.get("summary") or ""),
                 commit_hash=handoff.get("commit_hash"),
                 conclusion=handoff.get("conclusion"),
-                payload=handoff.get("payload") if isinstance(handoff.get("payload"), dict) else {},
+                payload=handoff_payload,
                 artifact_path=handoff.get("artifact_path"),
             )
         if not is_cancelled and patchset:
@@ -4718,6 +5574,110 @@ def transition_task(
                 task = dict(row) if row else task
                 if task:
                     _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
+        if not is_cancelled and handoff_payload:
+            attempt_payload = handoff_payload.get("attempt")
+            if isinstance(attempt_payload, dict):
+                failure_fingerprint = str(
+                    attempt_payload.get("failure_fingerprint")
+                    or attempt_payload.get("fingerprint")
+                    or ""
+                ).strip()
+                if not failure_fingerprint:
+                    failure_fingerprint = compute_failure_fingerprint(
+                        stage=str(attempt_payload.get("stage") or handoff.get("stage") or "").strip(),
+                        summary=str(attempt_payload.get("summary") or handoff.get("summary") or "").strip(),
+                        output=str(attempt_payload.get("output") or ""),
+                        extra=str(attempt_payload.get("conclusion") or handoff.get("conclusion") or ""),
+                    )
+                created_attempt = _add_task_attempt_in_conn(
+                    conn,
+                    task_id=task_id,
+                    stage=str(attempt_payload.get("stage") or handoff.get("stage") or "").strip(),
+                    outcome=str(attempt_payload.get("outcome") or "").strip(),
+                    execution_phase=str(
+                        attempt_payload.get("execution_phase")
+                        or task.get("execution_phase")
+                        or ""
+                    ).strip(),
+                    retry_strategy=str(
+                        attempt_payload.get("retry_strategy")
+                        or task.get("retry_strategy")
+                        or RETRY_STRATEGY_DEFAULT
+                    ).strip(),
+                    failure_fingerprint=failure_fingerprint,
+                    same_fingerprint_streak=int(
+                        attempt_payload.get("same_fingerprint_streak")
+                        or task.get("same_fingerprint_streak")
+                        or 0
+                    ),
+                    summary=str(attempt_payload.get("summary") or handoff.get("summary") or "").strip(),
+                    artifact_path=str(
+                        attempt_payload.get("artifact_path")
+                        or handoff.get("artifact_path")
+                        or ""
+                    ).strip()
+                    or None,
+                    metadata=attempt_payload.get("metadata")
+                    if isinstance(attempt_payload.get("metadata"), dict)
+                    else {},
+                    created_by=str(handoff.get("from_agent") or "system").strip() or "system",
+                )
+            evidence_bundle = handoff_payload.get("evidence_bundle")
+            if isinstance(evidence_bundle, dict):
+                created_evidence = _add_task_evidence_in_conn(
+                    conn,
+                    task_id=task_id,
+                    stage=str(handoff.get("stage") or "").strip(),
+                    summary=str(
+                        handoff_payload.get("evidence_summary")
+                        or handoff.get("summary")
+                        or ""
+                    ).strip(),
+                    bundle=evidence_bundle,
+                    attempt_id=str((created_attempt or {}).get("id") or handoff_payload.get("attempt_id") or "").strip(),
+                    artifact_path=str(
+                        handoff_payload.get("evidence_artifact_path")
+                        or handoff.get("artifact_path")
+                        or ""
+                    ).strip()
+                    or None,
+                    created_by=str(handoff.get("from_agent") or "system").strip() or "system",
+                )
+            issues_payload = handoff_payload.get("issues")
+            if isinstance(issues_payload, list):
+                _sync_task_issues_in_conn(
+                    conn,
+                    task_id=task_id,
+                    source=str(handoff.get("from_agent") or "system").strip() or "system",
+                    stage=str(handoff.get("stage") or "").strip(),
+                    issues=issues_payload,
+                    attempt_id=str((created_attempt or {}).get("id") or ""),
+                    resolve_missing=bool(handoff_payload.get("resolve_missing_issues", True)),
+                )
+            resolve_sources_raw = handoff_payload.get("resolve_issue_sources")
+            if handoff_payload.get("resolve_open_issues"):
+                resolve_sources = (
+                    [str(handoff.get("from_agent") or "").strip()]
+                    if not isinstance(resolve_sources_raw, list)
+                    else [str(item or "").strip() for item in resolve_sources_raw if str(item or "").strip()]
+                )
+                resolution = str(handoff_payload.get("issue_resolution_reason") or "status_advanced").strip()
+                if resolve_sources:
+                    for source in resolve_sources:
+                        _resolve_task_issues_in_conn(
+                            conn,
+                            task_id,
+                            source=source,
+                            resolution=resolution,
+                            attempt_id=str((created_attempt or {}).get("id") or ""),
+                        )
+                else:
+                    _resolve_task_issues_in_conn(
+                        conn,
+                        task_id,
+                        resolution=resolution,
+                        attempt_id=str((created_attempt or {}).get("id") or ""),
+                    )
         if not is_cancelled and log:
             created_log = _add_log_in_conn(
                 conn,
@@ -4725,12 +5685,18 @@ def transition_task(
                 agent=str(log.get("agent") or "system").strip() or "system",
                 message=str(log.get("message") or ""),
             )
+        row = conn.execute(_join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)).fetchone()
+        task = dict(row) if row else task
+        if task:
+            _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
         conn.commit()
         return {
             "task": task,
             "handoff": created_handoff,
             "log": created_log,
             "patchset": created_patchset,
+            "attempt": created_attempt,
+            "evidence": created_evidence,
         }
     except Exception:
         conn.rollback()
@@ -4756,6 +5722,59 @@ def get_handoffs(task_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_task_contract(task_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        row = _latest_task_contract_in_conn(conn, task_id)
+        return _normalize_contract_row(row)
+    finally:
+        conn.close()
+
+
+def list_task_contracts(task_id: str) -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_contracts WHERE task_id=? ORDER BY version DESC, created_at DESC",
+            (task_id,),
+        ).fetchall()
+        return [item for item in (_normalize_contract_row(row) for row in rows) if item]
+    finally:
+        conn.close()
+
+
+def list_task_issues(task_id: str, *, include_resolved: bool = True) -> list[dict]:
+    conn = get_conn()
+    try:
+        return _list_task_issues_in_conn(conn, task_id, include_resolved=include_resolved)
+    finally:
+        conn.close()
+
+
+def list_task_attempts(task_id: str, *, limit: int = 20) -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_attempts WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+            (task_id, max(1, int(limit or 20))),
+        ).fetchall()
+        return [item for item in (_normalize_attempt_row(row) for row in rows) if item]
+    finally:
+        conn.close()
+
+
+def list_task_evidence(task_id: str, *, limit: int = 20) -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_evidence WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+            (task_id, max(1, int(limit or 20))),
+        ).fetchall()
+        return [item for item in (_normalize_evidence_row(row) for row in rows) if item]
+    finally:
+        conn.close()
 
 
 def clear_task_agent_refs_for_deleted_agent(agent_key: str, working_status: str | None = None) -> list[dict]:

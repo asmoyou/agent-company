@@ -2,6 +2,13 @@ import asyncio
 import json
 
 from base import BaseAgent, is_review_enabled
+from task_intelligence import (
+    compute_failure_fingerprint,
+    detect_surface_from_changed_files,
+    find_surface_violations,
+    next_retry_strategy,
+    normalize_allowed_surface,
+)
 
 
 class GenericAgent(BaseAgent):
@@ -99,6 +106,7 @@ class GenericAgent(BaseAgent):
     async def _transition_delivery_failure(
         self,
         *,
+        task: dict,
         task_id: str,
         prev_status: str,
         failure_stage: str,
@@ -116,10 +124,35 @@ class GenericAgent(BaseAgent):
             if retry_limit > 0
             else 1
         )
+        failure_fingerprint = compute_failure_fingerprint(
+            stage=failure_stage,
+            summary=failure_summary,
+            extra=json.dumps(failure_payload, ensure_ascii=False)[:800],
+        )
+        same_failure_streak = self._same_failure_streak(task, failure_fingerprint)
+        retry_strategy = next_retry_strategy(
+            current_strategy=self._current_retry_strategy(task),
+            failure_stage=failure_stage,
+            same_fingerprint_streak=same_failure_streak,
+            open_issue_count=int(task.get("open_issue_count") or 0),
+        )
         payload = {
             **failure_payload,
             "delivery_retry_count": retry_count,
             "delivery_retry_limit": retry_limit,
+            "attempt": {
+                "stage": failure_stage,
+                "outcome": "delivery_failed",
+                "execution_phase": self._current_execution_phase(task),
+                "retry_strategy": retry_strategy,
+                "failure_fingerprint": failure_fingerprint,
+                "same_fingerprint_streak": same_failure_streak,
+                "summary": failure_summary,
+                "metadata": {
+                    "retry_reason": retry_reason,
+                    "delivery_retry_count": retry_count,
+                },
+            },
         }
         if retry_limit > 0 and retry_count >= retry_limit:
             await self.transition_task(
@@ -236,6 +269,158 @@ class GenericAgent(BaseAgent):
         commit_hash = (await self.git("rev-parse", "--short", "HEAD", cwd=worktree_dev)).strip()
         return commit_hash, (commit_hash[:7] if commit_hash else display)
 
+    def _current_retry_strategy(self, task: dict) -> str:
+        return str(task.get("retry_strategy") or "default_implement").strip() or "default_implement"
+
+    def _current_execution_phase(self, task: dict, *, default: str = "explore") -> str:
+        open_issue_count = int(task.get("open_issue_count") or 0)
+        if open_issue_count > 0 or str(task.get("_claimed_from_status") or task.get("status") or "").strip().lower() == "needs_changes":
+            return "converge"
+        phase = str(task.get("execution_phase") or "").strip()
+        return phase or default
+
+    def _same_failure_streak(self, task: dict, fingerprint: str) -> int:
+        previous = str(task.get("failure_fingerprint") or "").strip()
+        streak = int(task.get("same_fingerprint_streak") or 0)
+        if previous and previous == fingerprint:
+            return streak + 1
+        return 1
+
+    def _build_pre_review_evidence_bundle(self, task: dict, patchset: dict) -> dict:
+        contract = self._extract_task_contract(task)
+        changed_files = patchset.get("changed_files") or []
+        current_surface = detect_surface_from_changed_files(changed_files)
+        allowed_surface = normalize_allowed_surface(
+            task.get("allowed_surface") or task.get("allowed_surface_json")
+        )
+        if not any(allowed_surface.values()):
+            current_contract = task.get("current_contract")
+            if isinstance(current_contract, dict):
+                allowed_surface = normalize_allowed_surface(current_contract.get("allowed_surface"))
+        if not any(allowed_surface.values()):
+            allowed_surface = current_surface
+
+        changed_paths = [str(item.get("path") or "").strip() for item in changed_files if isinstance(item, dict)]
+        changed_paths = [path for path in changed_paths if path]
+        changed_paths_lower = [path.lower() for path in changed_paths]
+        issues: list[dict] = []
+        acceptance_checks: list[dict] = []
+
+        deliverable_paths = normalize_allowed_surface({"files": (allowed_surface.get("files") or [])}).get("files") or []
+        for path in deliverable_paths[:24]:
+            if changed_paths and any(item == path or item.endswith(path) for item in changed_paths):
+                continue
+            issues.append(
+                {
+                    "issue_id": f"deliverable-{path}",
+                    "acceptance_item": "交付物",
+                    "severity": "medium",
+                    "category": "scope",
+                    "summary": f"预检未发现约定交付物变更：{path}",
+                    "reproducer": "检查本次 patchset changed_files",
+                    "evidence_gap": f"缺少与交付物 {path} 对应的变更证据",
+                    "scope": path,
+                    "fix_hint": "确认交付物是否已实现；若已实现，请补充对应文件变更或调整合同描述",
+                    "status": "new",
+                }
+            )
+
+        for item in contract.get("acceptance", []) or []:
+            lower = str(item or "").lower()
+            status = "inferred"
+            evidence = "patchset changed_files"
+            if any(token in lower for token in ("测试", "test", "pytest", "unit", "e2e", "integration")):
+                proved = any(
+                    "/test" in path
+                    or path.startswith("test")
+                    or path.startswith("tests/")
+                    for path in changed_paths_lower
+                )
+                status = "proved" if proved else "missing"
+                evidence = "test paths in patchset"
+                if not proved:
+                    issues.append(
+                        {
+                            "issue_id": f"acceptance-test-{len(issues)+1}",
+                            "acceptance_item": item,
+                            "severity": "high",
+                            "category": "coverage",
+                            "summary": "预检未发现与测试验收项对应的测试文件变更",
+                            "reproducer": "检查 patchset changed_files 是否包含 tests/ 或 test* 文件",
+                            "evidence_gap": "缺少测试文件或测试证据",
+                            "scope": "tests",
+                            "fix_hint": "优先补齐真实验收路径的测试，再重新送审",
+                            "status": "new",
+                        }
+                    )
+            elif any(token in lower for token in ("文档", "readme", "说明", ".md")):
+                proved = any(path.endswith(".md") for path in changed_paths_lower)
+                status = "proved" if proved else "missing"
+                evidence = "markdown/doc files in patchset"
+                if not proved:
+                    issues.append(
+                        {
+                            "issue_id": f"acceptance-doc-{len(issues)+1}",
+                            "acceptance_item": item,
+                            "severity": "medium",
+                            "category": "docs",
+                            "summary": "预检未发现与文档验收项对应的文档文件变更",
+                            "reproducer": "检查 patchset changed_files 是否包含 .md 文档",
+                            "evidence_gap": "缺少文档文件或文档证据",
+                            "scope": "docs",
+                            "fix_hint": "补齐 README/说明文档或提供更直接的行为证据",
+                            "status": "new",
+                        }
+                    )
+            acceptance_checks.append(
+                {
+                    "item": item,
+                    "status": status,
+                    "evidence": evidence,
+                }
+            )
+
+        surface_violations: list[str] = []
+        if str(task.get("_claimed_from_status") or task.get("status") or "").strip().lower() == "needs_changes":
+            surface_violations = find_surface_violations(allowed_surface, current_surface)
+            for violation in surface_violations:
+                issues.append(
+                    {
+                        "issue_id": f"surface-{len(issues)+1}",
+                        "acceptance_item": "allowed_surface",
+                        "severity": "high",
+                        "category": "scope",
+                        "summary": violation,
+                        "reproducer": "对比当前 patchset 交付面与冻结的 allowed_surface",
+                        "evidence_gap": violation,
+                        "scope": violation,
+                        "fix_hint": "移除越界交付面，或在需求合同中显式放行后再继续",
+                        "status": "persisting",
+                    }
+                )
+
+        missing_checks = [item for item in acceptance_checks if item["status"] == "missing"]
+        summary = (
+            f"预检完成：changed_files={len(changed_paths)}，"
+            f"missing_acceptance={len(missing_checks)}，"
+            f"surface_violations={len(surface_violations)}"
+        )
+        return {
+            "summary": summary,
+            "bundle": {
+                "contract_version": int(((task.get("current_contract") or {}).get("version") or 0)),
+                "changed_files": changed_files,
+                "acceptance_checks": acceptance_checks,
+                "current_surface": current_surface,
+                "allowed_surface": allowed_surface,
+                "surface_violations": surface_violations,
+                "missing_acceptance_checks": missing_checks,
+            },
+            "issues": issues,
+            "allowed_surface": current_surface if any(current_surface.values()) else allowed_surface,
+            "has_blockers": bool(issues),
+        }
+
     async def process_task(self, task: dict):
         task_id = task["id"]
         if await self.stop_if_task_cancelled(task_id, "开始处理前"):
@@ -256,6 +441,14 @@ class GenericAgent(BaseAgent):
             f"## 审查反馈（必须全部修复）\n\n{task['review_feedback']}"
             if is_rework else ""
         )
+        strategy_section = "\n\n".join(
+            section
+            for section in (
+                self.build_retry_strategy_block(task),
+                self.build_issue_ledger_block(task),
+            )
+            if str(section or "").strip()
+        )
 
         if self._prompt_tpl:
             try:
@@ -263,6 +456,7 @@ class GenericAgent(BaseAgent):
                     task_title=task["title"],
                     task_description=task["description"] or "(无额外描述)",
                     rework_section=rework_section,
+                    strategy_section=strategy_section,
                 )
             except KeyError:
                 prompt = self._prompt_tpl
@@ -273,6 +467,8 @@ class GenericAgent(BaseAgent):
                 f"{rework_section}\n\n"
                 "把所有输出写入文件，不要只输出文字。"
             )
+        if strategy_section and "{strategy_section}" not in self._prompt_tpl:
+            prompt += f"\n\n{strategy_section}\n"
         execution_contract = self.build_execution_contract_block(task)
         if execution_contract:
             prompt += f"\n\n{execution_contract}\n"
@@ -296,6 +492,20 @@ class GenericAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "CLI 失败后"):
                 return
             prev_status = task.get("_claimed_from_status", task.get("status"))
+            failure_stage = self._failure_stage()
+            failure_summary = f"CLI 执行失败（exit={returncode}）"
+            failure_fingerprint = compute_failure_fingerprint(
+                stage=failure_stage,
+                summary=failure_summary,
+                output=output,
+            )
+            same_failure_streak = self._same_failure_streak(task, failure_fingerprint)
+            retry_strategy = next_retry_strategy(
+                current_strategy=self._current_retry_strategy(task),
+                failure_stage=failure_stage,
+                same_fingerprint_streak=same_failure_streak,
+                open_issue_count=int(task.get("open_issue_count") or 0),
+            )
             await self.add_log(task_id, f"❌ CLI 执行失败（exit={returncode}），任务退回 {prev_status}")
             if output.strip():
                 await self.add_log(task_id, f"错误输出:\n{output[:800]}")
@@ -308,18 +518,37 @@ class GenericAgent(BaseAgent):
                 stage=f"{self.name}_failed",
                 metadata={"exit_code": returncode},
             )
+            update_fields = {"status": prev_status, "assignee": None}
+            if str(prev_status or "").strip().lower() in {"todo", "needs_changes"}:
+                update_fields["assigned_agent"] = self.name
+                update_fields["dev_agent"] = self.name
             await self.transition_task(
                 task_id,
-                fields={"status": prev_status, "assignee": None},
+                fields=update_fields,
                 handoff={
-                    "stage": f"{self.name}_failed",
+                    "stage": failure_stage,
                     "to_agent": self.name,
                     "status_from": prev_status,
                     "status_to": prev_status,
                     "title": f"{self._display_name} 执行失败",
-                    "summary": f"CLI 执行失败（exit={returncode}）",
+                    "summary": failure_summary,
                     "conclusion": f"{self._display_name} 执行失败，回退到 {prev_status}",
-                    "payload": {"exit_code": returncode},
+                    "payload": {
+                        "exit_code": returncode,
+                        "attempt": {
+                            "stage": failure_stage,
+                            "outcome": "cli_failed",
+                            "execution_phase": self._current_execution_phase(task),
+                            "retry_strategy": retry_strategy,
+                            "failure_fingerprint": failure_fingerprint,
+                            "same_fingerprint_streak": same_failure_streak,
+                            "summary": failure_summary,
+                            "metadata": {
+                                "exit_code": returncode,
+                                "output_excerpt": output[-1200:].strip(),
+                            },
+                        },
+                    },
                 },
                 log_message=f"❌ CLI 执行失败（exit={returncode}），任务退回 {prev_status}",
             )
@@ -365,6 +594,18 @@ class GenericAgent(BaseAgent):
                     commit_display=commit_display,
                     dirty_status=dirty_status,
                 )
+                dirty_fingerprint = compute_failure_fingerprint(
+                    stage=dirty_spec["stage"],
+                    summary=dirty_spec["summary"],
+                    extra=diff_stat,
+                )
+                dirty_streak = self._same_failure_streak(task, dirty_fingerprint)
+                dirty_strategy = next_retry_strategy(
+                    current_strategy=self._current_retry_strategy(task),
+                    failure_stage=dirty_spec["stage"],
+                    same_fingerprint_streak=dirty_streak,
+                    open_issue_count=int(task.get("open_issue_count") or 0),
+                )
                 update_fields = {
                     "status": dirty_status,
                     "assignee": None,
@@ -405,6 +646,18 @@ class GenericAgent(BaseAgent):
                                 "status": "draft",
                                 "summary": dirty_spec["conclusion"],
                             },
+                            "attempt": {
+                                "stage": dirty_spec["stage"],
+                                "outcome": "dirty_patchset",
+                                "execution_phase": self._current_execution_phase(task),
+                                "retry_strategy": dirty_strategy,
+                                "failure_fingerprint": dirty_fingerprint,
+                                "same_fingerprint_streak": dirty_streak,
+                                "summary": dirty_spec["summary"],
+                                "metadata": {
+                                    "uncommitted_diff_stat": diff_stat[:1200],
+                                },
+                            },
                         },
                         "artifact_path": str(worktree_dev),
                     },
@@ -417,6 +670,91 @@ class GenericAgent(BaseAgent):
             if effective_next_status == "in_review" and not is_review_enabled(task):
                 effective_next_status = "approved"
             review_enabled = is_review_enabled(task)
+            verifier_result = self._build_pre_review_evidence_bundle(task, patchset)
+            if verifier_result["has_blockers"]:
+                verifier_stage = (
+                    "developer_pre_review_failed"
+                    if self._uses_developer_profile()
+                    else f"{self.name}_pre_review_failed"
+                )
+                verifier_status = "needs_changes" if self._uses_developer_profile() else prev_status
+                verifier_fingerprint = compute_failure_fingerprint(
+                    stage=verifier_stage,
+                    summary=verifier_result["summary"],
+                    extra="\n".join(
+                        str(item.get("summary") or "").strip()
+                        for item in verifier_result["issues"]
+                    ),
+                )
+                verifier_streak = self._same_failure_streak(task, verifier_fingerprint)
+                retry_strategy = next_retry_strategy(
+                    current_strategy=self._current_retry_strategy(task),
+                    failure_stage=verifier_stage,
+                    same_fingerprint_streak=verifier_streak,
+                    open_issue_count=int(task.get("open_issue_count") or 0),
+                    has_surface_violation=bool(verifier_result["bundle"].get("surface_violations")),
+                    has_evidence_gap=bool(verifier_result["bundle"].get("missing_acceptance_checks")),
+                )
+                update_fields = {
+                    "status": verifier_status,
+                    "assignee": None,
+                    "commit_hash": commit_hash,
+                    "current_patchset_id": str(patchset.get("id") or "").strip() or None,
+                    "current_patchset_status": "draft",
+                    "allowed_surface_json": verifier_result["allowed_surface"],
+                }
+                if self._uses_developer_profile():
+                    update_fields["review_feedback"] = (
+                        "预检未通过，本轮未送审。请先补齐缺失证据或收敛越界交付面后再重试。\n\n"
+                        + self.build_issue_ledger_block({"open_issues": verifier_result["issues"]})
+                    )[:4000]
+                if str(verifier_status or "").strip().lower() in {"todo", "needs_changes"}:
+                    update_fields["assigned_agent"] = self.name
+                    update_fields["dev_agent"] = self.name
+                await self.transition_task(
+                    task_id,
+                    fields=update_fields,
+                    handoff={
+                        "stage": verifier_stage,
+                        "to_agent": self.name,
+                        "status_from": prev_status,
+                        "status_to": verifier_status,
+                        "title": "送审前预检未通过",
+                        "summary": verifier_result["summary"],
+                        "commit_hash": commit_hash,
+                        "conclusion": "预检发现未闭环问题，回到开发收敛阶段",
+                        "payload": {
+                            "commit_hash": commit_hash,
+                            "source_branch": branch,
+                            "review_enabled": review_enabled,
+                            "issues": verifier_result["issues"],
+                            "resolve_missing_issues": True,
+                            "evidence_bundle": verifier_result["bundle"],
+                            "evidence_summary": verifier_result["summary"],
+                            "patchset": {
+                                **patchset,
+                                "status": "draft",
+                                "summary": verifier_result["summary"],
+                            },
+                            "attempt": {
+                                "stage": verifier_stage,
+                                "outcome": "pre_review_failed",
+                                "execution_phase": "verify",
+                                "retry_strategy": retry_strategy,
+                                "failure_fingerprint": verifier_fingerprint,
+                                "same_fingerprint_streak": verifier_streak,
+                                "summary": verifier_result["summary"],
+                                "metadata": {
+                                    "issue_count": len(verifier_result["issues"]),
+                                    "surface_violations": verifier_result["bundle"].get("surface_violations") or [],
+                                },
+                            },
+                        },
+                        "artifact_path": str(worktree_dev),
+                    },
+                    log_message=f"送审前预检未通过，回退到 {verifier_status}",
+                )
+                return
             update_fields = {
                 "status": effective_next_status,
                 "assignee": None,
@@ -425,6 +763,7 @@ class GenericAgent(BaseAgent):
                 "current_patchset_status": (
                     "approved" if effective_next_status == "approved" else "submitted"
                 ),
+                "allowed_surface_json": verifier_result["allowed_surface"],
             }
             if effective_next_status == "in_review":
                 update_fields["assigned_agent"] = self.name
@@ -459,10 +798,28 @@ class GenericAgent(BaseAgent):
                                 "review_enabled": review_enabled,
                                 "has_uncommitted_changes": bool(diff_stat),
                                 "uncommitted_diff_stat": diff_stat[:1200] if diff_stat else "",
+                                "resolve_open_issues": True,
+                                "resolve_issue_sources": ["verifier"],
+                                "issue_resolution_reason": "submitted_for_review",
+                                "evidence_bundle": verifier_result["bundle"],
+                                "evidence_summary": verifier_result["summary"],
                                 "patchset": {
                                     **patchset,
                                     "status": "approved" if effective_next_status == "approved" else "submitted",
                                     "summary": transition_spec["conclusion"],
+                                },
+                                "attempt": {
+                                    "stage": transition_spec["stage"],
+                                    "outcome": "submitted" if effective_next_status == "in_review" else "approved",
+                                    "execution_phase": "verify",
+                                    "retry_strategy": self._current_retry_strategy(task),
+                                    "failure_fingerprint": "",
+                                    "same_fingerprint_streak": 0,
+                                    "summary": verifier_result["summary"],
+                                    "metadata": {
+                                        "review_enabled": review_enabled,
+                                        "issue_count": len(verifier_result["issues"]),
+                                    },
                                 },
                             },
                             "artifact_path": str(worktree_dev),
@@ -508,6 +865,7 @@ class GenericAgent(BaseAgent):
             if await self.stop_if_task_cancelled(task_id, "检测到未提交变更回退前"):
                 return
             await self._transition_delivery_failure(
+                task=task,
                 task_id=task_id,
                 prev_status=prev_status,
                 failure_stage=self._commit_required_stage(),
@@ -535,6 +893,7 @@ class GenericAgent(BaseAgent):
         if await self.stop_if_task_cancelled(task_id, "无变更回退前"):
             return
         await self._transition_delivery_failure(
+            task=task,
             task_id=task_id,
             prev_status=prev_status,
             failure_stage=self._no_progress_stage(),

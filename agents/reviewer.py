@@ -6,32 +6,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from base import BaseAgent, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_status_list
-
-REVIEWER_PROMPT_DEFAULT = (
-    "你是资深代码/文档审查工程师，负责审查以下变更。\n\n"
-    "## 任务信息\n\n"
-    "**标题**：{task_title}\n\n"
-    "**需求描述**：\n"
-    "{task_description}\n\n"
-    "## 变更内容\n\n"
-    "```\n"
-    "{diff}\n"
-    "```\n\n"
-    "## 审查职责\n\n"
-    "- 任务描述中的“交付物”“验收标准”“关键约束”同样是你的独立核查清单\n"
-    "- 只有所有验收项都有代码、测试、文档或行为证据时，才能 approve\n"
-    "- TODO 步骤只用于理解实现路径，不能替代验收标准\n"
-    "- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向\n\n"
-    "## 审查要点\n\n"
-    "- 是否完整实现了需求描述中的所有要求\n"
-    "- 代码/内容是否正确，有无明显错误或遗漏\n"
-    "- 代码质量、可读性、边界情况处理\n"
-    "- 文件结构是否合理\n\n"
-    "## 输出格式\n\n"
-    "审查完毕后，在回复最后一行只输出一个 JSON 对象（不要代码块、不要额外文字）：\n"
-    '- decision 只能是 "approve" 或 "request_changes"\n'
-    '- decision="approve" 时必须提供 comment 字段\n'
-    '- decision="request_changes" 时必须提供 feedback 字段'
+from prompt_registry import REVIEWER_PROMPT_DEFAULT
+from task_intelligence import (
+    build_feedback_from_issues,
+    next_retry_strategy,
+    normalize_issue_list,
 )
 
 REVIEW_DECISION_SCHEMA = {
@@ -41,6 +20,26 @@ REVIEW_DECISION_SCHEMA = {
         "decision": {"type": "string", "enum": ["approve", "request_changes"]},
         "comment": {"type": "string"},
         "feedback": {"type": "string"},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {
+                    "issue_id": {"type": "string"},
+                    "acceptance_item": {"type": "string"},
+                    "severity": {"type": "string"},
+                    "category": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "reproducer": {"type": "string"},
+                    "evidence_gap": {"type": "string"},
+                    "scope": {"type": "string"},
+                    "fix_hint": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["summary", "status"],
+            },
+        },
     },
     "required": ["decision"],
 }
@@ -286,6 +285,21 @@ class ReviewerAgent(BaseAgent):
 
         if not commit_hash:
             feedback = "[系统错误] 缺少 commit_hash，无法进行精确审查。请 developer 重新提交。"
+            issues = normalize_issue_list(
+                [{
+                    "issue_id": "missing-commit-hash",
+                    "acceptance_item": "可审查交付",
+                    "severity": "high",
+                    "category": "evidence",
+                    "summary": "缺少可审查 commit_hash，reviewer 无法定位交付物",
+                    "reproducer": "任务 handoff 未提供 commit_hash，且历史交接无法解析有效候选 commit",
+                    "evidence_gap": "缺少精确交付 commit 证据",
+                    "scope": "handoff metadata",
+                    "fix_hint": "developer 重新提交并确保 handoff 携带 commit_hash / patchset",
+                    "status": "new",
+                }],
+                default_status="open",
+            )
             await self.transition_task(
                 task_id,
                 fields={
@@ -293,7 +307,7 @@ class ReviewerAgent(BaseAgent):
                     "assignee": None,
                     "assigned_agent": dev_agent,
                     "dev_agent": dev_agent,
-                    "review_feedback": feedback,
+                    "review_feedback": build_feedback_from_issues(issues, feedback),
                     "feedback_source": self.name,
                     "feedback_stage": "review_to_dev",
                     "feedback_actor": self.name,
@@ -310,6 +324,17 @@ class ReviewerAgent(BaseAgent):
                         "reason": "missing_commit_hash",
                         "has_commit": False,
                         "related_commit_candidates": related_history_commits,
+                        "issues": issues,
+                        "attempt": {
+                            "stage": "review_to_dev",
+                            "outcome": "request_changes",
+                            "execution_phase": "critic",
+                            "retry_strategy": "repro_first",
+                            "failure_fingerprint": "",
+                            "same_fingerprint_streak": 0,
+                            "summary": feedback,
+                            "metadata": {"issue_count": len(issues)},
+                        },
                     },
                 },
                 log_message=feedback,
@@ -333,6 +358,21 @@ class ReviewerAgent(BaseAgent):
                     "[交付不完整] 当前任务分支仍有未提交改动，reviewer 不会基于脏工作区继续审查。\n"
                     "请先清理工作区并重新提交，再重新流转审查。"
                 )
+                issues = normalize_issue_list(
+                    [{
+                        "issue_id": "dirty-worktree",
+                        "acceptance_item": "可审查交付",
+                        "severity": "high",
+                        "category": "scope",
+                        "summary": "patchset 对应工作区仍有未提交改动，交付未冻结",
+                        "reproducer": "reviewer 在工作区执行 git status --porcelain 仍返回脏文件",
+                        "evidence_gap": "缺少干净工作区证据",
+                        "scope": "worktree",
+                        "fix_hint": "先清理未提交改动并重新提交，再重新流转审查",
+                        "status": "new",
+                    }],
+                    default_status="open",
+                )
                 await self.transition_task(
                     task_id,
                     fields={
@@ -340,7 +380,7 @@ class ReviewerAgent(BaseAgent):
                         "assignee": None,
                         "assigned_agent": dev_agent,
                         "dev_agent": dev_agent,
-                        "review_feedback": feedback[:1000],
+                        "review_feedback": build_feedback_from_issues(issues, feedback)[:1000],
                         "feedback_source": self.name,
                         "feedback_stage": "review_to_dev",
                         "feedback_actor": self.name,
@@ -359,8 +399,19 @@ class ReviewerAgent(BaseAgent):
                         "payload": {
                             "decision": "request_changes",
                             "reason": "dirty_worktree",
+                            "issues": issues,
                             "commit_hash": commit_hash,
                             "source_branch": branch,
+                            "attempt": {
+                                "stage": "review_to_dev",
+                                "outcome": "request_changes",
+                                "execution_phase": "critic",
+                                "retry_strategy": "surface_freeze",
+                                "failure_fingerprint": "",
+                                "same_fingerprint_streak": 0,
+                                "summary": feedback[:300],
+                                "metadata": {"issue_count": len(issues)},
+                            },
                             "patchset": {
                                 **patchset,
                                 "status": "rejected",
@@ -399,6 +450,21 @@ class ReviewerAgent(BaseAgent):
                         parent_commit=parent_commit,
                         dev_branch=branch,
                     )
+                    issues = normalize_issue_list(
+                        [{
+                            "issue_id": "non-mergeable-baseline",
+                            "acceptance_item": "可独立合并交付",
+                            "severity": "high",
+                            "category": "packaging",
+                            "summary": "目标 commit 的父提交不在 main 上，当前交付不可独立合并",
+                            "reproducer": f"parent_commit={parent_commit[:12]} 不在 main 或其等价补丁集上",
+                            "evidence_gap": "缺少独立可合并的提交基线",
+                            "scope": branch,
+                            "fix_hint": "基于最新 main 重建本次改动并生成新的独立 commit",
+                            "status": "new",
+                        }],
+                        default_status="open",
+                    )
                     await self.transition_task(
                         task_id,
                         fields={
@@ -406,7 +472,7 @@ class ReviewerAgent(BaseAgent):
                             "assignee": None,
                             "assigned_agent": dev_agent,
                             "dev_agent": dev_agent,
-                            "review_feedback": feedback[:1000],
+                            "review_feedback": build_feedback_from_issues(issues, feedback)[:1000],
                             "feedback_source": self.name,
                             "feedback_stage": "review_to_dev",
                             "feedback_actor": self.name,
@@ -422,10 +488,21 @@ class ReviewerAgent(BaseAgent):
                             "conclusion": "提交基线不一致，退回开发重建可独立合并的 commit",
                             "payload": {
                                 "decision": "request_changes",
+                                "issues": issues,
                                 "commit_hash": commit_hash,
                                 "source_branch": branch,
                                 "related_history_commits": related_history_commits,
                                 "reason": "non_mergeable_commit_baseline",
+                                "attempt": {
+                                    "stage": "review_to_dev",
+                                    "outcome": "request_changes",
+                                    "execution_phase": "critic",
+                                    "retry_strategy": "package_audit",
+                                    "failure_fingerprint": "",
+                                    "same_fingerprint_streak": 0,
+                                    "summary": feedback[:300],
+                                    "metadata": {"issue_count": len(issues)},
+                                },
                             },
                         },
                         log_message=f"↩ 需修改: {feedback[:200]}",
@@ -463,6 +540,21 @@ class ReviewerAgent(BaseAgent):
                 diff = await self.get_diff_for_commit(worktree_dev, commit_hash, repo_root=proj_root)
         except Exception as e:
             feedback = f"[系统错误] 无法读取目标 commit={commit_hash}：{e}"
+            issues = normalize_issue_list(
+                [{
+                    "issue_id": "cannot-read-commit",
+                    "acceptance_item": "可审查交付",
+                    "severity": "high",
+                    "category": "evidence",
+                    "summary": "reviewer 无法读取目标 commit 或 patchset diff",
+                    "reproducer": str(e),
+                    "evidence_gap": "缺少可读取的 diff 证据",
+                    "scope": commit_hash,
+                    "fix_hint": "修复提交引用或重新生成可访问的 patchset/commit 后再送审",
+                    "status": "new",
+                }],
+                default_status="open",
+            )
             await self.transition_task(
                 task_id,
                 fields={
@@ -470,7 +562,7 @@ class ReviewerAgent(BaseAgent):
                     "assignee": None,
                     "assigned_agent": dev_agent,
                     "dev_agent": dev_agent,
-                    "review_feedback": feedback[:500],
+                    "review_feedback": build_feedback_from_issues(issues, feedback)[:500],
                     "feedback_source": self.name,
                     "feedback_stage": "review_to_dev",
                     "feedback_actor": self.name,
@@ -484,7 +576,21 @@ class ReviewerAgent(BaseAgent):
                     "summary": feedback[:300],
                     "commit_hash": commit_hash,
                     "conclusion": "目标 commit 无法读取，退回开发处理",
-                    "payload": {"reason": "cannot_read_commit", "commit_hash": commit_hash},
+                    "payload": {
+                        "reason": "cannot_read_commit",
+                        "commit_hash": commit_hash,
+                        "issues": issues,
+                        "attempt": {
+                            "stage": "review_to_dev",
+                            "outcome": "request_changes",
+                            "execution_phase": "critic",
+                            "retry_strategy": "repro_first",
+                            "failure_fingerprint": "",
+                            "same_fingerprint_streak": 0,
+                            "summary": feedback[:300],
+                            "metadata": {"issue_count": len(issues)},
+                        },
+                    },
                 },
                 log_message=feedback[:500],
             )
@@ -566,6 +672,17 @@ class ReviewerAgent(BaseAgent):
         review_contract = self.build_review_contract_block(task)
         if review_contract:
             prompt += f"\n\n{review_contract}\n"
+        issue_ledger = self.build_issue_ledger_block(task)
+        if issue_ledger:
+            prompt += f"\n\n{issue_ledger}\n"
+        latest_evidence = task.get("latest_evidence")
+        if isinstance(latest_evidence, dict):
+            prompt += (
+                "\n\n## 最近一次送审证据包\n"
+                f"- summary: {str(latest_evidence.get('summary') or '').strip()}\n"
+                f"- created_at: {str(latest_evidence.get('created_at') or '').strip()}\n"
+                f"- evidence_bundle: {json.dumps(latest_evidence.get('bundle') or {}, ensure_ascii=False)[:6000]}\n"
+            )
         handoff_context = await self.build_handoff_context(task_id)
         if handoff_context:
             prompt += f"\n\n{handoff_context}\n"
@@ -636,6 +753,7 @@ class ReviewerAgent(BaseAgent):
             except Exception:
                 patchset_for_handoff = patchset
         review_timestamp = datetime.now(UTC).isoformat()
+        issues = normalize_issue_list(decision.get("issues"), default_status="open")
 
         if decision["decision"] == "approve":
             comment = decision.get("comment", "LGTM")
@@ -665,6 +783,19 @@ class ReviewerAgent(BaseAgent):
                         "commit_hash": commit_hash,
                         "source_branch": branch,
                         "related_history_commits": related_history_commits,
+                        "resolve_open_issues": True,
+                        "resolve_issue_sources": ["reviewer", "verifier"],
+                        "issue_resolution_reason": "review_approved",
+                        "attempt": {
+                            "stage": "review_to_manager",
+                            "outcome": "approved",
+                            "execution_phase": "critic",
+                            "retry_strategy": str(task.get("retry_strategy") or "default_implement"),
+                            "failure_fingerprint": "",
+                            "same_fingerprint_streak": 0,
+                            "summary": comment[:300],
+                            "metadata": {"issue_count": len(issues)},
+                        },
                         "patchset": (
                             {
                                 **(patchset_for_handoff or {}),
@@ -686,6 +817,16 @@ class ReviewerAgent(BaseAgent):
             )
         else:
             feedback = decision.get("feedback", "请修复问题")
+            issue_feedback = build_feedback_from_issues(issues, feedback)
+            issue_categories = {str(item.get("category") or "").strip().lower() for item in issues}
+            retry_strategy = next_retry_strategy(
+                current_strategy=str(task.get("retry_strategy") or "default_implement"),
+                failure_stage="review_to_dev",
+                same_fingerprint_streak=1,
+                open_issue_count=len(issues),
+                has_surface_violation="scope" in issue_categories,
+                has_evidence_gap=bool(issue_categories & {"coverage", "evidence", "docs"}),
+            )
             await self.transition_task(
                 task_id,
                 fields={
@@ -693,7 +834,7 @@ class ReviewerAgent(BaseAgent):
                     "assignee": None,
                     "assigned_agent": dev_agent,
                     "dev_agent": dev_agent,
-                    "review_feedback": feedback,
+                    "review_feedback": issue_feedback,
                     "feedback_source": self.name,
                     "feedback_stage": "review_to_dev",
                     "feedback_actor": self.name,
@@ -706,19 +847,31 @@ class ReviewerAgent(BaseAgent):
                     "status_from": "in_review",
                     "status_to": "needs_changes",
                     "title": "审查退回开发",
-                    "summary": feedback[:300],
+                    "summary": issue_feedback[:300],
                     "commit_hash": commit_hash,
-                    "conclusion": feedback[:300] or "审查未通过",
+                    "conclusion": issue_feedback[:300] or "审查未通过",
                     "payload": {
                         "decision": "request_changes",
+                        "issues": issues,
+                        "resolve_missing_issues": True,
                         "commit_hash": commit_hash,
                         "source_branch": branch,
                         "related_history_commits": related_history_commits,
+                        "attempt": {
+                            "stage": "review_to_dev",
+                            "outcome": "request_changes",
+                            "execution_phase": "critic",
+                            "retry_strategy": retry_strategy,
+                            "failure_fingerprint": "",
+                            "same_fingerprint_streak": 0,
+                            "summary": issue_feedback[:300],
+                            "metadata": {"issue_count": len(issues)},
+                        },
                         "patchset": (
                             {
                                 **(patchset_for_handoff or {}),
                                 "status": "rejected",
-                                "summary": feedback[:300],
+                                "summary": issue_feedback[:300],
                                 "queue_status": "",
                                 "queue_reason": "review_rejected",
                                 "reviewed_main_sha": reviewed_main_sha,
@@ -729,7 +882,7 @@ class ReviewerAgent(BaseAgent):
                     },
                     "artifact_path": str(decision_file),
                 },
-                log_message=f"↩ 需修改: {feedback[:200]}",
+                log_message=f"↩ 需修改: {issue_feedback[:200]}",
             )
 
 
