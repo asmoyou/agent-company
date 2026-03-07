@@ -353,6 +353,20 @@
       border-color:rgba(129,140,248,.86);
       box-shadow:0 0 0 3px rgba(99,102,241,.22), inset 0 1px 0 rgba(255,255,255,.08);
     }
+    .header-project-meta{
+      max-width:180px;
+      min-width:0;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(71,85,105,.72);
+      background:rgba(15,23,42,.56);
+      color:#94a3b8;
+      font-size:11px;
+      line-height:1;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
     .app-header input[type="checkbox"]{accent-color:var(--accent);}
     .app-header #btn-create-task{
       background:linear-gradient(135deg, var(--accent-strong), var(--accent));
@@ -2157,6 +2171,7 @@
       class="bg-slate-800 border border-slate-600 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
       <option value="">— 选择项目 —</option>
     </select>
+    <div id="project-owner-badge" class="header-project-meta hidden"></div>
     <button onclick="openNewProjectModal()"
       class="header-btn text-xs px-3 py-1.5 rounded-lg transition">
       + 新建项目
@@ -3511,9 +3526,11 @@ function updateMobileTopbarState() {
   const createBtn = document.getElementById("mobile-topbar-create");
   if (!projectEl || !createBtn) return;
   const proj = currentProjectId && projects[currentProjectId] ? projects[currentProjectId] : null;
+  const creatorText = projectCreatorText(proj);
   projectEl.textContent = proj
-    ? formatProjectLabel(proj)
+    ? projectDisplayName(proj)
     : (Object.keys(projects).length ? "未选择项目" : "暂无项目");
+  projectEl.title = creatorText ? `${projectDisplayName(proj)} · ${creatorText}` : projectEl.textContent;
   createBtn.disabled = !proj;
   createBtn.title = proj ? "创建任务" : "请先选择项目";
 }
@@ -4754,10 +4771,13 @@ function projectCreatorName(project) {
   return String(project?.created_by_username || "").trim();
 }
 
-function formatProjectLabel(project) {
-  const name = String(project?.name || project?.id || "未命名项目").trim();
+function projectDisplayName(project) {
+  return String(project?.name || project?.id || "未命名项目").trim();
+}
+
+function projectCreatorText(project) {
   const creator = projectCreatorName(project);
-  return creator ? `${name} · 创建人：${creator}` : name;
+  return creator ? `创建人：${creator}` : "";
 }
 
 function normalizeProjectDirSegment(value) {
@@ -4791,7 +4811,7 @@ function loadProjects(list) {
   list.forEach(p => projects[p.id] = p);
   const sel = document.getElementById("project-select");
   sel.innerHTML = '<option value="">— 选择项目 —</option>' +
-    list.map(p => `<option value="${p.id}">${escHtml(formatProjectLabel(p))}</option>`).join("");
+    list.map(p => `<option value="${p.id}">${escHtml(projectDisplayName(p))}</option>`).join("");
   if (list.length > 0) {
     const storedProjectId = loadStoredProjectId();
     const preferredProjectId =
@@ -4812,10 +4832,10 @@ function upsertProjectOption(project) {
   const sel = document.getElementById("project-select");
   const existing = sel.querySelector(`option[value="${project.id}"]`);
   if (existing) {
-    existing.textContent = formatProjectLabel(project);
+    existing.textContent = projectDisplayName(project);
     return;
   }
-  sel.insertAdjacentHTML("beforeend", `<option value="${project.id}">${escHtml(formatProjectLabel(project))}</option>`);
+  sel.insertAdjacentHTML("beforeend", `<option value="${project.id}">${escHtml(projectDisplayName(project))}</option>`);
 }
 
 function onProjectChange() {
@@ -4844,9 +4864,20 @@ function updateProjectUI() {
   if (!hasProject && Object.keys(projects).length === 0) {
     document.getElementById("no-project-hint").classList.remove("hidden");
   }
+  updateProjectOwnerBadge();
   updateProjectPath();
   updateMobileTopbarState();
   if (typeof feedbackRequestHandleProjectChange === "function") feedbackRequestHandleProjectChange();
+}
+
+function updateProjectOwnerBadge() {
+  const badgeEl = document.getElementById("project-owner-badge");
+  if (!badgeEl) return;
+  const proj = currentProjectId && projects[currentProjectId] ? projects[currentProjectId] : null;
+  const text = projectCreatorText(proj);
+  badgeEl.textContent = text;
+  badgeEl.title = text;
+  badgeEl.classList.toggle("hidden", !text);
 }
 
 function applyTerminalOnlyMode() {
