@@ -93,6 +93,7 @@ GENERIC_SUBTASK_PATTERNS = [
 
 PARENT_REQUIREMENT_SPLIT_RE = re.compile(r"(?:[\n\r]+|[。！？!?；;]+)")
 LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、:]?)\s*")
+ASSUMPTION_SECTION_RE = re.compile(r"^\s{0,3}#{1,6}\s*(?:假设|assumptions?|待确认)\s*$", re.IGNORECASE | re.MULTILINE)
 LEADER_SYSTEM_RETRY_MAX = int(os.getenv("LEADER_SYSTEM_RETRY_MAX", "2"))
 LEADER_SYSTEM_RETRY_BACKOFF_SECS = int(os.getenv("LEADER_SYSTEM_RETRY_BACKOFF_SECS", "20"))
 
@@ -342,8 +343,24 @@ class LeaderAgent(BaseAgent):
     def _normalize_refined_description(self, raw, fallback: str) -> str:
         text = str(raw or "").strip()
         if not text:
-            return str(fallback or "").strip()
-        return text[:6000]
+            text = str(fallback or "").strip()
+        text = text[:6000].strip()
+        if not text:
+            return ""
+        if "## " not in text and "# " not in text:
+            return text
+        if ASSUMPTION_SECTION_RE.search(text):
+            return text
+        assumption_lines = [
+            "## 假设",
+            "- 未明确说明的实现细节按最小可逆方案处理，不等待额外人工确认。",
+            "- 除非需求、约束或验收标准明确要求，否则不新增额外交付面、兼容入口或外部依赖。",
+        ]
+        if "待确认" in text:
+            assumption_lines.append(
+                "- 描述中的“待确认”仅作为风险提示；在未收到补充信息前，仍按上述默认假设继续推进。"
+            )
+        return f"{text}\n\n" + "\n".join(assumption_lines)
 
     def _normalize_triage_decision(
         self,

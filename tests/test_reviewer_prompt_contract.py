@@ -57,6 +57,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
             "description": (
                 "## 任务目标\n- 补全 claim 接口测试\n\n"
                 "## 范围\n- /tasks/claim 鉴权与异常分支\n\n"
+                "## 假设\n- 未明确说明的异常文案沿用现有接口风格\n\n"
                 "## 交付物\n- tests/test_task_actions_api.py 中的新增测试\n\n"
                 "## 验收标准\n- [ ] 新增测试全部通过\n- [ ] 不影响现有测试\n\n"
                 "## 关键约束\n- 不修改生产逻辑"
@@ -75,6 +76,8 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("新增测试全部通过", prompt)
         self.assertIn("不修改生产逻辑", prompt)
         self.assertIn("只要任一验收项缺少证据", prompt)
+        self.assertIn("允许沿用的默认假设", prompt)
+        self.assertIn("不要因为“存在 assumptions”本身打回", prompt)
 
     async def test_process_task_rejects_commit_that_is_not_independently_mergeable(self):
         target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"

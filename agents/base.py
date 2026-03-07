@@ -112,6 +112,16 @@ TASK_SECTION_ALIAS_MAP = {
         "完成标准",
         "acceptancecriteria",
     ),
+    "assumptions": (
+        "假设",
+        "assumptions",
+        "待确认",
+    ),
+    "evidence_required": (
+        "证据要求",
+        "evidencerequired",
+        "evidence",
+    ),
 }
 TASK_PROMPT_LIST_MAX_ITEMS = 8
 TASK_PROMPT_ITEM_MAX_CHARS = 180
@@ -343,6 +353,8 @@ class BaseAgent:
             "todo_steps": self._section_items(sections.get("todo_steps", ""), max_items=8),
             "deliverables": self._section_items(sections.get("deliverables", ""), max_items=8),
             "acceptance": self._section_items(sections.get("acceptance", ""), max_items=8),
+            "assumptions": self._section_items(sections.get("assumptions", ""), max_items=6),
+            "evidence_required": self._section_items(sections.get("evidence_required", ""), max_items=6),
         }
 
     def _append_prompt_list_section(
@@ -368,6 +380,7 @@ class BaseAgent:
             "## 执行基线（必须遵守）",
             "- 下面的交付物和验收标准也是执行 agent 的完成定义，不是只给 reviewer 的参考清单。",
             "- 提交前必须按这些条目自检；不要擅自扩展非范围内容。",
+            "- 合同中的 assumptions 是 leader 已吸收的不确定性；除非与显式要求或现场证据冲突，不要把它们当成阻塞项，也不要等待额外用户确认。",
         ]
         goal = str(contract.get("goal") or "").strip()
         if goal:
@@ -379,6 +392,8 @@ class BaseAgent:
         self._append_prompt_list_section(lines, "### 必须产出的交付物", contract.get("deliverables"))
         self._append_prompt_list_section(lines, "### 提交前必须满足的验收标准", contract.get("acceptance"), checkbox=True)
         self._append_prompt_list_section(lines, "### 关键约束", contract.get("constraints"))
+        self._append_prompt_list_section(lines, "### 已批准的默认假设", contract.get("assumptions"))
+        self._append_prompt_list_section(lines, "### 建议补齐的证据", contract.get("evidence_required"))
         return "\n".join(lines)
 
     def build_review_contract_block(self, task: dict | None) -> str:
@@ -389,6 +404,7 @@ class BaseAgent:
             "## 独立验收基线（必须据此审查）",
             "- 以下条目既是开发完成定义，也是 reviewer 的独立核查清单；不要只接受开发自述。",
             "- 只要任一验收项缺少证据、交付物缺失、或实现违反约束，就不能 approve。",
+            "- 合同中的 assumptions 默认视为允许的执行基线；不要因为“存在 assumptions”本身打回。",
         ]
         goal = str(contract.get("goal") or "").strip()
         if goal:
@@ -398,9 +414,12 @@ class BaseAgent:
         self._append_prompt_list_section(lines, "### 应存在的交付物", contract.get("deliverables"))
         self._append_prompt_list_section(lines, "### 必须逐项核验的验收标准", contract.get("acceptance"), checkbox=True)
         self._append_prompt_list_section(lines, "### 不得违反的约束", contract.get("constraints"))
+        self._append_prompt_list_section(lines, "### 允许沿用的默认假设", contract.get("assumptions"))
+        self._append_prompt_list_section(lines, "### 建议核对的证据", contract.get("evidence_required"))
         lines.append("### 审查判定规则")
         lines.append("- 仅当所有验收项都有代码、测试、文档或行为证据支撑时，才能 approve。")
         lines.append("- TODO 步骤只是实现路径参考，不能替代验收标准本身。")
+        lines.append("- 只有 assumptions 与显式需求/约束冲突、明显扩大 scope、或使验收无法验证时，才应 request_changes。")
         lines.append("- request_changes 时，feedback 必须指出未满足的验收项、对应文件或行为以及修复方向。")
         return "\n".join(lines)
 
