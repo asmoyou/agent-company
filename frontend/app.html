@@ -2619,6 +2619,11 @@
       <div id="panel-desc" class="text-sm text-slate-300 msg-rich bg-slate-900/50 rounded p-3"></div>
     </div>
 
+    <div id="panel-cancel-reason-wrap" class="hidden">
+      <div class="text-xs text-red-300 mb-1">取消原因</div>
+      <div id="panel-cancel-reason" class="text-sm text-red-200 msg-rich bg-red-950/20 border border-red-900/40 rounded p-3"></div>
+    </div>
+
     <!-- 用户验收区 (pending_acceptance only) -->
     <div id="panel-acceptance" class="hidden space-y-3">
       <div class="text-xs font-semibold text-teal-400 uppercase tracking-wide border-t border-slate-700 pt-3">用户验收</div>
@@ -5026,6 +5031,12 @@ function renderCard(task) {
     ? `<div class="mt-1 text-[10px] text-amber-400/80 bg-amber-900/15 rounded px-1.5 py-0.5"
             style="display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">
          ↩ ${escHtml(task.review_feedback)}</div>` : "";
+  const cancelReason = String(task.cancel_reason || "").trim();
+  const cancelSnippet = task.status === "cancelled"
+    ? `<div class="mt-1 text-[10px] text-red-300/90 bg-red-950/30 rounded px-1.5 py-0.5"
+            style="display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">
+         ⛔ ${escHtml(cancelReason || "未填写取消原因")}</div>`
+    : "";
 
   const archiveBadge = task.archived
     ? `<span class="text-[10px] text-slate-600">📦</span>` : "";
@@ -5068,6 +5079,7 @@ function renderCard(task) {
         ${task.commit_hash?`<span class="text-[10px] font-mono text-green-600">${escHtml(String(task.commit_hash).slice(0,7))}</span>`:""}
         ${pendingBadge}${reviewBadge}${archiveBadge}${subtaskBadge}${parentBadge}${agentBadge}${dependencyBadge}
       </div>
+      ${cancelSnippet.replace('mt-1 text-[10px]', 'task-card-feedback mt-1 text-[10px]')}
       ${feedbackSnippet.replace('mt-1 text-[10px]', 'task-card-feedback mt-1 text-[10px]')}
     </div>`;
 }
@@ -7071,6 +7083,13 @@ async function openPanel(id) {
   document.getElementById("panel-title").textContent = task.title;
   setRichContent("panel-desc", task.description, "(无描述)");
   document.getElementById("panel-assignee").textContent = task.assignee?`负责人: ${task.assignee}`:"";
+  const cancelReasonWrap = document.getElementById("panel-cancel-reason-wrap");
+  const cancelReason = String(task.cancel_reason || "").trim();
+  const showCancelReason = task.status === "cancelled";
+  cancelReasonWrap.classList.toggle("hidden", !showCancelReason);
+  if (showCancelReason) {
+    setRichContent("panel-cancel-reason", cancelReason, "未填写取消原因");
+  }
 
   const proj = projects[task.project_id];
   document.getElementById("panel-project-badge").textContent = proj?`📁 ${proj.name}`:"";
@@ -7829,7 +7848,7 @@ async function cancelCurrentTask() {
   if (!currentTaskId) return;
   if (!await uiConfirm("取消后任务将被归档，且不会再被 Agent 执行。确认取消？", "取消任务", {okText: "确认取消"})) return;
   const reasonInput = await uiPrompt(
-    "可选：填写取消原因（会写入任务日志）",
+    "可选：填写取消原因（会写入任务日志，并展示在已取消任务中）",
     "",
     "取消原因",
     {okText: "继续", cancelText: "跳过", hint: "可留空。"}

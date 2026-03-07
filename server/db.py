@@ -478,6 +478,7 @@ def init_db():
             current_patchset_status TEXT NOT NULL DEFAULT '',
             merged_patchset_id TEXT,
             archived        INTEGER NOT NULL DEFAULT 0,
+            cancel_reason   TEXT NOT NULL DEFAULT '',
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL
         );
@@ -644,6 +645,7 @@ def init_db():
         ("current_patchset_status", "TEXT NOT NULL DEFAULT ''"),
         ("merged_patchset_id", "TEXT"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("cancel_reason", "TEXT NOT NULL DEFAULT ''"),
         ("parent_task_id", "TEXT"),
         ("subtask_order", "INTEGER NOT NULL DEFAULT 0"),
         ("assigned_agent", "TEXT"),
@@ -761,6 +763,7 @@ def init_db():
     _backfill_subtask_order(conn)
     _normalize_task_priority(conn)
     _normalize_task_dependency_required_state(conn)
+    _backfill_cancel_reasons_from_logs(conn)
     conn.commit()
     conn.close()
 
@@ -2697,6 +2700,108 @@ def _attach_dependency_state_to_tasks_in_conn(conn, task_rows: list[dict]) -> No
         task["ready"] = ready
 
 
+def _extract_cancel_reason_from_log_message(message: str) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    for marker in ("父任务取消原因：", "原因："):
+        idx = text.rfind(marker)
+        if idx < 0:
+            continue
+        reason = text[idx + len(marker):].strip()
+        if not reason:
+            continue
+        line = reason.splitlines()[0].strip()
+        return (line or reason)[:2000]
+    return ""
+
+
+def _fill_cancel_reasons_from_logs_in_conn(
+    conn,
+    task_rows: list[dict],
+    *,
+    persist: bool = False,
+) -> None:
+    if not task_rows:
+        return
+    pending_ids: list[str] = []
+    for task in task_rows:
+        status = str(task.get("status") or "").strip().lower()
+        cancel_reason = str(task.get("cancel_reason") or "").strip()
+        tid = str(task.get("id") or "").strip()
+        if tid and status == CANCELLED_STATUS and not cancel_reason:
+            pending_ids.append(tid)
+    if not pending_ids:
+        return
+
+    placeholders = ",".join("?" for _ in pending_ids)
+    log_rows = conn.execute(
+        f"""
+        SELECT task_id, message, id
+          FROM logs
+         WHERE task_id IN ({placeholders})
+           AND agent='system'
+           AND (
+                message LIKE '任务已取消并归档，不再执行。%'
+                OR message LIKE '因父任务被取消，任务已取消并归档，不再执行。%'
+           )
+         ORDER BY id DESC
+        """,
+        pending_ids,
+    ).fetchall()
+    reason_map: dict[str, str] = {}
+    for row in log_rows:
+        tid = str(row["task_id"] or "").strip()
+        if not tid or tid in reason_map:
+            continue
+        reason = _extract_cancel_reason_from_log_message(str(row["message"] or ""))
+        if reason:
+            reason_map[tid] = reason
+
+    if not reason_map:
+        return
+
+    for task in task_rows:
+        tid = str(task.get("id") or "").strip()
+        reason = reason_map.get(tid, "")
+        if reason and not str(task.get("cancel_reason") or "").strip():
+            task["cancel_reason"] = reason
+
+    if persist:
+        conn.executemany(
+            "UPDATE tasks SET cancel_reason=? WHERE id=? AND COALESCE(cancel_reason, '')=''",
+            [(reason, tid) for tid, reason in reason_map.items()],
+        )
+
+
+def _enrich_task_rows_in_conn(
+    conn,
+    task_rows: list[dict],
+    *,
+    persist_cancel_reason: bool = False,
+) -> None:
+    _fill_cancel_reasons_from_logs_in_conn(
+        conn,
+        task_rows,
+        persist=persist_cancel_reason,
+    )
+    _attach_dependency_state_to_tasks_in_conn(conn, task_rows)
+
+
+def _backfill_cancel_reasons_from_logs(conn) -> None:
+    rows = conn.execute(
+        "SELECT id, status, cancel_reason FROM tasks WHERE status=? AND COALESCE(cancel_reason, '')=''",
+        (CANCELLED_STATUS,),
+    ).fetchall()
+    if not rows:
+        return
+    _fill_cancel_reasons_from_logs_in_conn(
+        conn,
+        [dict(row) for row in rows],
+        persist=True,
+    )
+
+
 def create_task(title: str, description: str, project_id: str | None = None,
                 parent_task_id: str | None = None,
                 assigned_agent: str | None = None,
@@ -2761,7 +2866,7 @@ def create_task(title: str, description: str, project_id: str | None = None,
         if not task:
             conn.rollback()
             raise RuntimeError("create_task failed")
-        _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        _enrich_task_rows_in_conn(conn, [task])
         conn.commit()
         return task
     finally:
@@ -2814,7 +2919,7 @@ def list_subtasks(parent_task_id: str, user_id: str | None = None, is_admin: boo
             (parent_task_id,),
         ).fetchall()
     out = [dict(r) for r in rows]
-    _attach_dependency_state_to_tasks_in_conn(conn, out)
+    _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True)
     conn.close()
     return out
 
@@ -2863,7 +2968,7 @@ def get_task(task_id: str, user_id: str | None = None, is_admin: bool = True) ->
         ).fetchone()
     task = dict(row) if row else None
     if task:
-        _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
     conn.close()
     return task
 
@@ -2882,7 +2987,7 @@ def list_tasks(
             "t.id, t.title, t.status, t.assignee, t.commit_hash, t.project_id, "
             "t.parent_task_id, t.subtask_order, t.assigned_agent, t.dev_agent, "
             "t.review_enabled, SUBSTR(COALESCE(t.review_feedback, ''), 1, 240) AS review_feedback, "
-            "t.created_at, t.updated_at, t.archived, t.priority"
+            "t.cancel_reason, t.created_at, t.updated_at, t.archived, t.priority"
         )
     if user_id and not is_admin:
         if project_id:
@@ -2925,7 +3030,7 @@ def list_tasks(
                 _join_project(f"SELECT {select_cols} FROM tasks t ORDER BY t.created_at DESC")
             ).fetchall()
     out = [dict(r) for r in rows]
-    _attach_dependency_state_to_tasks_in_conn(conn, out)
+    _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True)
     conn.close()
     return out
 
@@ -2960,7 +3065,7 @@ def list_task_dependents(task_id: str) -> list[dict] | None:
             (task_id,),
         ).fetchall()
         out = [dict(r) for r in rows]
-        _attach_dependency_state_to_tasks_in_conn(conn, out)
+        _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True)
         return out
     finally:
         conn.close()
@@ -3054,7 +3159,7 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
         ).fetchone()
         task = dict(row) if row else None
         if task:
-            _attach_dependency_state_to_tasks_in_conn(conn, [task])
+            _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
         return task
 
     if "priority" in fields:
@@ -3128,7 +3233,7 @@ def _update_task_in_conn(conn, task_id: str, **fields) -> dict | None:
     ).fetchone()
     task = dict(row) if row else None
     if task:
-        _attach_dependency_state_to_tasks_in_conn(conn, [task])
+        _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
     return task
 
 
@@ -3191,12 +3296,16 @@ def get_tasks_by_status(
                 (status,),
             ).fetchall()
     out = [dict(r) for r in rows]
-    _attach_dependency_state_to_tasks_in_conn(conn, out)
+    _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True)
     conn.close()
     return out
 
 
-def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | None:
+def cancel_task(
+    task_id: str,
+    include_subtasks: bool = True,
+    reason: str | None = None,
+) -> list[dict] | None:
     """
     Cancel a task (and optionally all descendants), archive it, and make it non-runnable.
     Returns updated rows with joined project fields in deterministic order, or None if task missing.
@@ -3204,7 +3313,10 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
     conn = get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        root = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        root = conn.execute(
+            "SELECT id, cancel_reason FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
         if not root:
             conn.rollback()
             return None
@@ -3228,6 +3340,10 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
             task_ids = [task_id]
 
         now = _now()
+        requested_reason = str(reason or "").strip()[:2000]
+        existing_root_reason = str(root["cancel_reason"] or "").strip()
+        root_cancel_reason = requested_reason or existing_root_reason or "手动取消"
+        child_cancel_reason = f"父任务取消：{root_cancel_reason}" if root_cancel_reason else "父任务已取消"
         placeholders = ",".join("?" for _ in task_ids)
         conn.execute(
             f"""
@@ -3243,6 +3359,17 @@ def cancel_task(task_id: str, include_subtasks: bool = True) -> list[dict] | Non
             """,
             [CANCELLED_STATUS, now, *task_ids],
         )
+        conn.execute(
+            "UPDATE tasks SET cancel_reason=? WHERE id=?",
+            (root_cancel_reason, task_id),
+        )
+        child_ids = [tid for tid in task_ids if tid != task_id]
+        if child_ids:
+            child_placeholders = ",".join("?" for _ in child_ids)
+            conn.execute(
+                f"UPDATE tasks SET cancel_reason=? WHERE id IN ({child_placeholders})",
+                [child_cancel_reason, *child_ids],
+            )
 
         conn.commit()
 
@@ -3485,7 +3612,7 @@ def claim_task(
         ).fetchone()
         task = dict(claimed) if claimed else None
         if task:
-            _attach_dependency_state_to_tasks_in_conn(conn, [task])
+            _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
         return task
     finally:
         conn.close()
@@ -4590,7 +4717,7 @@ def transition_task(
                 row = conn.execute(_join_project("SELECT * FROM tasks WHERE id=?"), (task_id,)).fetchone()
                 task = dict(row) if row else task
                 if task:
-                    _attach_dependency_state_to_tasks_in_conn(conn, [task])
+                    _enrich_task_rows_in_conn(conn, [task], persist_cancel_reason=True)
         if not is_cancelled and log:
             created_log = _add_log_in_conn(
                 conn,
