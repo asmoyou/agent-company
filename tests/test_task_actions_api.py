@@ -1217,6 +1217,34 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertIn(parent["id"], task_ids)
         self.assertIn(child["id"], task_ids)
 
+    def test_cancel_persists_cancel_reason_for_root_and_child_tasks(self):
+        parent = self._create_task(status="todo")
+        child = db.create_task(
+            title="child-task",
+            description="subtask",
+            project_id=self.project["id"],
+            parent_task_id=parent["id"],
+            assigned_agent="developer",
+            dev_agent="developer",
+            status="todo",
+        )
+
+        res = self.client.post(
+            f"/tasks/{parent['id']}/cancel",
+            json={"reason": "需求已撤回", "include_subtasks": True},
+            headers=self._headers,
+        )
+
+        self.assertEqual(res.status_code, 200)
+        payload = res.json()
+        self.assertEqual(payload["task"]["status"], "cancelled")
+        self.assertEqual(payload["task"]["cancel_reason"], "需求已撤回")
+
+        refreshed_parent = db.get_task(parent["id"])
+        refreshed_child = db.get_task(child["id"])
+        self.assertEqual(refreshed_parent["cancel_reason"], "需求已撤回")
+        self.assertEqual(refreshed_child["cancel_reason"], "父任务取消：需求已撤回")
+
     def test_runtime_workspace_cleanup_endpoint_returns_metrics(self):
         res = self.client.get("/runtime/workspace-cleanup", headers=self._headers)
         self.assertEqual(res.status_code, 200)

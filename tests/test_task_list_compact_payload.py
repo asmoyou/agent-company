@@ -53,6 +53,44 @@ class TaskListCompactPayloadTest(unittest.TestCase):
         self.assertNotIn("claim_run_id", row)
         self.assertNotIn("lease_token", row)
 
+    def test_list_tasks_compact_keeps_cancel_reason(self):
+        created = db.create_task(
+            title="cancelled task",
+            description="cancel me",
+            project_id=self.project["id"],
+            status="todo",
+        )
+        db.cancel_task(created["id"], include_subtasks=False, reason="需求调整")
+
+        rows = db.list_tasks(project_id=self.project["id"], compact=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["cancel_reason"], "需求调整")
+
+    def test_get_task_backfills_cancel_reason_from_legacy_cancel_log(self):
+        created = db.create_task(
+            title="legacy cancelled task",
+            description="legacy cancel",
+            project_id=self.project["id"],
+            status="todo",
+        )
+        conn = db.get_conn()
+        try:
+            conn.execute(
+                "UPDATE tasks SET status='cancelled', archived=1, cancel_reason='' WHERE id=?",
+                (created["id"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        db.add_log(created["id"], "system", "任务已取消并归档，不再执行。\n原因：违规任务")
+
+        task = db.get_task(created["id"])
+        self.assertIsNotNone(task)
+        self.assertEqual(task["cancel_reason"], "违规任务")
+
+        rows = db.list_tasks(project_id=self.project["id"], compact=True)
+        self.assertEqual(rows[0]["cancel_reason"], "违规任务")
+
 
 if __name__ == "__main__":
     unittest.main()

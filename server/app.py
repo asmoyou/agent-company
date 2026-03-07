@@ -3071,6 +3071,7 @@ async def cancel_task(task_id: str, body: CancelTaskRequest | None = None, user:
     cancelled = db.cancel_task(
         task_id,
         include_subtasks=payload.include_subtasks,
+        reason=payload.reason,
     )
     if not cancelled:
         raise HTTPException(404, "Task not found")
