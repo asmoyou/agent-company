@@ -70,11 +70,15 @@ class BuiltinPromptDefaultsTest(unittest.TestCase):
     def test_seeded_builtin_prompts_include_contract_language(self):
         developer = db.get_agent_type("developer")
         reviewer = db.get_agent_type("reviewer")
+        leader = db.get_agent_type("leader")
 
         self.assertIn("完成定义（必须自检）", developer["prompt"])
         self.assertIn("任务描述中的“交付物”“验收标准”“关键约束”同样是本轮实现的完成定义", developer["prompt"])
+        self.assertIn("assumptions 属于 leader 已吸收的不确定性", developer["prompt"])
         self.assertIn("任务描述中的“交付物”“验收标准”“关键约束”同样是你的独立核查清单", reviewer["prompt"])
         self.assertIn("只有所有验收项都有代码、测试、文档或行为证据时，才能 approve", reviewer["prompt"])
+        self.assertIn("不要因为存在 assumptions 本身而打回", reviewer["prompt"])
+        self.assertIn("用最小可逆 assumptions 吸收普通细节缺口", leader["prompt"])
 
     def test_init_db_migrates_legacy_builtin_prompts(self):
         db.update_agent_type("developer", prompt=LEGACY_DEVELOPER_PROMPT)
