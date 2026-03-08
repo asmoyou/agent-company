@@ -1713,7 +1713,7 @@ STATUS_FLOW: dict[str, set[str]] = {
     "approved": {"approved", "merging", "pending_acceptance", "needs_changes", "blocked", "cancelled"},
     "merging": {"merging", "pending_acceptance", "needs_changes", "approved", "blocked", "cancelled"},
     "pending_acceptance": {"pending_acceptance", "completed", "needs_changes", "cancelled"},
-    "blocked": {"blocked", "triage", "decompose", "in_review", "todo", "needs_changes", "cancelled"},
+    "blocked": {"blocked", "triage", "decompose", "in_review", "approved", "todo", "needs_changes", "cancelled"},
     "decomposed": {"decomposed", "completed", "cancelled"},
     "completed": {"completed"},
     "cancelled": {"cancelled"},
@@ -2230,6 +2230,9 @@ def _resolve_blocked_retry(task: dict) -> tuple[str, str | None, str] | None:
 
     if owner == "reviewer" or "[review_retry=" in feedback or "审查器" in feedback:
         return ("in_review", "reviewer", "重试审查")
+
+    if owner == "manager" or "合并前置检查失败" in feedback or "merge" in feedback.lower():
+        return ("approved", "manager", "重试合并")
 
     if owner == "leader":
         dev_agent = str(task.get("dev_agent") or "").strip()
