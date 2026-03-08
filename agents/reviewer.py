@@ -135,6 +135,7 @@ class ReviewerAgent(BaseAgent):
             return f"{s[:head]}\n\n... <省略 {len(s) - head - tail} 字符> ...\n\n{s[-tail:]}"
 
         task_id = task["id"]
+        current_status = str(task.get("status") or "").strip() or "reviewing"
         if await self.stop_if_task_cancelled(task_id, "系统错误处理前"):
             return
 
@@ -168,7 +169,7 @@ class ReviewerAgent(BaseAgent):
                 handoff={
                     "stage": "review_system_retry",
                     "to_agent": self.name,
-                    "status_from": "in_review",
+                    "status_from": current_status,
                     "status_to": "in_review",
                     "title": "审查系统错误重试",
                     "summary": feedback,
@@ -203,7 +204,7 @@ class ReviewerAgent(BaseAgent):
             handoff={
                 "stage": "review_system_failed",
                 "to_agent": self.name,
-                "status_from": "in_review",
+                "status_from": current_status,
                 "status_to": "blocked",
                 "title": "审查系统错误终止",
                 "summary": feedback,
@@ -264,6 +265,7 @@ class ReviewerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        current_status = str(task.get("status") or "").strip() or "reviewing"
         if await self.stop_if_task_cancelled(task_id, "开始审查前"):
             return
         dev_agent = get_task_dev_agent(task)
@@ -317,7 +319,7 @@ class ReviewerAgent(BaseAgent):
                 handoff={
                     "stage": "review_to_dev",
                     "to_agent": dev_agent,
-                    "status_from": "in_review",
+                    "status_from": current_status,
                     "status_to": "needs_changes",
                     "title": "审查退回开发",
                     "summary": feedback,
@@ -392,7 +394,7 @@ class ReviewerAgent(BaseAgent):
                     handoff={
                         "stage": "review_to_dev",
                         "to_agent": dev_agent,
-                        "status_from": "in_review",
+                        "status_from": current_status,
                         "status_to": "needs_changes",
                         "title": "审查退回开发",
                         "summary": feedback[:300],
@@ -482,7 +484,7 @@ class ReviewerAgent(BaseAgent):
                         handoff={
                             "stage": "review_to_dev",
                             "to_agent": dev_agent,
-                            "status_from": "in_review",
+                            "status_from": current_status,
                             "status_to": "needs_changes",
                             "title": "审查退回开发",
                             "summary": feedback[:300],
@@ -569,11 +571,11 @@ class ReviewerAgent(BaseAgent):
                     "feedback_stage": "review_to_dev",
                     "feedback_actor": self.name,
                 },
-                handoff={
-                    "stage": "review_to_dev",
-                    "to_agent": dev_agent,
-                    "status_from": "in_review",
-                    "status_to": "needs_changes",
+                    handoff={
+                        "stage": "review_to_dev",
+                        "to_agent": dev_agent,
+                        "status_from": current_status,
+                        "status_to": "needs_changes",
                     "title": "审查退回开发",
                     "summary": feedback[:300],
                     "commit_hash": commit_hash,
@@ -808,7 +810,7 @@ class ReviewerAgent(BaseAgent):
                 handoff={
                     "stage": "review_to_manager",
                     "to_agent": "manager",
-                    "status_from": "in_review",
+                    "status_from": current_status,
                     "status_to": "approved",
                     "title": "审查通过，交接合并",
                     "summary": comment[:300],
@@ -880,7 +882,7 @@ class ReviewerAgent(BaseAgent):
                 handoff={
                     "stage": "review_to_dev",
                     "to_agent": dev_agent,
-                    "status_from": "in_review",
+                    "status_from": current_status,
                     "status_to": "needs_changes",
                     "title": "审查退回开发",
                     "summary": issue_feedback[:300],

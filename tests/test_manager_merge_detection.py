@@ -42,7 +42,7 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
             "id": "task-1",
             "title": "写一份锅包肉的菜谱",
             "description": "",
-            "status": "approved",
+            "status": "merging",
             "assignee": "manager",
             "project_id": "project-1",
             "commit_hash": commit_hash,
@@ -108,6 +108,7 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], task["id"])
         self.assertEqual(call.kwargs["fields"]["status"], "pending_acceptance")
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_acceptance")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "merging")
         self.assertEqual(call.kwargs["handoff"]["title"], "合并完成，交接验收")
 
     async def test_process_task_returns_to_dev_when_commit_parent_not_on_main(self):
@@ -138,6 +139,7 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], task["id"])
         self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_dev")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "merging")
         self.assertIn("提交基线不一致", call.kwargs["handoff"]["summary"])
 
     async def test_process_task_conflict_auto_merge_success(self):

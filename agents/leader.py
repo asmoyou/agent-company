@@ -450,6 +450,7 @@ class LeaderAgent(BaseAgent):
         output: str = "",
     ):
         task_id = task["id"]
+        current_status = str(task.get("status") or prev_status or "").strip() or prev_status
         msg = f"[系统错误] 主管（Leader）结构化结果无效：{reason}"
         current = self._current_system_retry(task.get("review_feedback"))
         next_retry = current + 1
@@ -519,7 +520,7 @@ class LeaderAgent(BaseAgent):
             handoff={
                 "stage": "leader_failed",
                 "to_agent": self.name,
-                "status_from": prev_status,
+                "status_from": current_status,
                 "status_to": "blocked",
                 "title": "主管（Leader）结构化结果无效",
                 "summary": msg,
@@ -590,6 +591,7 @@ class LeaderAgent(BaseAgent):
 
     async def _auto_triage(self, task: dict):
         task_id = task["id"]
+        current_status = str(task.get("status") or "").strip() or "triaging"
 
         # Idempotency: if subtasks already exist (crash recovery), just mark decomposed
         r = await self.http.get(f"/tasks/{task_id}/subtasks")
@@ -601,7 +603,7 @@ class LeaderAgent(BaseAgent):
                 handoff={
                     "stage": "leader_recover_decomposed",
                     "to_agent": "multi-agent",
-                    "status_from": task.get("_claimed_from_status", task.get("status")),
+                    "status_from": current_status,
                     "status_to": "decomposed",
                     "title": "分解状态恢复",
                     "summary": "检测到已存在子任务，恢复父任务为 decomposed",
@@ -691,7 +693,7 @@ class LeaderAgent(BaseAgent):
                 handoff={
                     "stage": "leader_failed",
                     "to_agent": self.name,
-                    "status_from": prev_status,
+                    "status_from": current_status,
                     "status_to": prev_status,
                     "title": "任务评估失败",
                     "summary": f"主管（Leader）评估失败（exit={returncode}），保持状态 {prev_status}",
@@ -768,7 +770,7 @@ class LeaderAgent(BaseAgent):
                 handoff={
                     "stage": "leader_to_decomposed",
                     "to_agent": "multi-agent",
-                    "status_from": task.get("_claimed_from_status", task.get("status")),
+                    "status_from": current_status,
                     "status_to": "decomposed",
                     "title": "任务分解完成",
                     "summary": f"已分解为 {n} 个子任务并分配",
@@ -807,7 +809,7 @@ class LeaderAgent(BaseAgent):
             handoff={
                 "stage": "leader_to_todo",
                 "to_agent": todo_agent,
-                "status_from": task.get("_claimed_from_status", task.get("status")),
+                "status_from": current_status,
                 "status_to": "todo",
                 "title": "任务转入开发",
                 "summary": reason[:300],
@@ -821,6 +823,7 @@ class LeaderAgent(BaseAgent):
 
     async def _force_decompose(self, task: dict):
         task_id = task["id"]
+        current_status = str(task.get("status") or "").strip() or "decompose"
         agent_list = await self._get_agent_list()
         prompt = self._render_prompt(
             FORCE_DECOMPOSE_PROMPT,
@@ -899,7 +902,7 @@ class LeaderAgent(BaseAgent):
                 handoff={
                     "stage": "leader_failed",
                     "to_agent": self.name,
-                    "status_from": prev_status,
+                    "status_from": current_status,
                     "status_to": prev_status,
                     "title": "任务分解失败",
                     "summary": f"主管（Leader）分解失败（exit={returncode}），保持状态 {prev_status}",
@@ -964,7 +967,7 @@ class LeaderAgent(BaseAgent):
             handoff={
                 "stage": "leader_to_decomposed",
                 "to_agent": "multi-agent",
-                "status_from": task.get("_claimed_from_status", task.get("status")),
+                "status_from": current_status,
                 "status_to": "decomposed",
                 "title": "强制分解完成",
                 "summary": f"已强制分解为 {n} 个子任务",

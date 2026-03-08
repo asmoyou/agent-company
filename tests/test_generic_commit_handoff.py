@@ -112,6 +112,7 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["fields"]["current_patchset_id"], "ps-writer-1")
         self.assertEqual(call.kwargs["fields"]["current_patchset_status"], "draft")
         self.assertEqual(call.kwargs["handoff"]["stage"], "writer_dirty_patchset")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "in_progress")
 
         payload = call.kwargs["handoff"]["payload"]
         self.assertTrue(payload["committed_by_cli"])
@@ -164,6 +165,7 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["fields"]["status"], "approved")
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
         self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "in_progress")
 
     async def test_prompt_includes_execution_contract_for_generic_worker(self):
         captured = {}
