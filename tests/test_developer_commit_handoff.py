@@ -57,6 +57,7 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.agent.stop_if_task_cancelled = mock.AsyncMock(return_value=False)
         self.agent.add_log = mock.AsyncMock()
         self.agent.add_alert = mock.AsyncMock()
+        self.agent.update_patchset = mock.AsyncMock(return_value={"id": "ps-dev-1", "status": "draft"})
         self.agent.transition_task = mock.AsyncMock(
             return_value={"task": {"id": "task-1", "status": "in_review"}}
         )
@@ -102,8 +103,18 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         await self.agent.process_task(task)
 
-        self.agent.transition_task.assert_awaited_once()
-        call = self.agent.transition_task.await_args
+        self.agent.update_patchset.assert_awaited_once()
+        patchset_call = self.agent.update_patchset.await_args
+        self.assertTrue(patchset_call.kwargs["update_task_refs"])
+        self.assertEqual(patchset_call.kwargs["patchset"]["status"], "draft")
+
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        checkpoint_call = self.agent.transition_task.await_args_list[0]
+        call = self.agent.transition_task.await_args_list[1]
+        self.assertEqual(checkpoint_call.kwargs["fields"]["status"], "in_progress")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["commit_hash"], head_after)
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_id"], "ps-dev-1")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
         self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
         self.assertEqual(call.kwargs["fields"]["commit_hash"], head_after)
         self.assertEqual(call.kwargs["fields"]["current_patchset_id"], "ps-dev-1")
@@ -155,8 +166,13 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         await self.agent.process_task(task)
 
-        self.agent.transition_task.assert_awaited_once()
-        call = self.agent.transition_task.await_args
+        self.agent.update_patchset.assert_awaited_once()
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        checkpoint_call = self.agent.transition_task.await_args_list[0]
+        call = self.agent.transition_task.await_args_list[1]
+        self.assertEqual(checkpoint_call.kwargs["fields"]["status"], "in_progress")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["commit_hash"], head_after)
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
         self.assertEqual(call.kwargs["fields"]["status"], "approved")
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
         self.assertEqual(call.kwargs["fields"]["current_patchset_status"], "approved")

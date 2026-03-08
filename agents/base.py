@@ -616,6 +616,14 @@ class BaseAgent:
             **self._transition_guard_fields(task_id),
         }
         r = await self.http.post(f"/tasks/{task_id}/patchsets", json=payload)
+        if r.status_code >= 400:
+            detail = ""
+            with contextlib.suppress(Exception):
+                detail = str(r.text or "").strip()
+            if detail:
+                raise RuntimeError(
+                    f"Patchset update failed ({r.status_code}) for task {task_id}: {detail[:500]}"
+                )
         r.raise_for_status()
         return r.json()
 
@@ -646,6 +654,14 @@ class BaseAgent:
             # Task may be deleted/cancelled while agent is still finishing up.
             self._post_output_bg(f"ℹ 任务不存在，停止同步: {task_id}")
             return None
+        if r.status_code >= 400:
+            detail = ""
+            with contextlib.suppress(Exception):
+                detail = str(r.text or "").strip()
+            if detail:
+                raise RuntimeError(
+                    f"Transition failed ({r.status_code}) for task {task_id}: {detail[:500]}"
+                )
         r.raise_for_status()
         return r.json()
 

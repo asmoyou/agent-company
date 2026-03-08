@@ -58,6 +58,7 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.agent.get_handoffs = mock.AsyncMock(return_value=[])
         self.agent.add_log = mock.AsyncMock()
         self.agent.add_alert = mock.AsyncMock()
+        self.agent.update_patchset = mock.AsyncMock(return_value={"id": "ps-writer-1", "status": "draft"})
         self.agent.transition_task = mock.AsyncMock(
             return_value={"task": {"id": "task-1", "status": "in_review"}}
         )
@@ -105,8 +106,11 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         await self.agent.process_task(task)
 
-        self.agent.transition_task.assert_awaited_once()
-        call = self.agent.transition_task.await_args
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        checkpoint_call = self.agent.transition_task.await_args_list[0]
+        self.assertEqual(checkpoint_call.kwargs["fields"]["status"], "in_progress")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
+        call = self.agent.transition_task.await_args_list[1]
         self.assertEqual(call.kwargs["fields"]["status"], "todo")
         self.assertEqual(call.kwargs["fields"]["commit_hash"], head_after[:7])
         self.assertEqual(call.kwargs["fields"]["current_patchset_id"], "ps-writer-1")
@@ -160,12 +164,72 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         await self.agent.process_task(task)
 
-        self.agent.transition_task.assert_awaited_once()
-        call = self.agent.transition_task.await_args
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        checkpoint_call = self.agent.transition_task.await_args_list[0]
+        self.assertEqual(checkpoint_call.kwargs["fields"]["status"], "in_progress")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
+        call = self.agent.transition_task.await_args_list[1]
         self.assertEqual(call.kwargs["fields"]["status"], "approved")
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
         self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
         self.assertEqual(call.kwargs["handoff"]["status_from"], "in_progress")
+
+    async def test_post_commit_transition_failure_keeps_checkpointed_delivery_artifacts(self):
+        head_before = "a" * 40
+        head_after = "e" * 40
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return head_before if _fake_git.rev_parse_calls == 0 else head_after
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            if args == ("rev-parse", "--short", "HEAD"):
+                return head_after[:7]
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        _fake_git.rev_parse_calls = 0
+
+        async def _git_side_effect(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                val = await _fake_git(*args, cwd=cwd, task_id=task_id)
+                _fake_git.rev_parse_calls += 1
+                return val
+            return await _fake_git(*args, cwd=cwd, task_id=task_id)
+
+        self.agent.git = mock.AsyncMock(side_effect=_git_side_effect)
+        self.agent.transition_task = mock.AsyncMock(
+            side_effect=[
+                {"task": {"id": "task-7", "status": "in_progress"}},
+                RuntimeError("Transition failed (422) for task task-7: handoff.status_from 与任务当前状态不一致"),
+            ]
+        )
+
+        task = {
+            "id": "task-7",
+            "title": "post commit checkpoint",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        self.agent.update_patchset.assert_awaited_once()
+        patchset_call = self.agent.update_patchset.await_args
+        self.assertTrue(patchset_call.kwargs["update_task_refs"])
+        self.assertEqual(patchset_call.kwargs["patchset"]["status"], "draft")
+
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        checkpoint_call = self.agent.transition_task.await_args_list[0]
+        final_call = self.agent.transition_task.await_args_list[1]
+        self.assertEqual(checkpoint_call.kwargs["fields"]["status"], "in_progress")
+        self.assertEqual(checkpoint_call.kwargs["fields"]["commit_hash"], head_after[:7])
+        self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
+        self.assertEqual(final_call.kwargs["fields"]["status"], "in_review")
+        self.agent.add_alert.assert_awaited()
+        self.assertIn("无法把任务推进到 in_review", self.agent.add_log.await_args_list[-1].args[1])
 
     async def test_prompt_includes_execution_contract_for_generic_worker(self):
         captured = {}

@@ -840,6 +840,80 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(data["task"]["status"], "in_review")
         self.assertEqual(data["handoff"]["commit_hash"], "abc1234")
 
+    def test_transition_accepts_leader_runtime_status_alias_for_handoff_source(self):
+        task = self._create_task(status="triaging", assigned_agent="leader")
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "todo",
+                    "assignee": None,
+                    "assigned_agent": "developer",
+                    "dev_agent": "developer",
+                },
+                "handoff": {
+                    "stage": "leader_to_todo",
+                    "from_agent": "leader",
+                    "to_agent": "developer",
+                    "status_from": "triage",
+                    "status_to": "todo",
+                    "title": "任务转入开发",
+                    "summary": "simple task",
+                    "conclusion": "simple task",
+                    "payload": {"action": "simple"},
+                },
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "todo")
+        self.assertEqual(data["handoff"]["status_from"], "triaging")
+
+    def test_transition_accepts_developer_runtime_status_alias_for_handoff_source(self):
+        task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
+        patchset = {
+            "id": "ps-runtime-alias-1",
+            "source_branch": "agent/developer/task-runtime-alias",
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "commit_count": 1,
+            "commit_list": [{"hash": "b" * 40, "short": "bbbbbbb", "subject": "feat: alias"}],
+            "changed_files": [{"status": "M", "path": "script.js"}],
+            "artifact_manifest": {"path": ".opc/delivery.json", "keys": ["deliverables"]},
+            "diff_stat": " script.js | 2 +-",
+            "status": "submitted",
+            "worktree_clean": True,
+        }
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "in_review",
+                    "assignee": None,
+                    "current_patchset_id": patchset["id"],
+                    "current_patchset_status": "submitted",
+                },
+                "handoff": {
+                    "stage": "dev_to_review",
+                    "from_agent": "developer",
+                    "to_agent": "reviewer",
+                    "status_from": "todo",
+                    "status_to": "in_review",
+                    "title": "开发交接审查",
+                    "summary": "提交 patchset 进入审查",
+                    "commit_hash": "b" * 40,
+                    "conclusion": "进入审查",
+                    "payload": {"patchset": patchset},
+                },
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "in_review")
+        self.assertEqual(data["handoff"]["status_from"], "in_progress")
+
     def test_transition_persists_patchset_and_exposes_patchset_list(self):
         task = self._create_task(status="in_progress", assigned_agent="developer", dev_agent="developer")
         patchset = {
@@ -1021,6 +1095,81 @@ class TaskActionsApiTest(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 422)
         self.assertIn("关键流转必须携带 handoff", res.text)
+
+    def test_transition_allows_internal_rework_stage_to_needs_changes(self):
+        task = self._create_task(
+            status="in_progress",
+            assigned_agent="developer",
+            dev_agent="developer",
+        )
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": "developer",
+                    "dev_agent": "developer",
+                    "review_feedback": "预检未通过，请继续收敛。",
+                },
+                "handoff": {
+                    "stage": "developer_pre_review_failed",
+                    "from_agent": "developer",
+                    "to_agent": "developer",
+                    "status_from": "in_progress",
+                    "status_to": "needs_changes",
+                    "title": "送审前预检未通过",
+                    "summary": "缺少关键验收证据",
+                    "conclusion": "回到开发返工队列",
+                    "payload": {
+                        "issues": [
+                            {
+                                "issue_id": "verify-1",
+                                "summary": "缺少关键验收证据",
+                                "status": "new",
+                            }
+                        ]
+                    },
+                },
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "needs_changes")
+        self.assertEqual(data["handoff"]["stage"], "developer_pre_review_failed")
+
+    def test_transition_rejects_unknown_internal_stage_to_needs_changes(self):
+        task = self._create_task(
+            status="in_progress",
+            assigned_agent="developer",
+            dev_agent="developer",
+        )
+        res = self.client.post(
+            f"/tasks/{task['id']}/transition",
+            json={
+                "fields": {
+                    "status": "needs_changes",
+                    "assignee": None,
+                    "assigned_agent": "developer",
+                    "dev_agent": "developer",
+                },
+                "handoff": {
+                    "stage": "developer_retry_loop",
+                    "from_agent": "developer",
+                    "to_agent": "developer",
+                    "status_from": "in_progress",
+                    "status_to": "needs_changes",
+                    "title": "开发继续返工",
+                    "summary": "unknown internal retry stage",
+                    "conclusion": "unknown internal retry stage",
+                    "payload": {},
+                },
+            },
+            headers=self._agent_headers,
+        )
+        self.assertEqual(res.status_code, 422)
+        self.assertIn("review_to_dev", res.text)
 
     def test_transition_allows_description_update(self):
         task = self._create_task(status="triage")

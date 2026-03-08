@@ -85,6 +85,23 @@ class AssumptionContractFlowTest(unittest.TestCase):
         self.assertNotIn("R2", decision["refined_description"])
         self.assertIn("原始需求", decision["refined_description"])
 
+    def test_contract_surface_extracts_file_paths_from_described_deliverables(self):
+        contract = extract_task_contract_from_description(
+            (
+                "## 任务目标\n- 丰富前端交互。\n\n"
+                "## 交付物\n"
+                "- `script.js`：多种食物生成、判定、特殊效果与状态反馈逻辑。\n"
+                "- `index.html` 或现有页面信息区：展示与食物效果相关的必要文本提示。\n"
+                "- `smoke-test.js`：覆盖多食物和特殊效果的本地可执行测试脚本。\n"
+            )
+        )
+
+        allowed = contract["allowed_surface"]
+        self.assertIn("script.js", allowed["files"])
+        self.assertIn("index.html", allowed["files"])
+        self.assertIn("smoke-test.js", allowed["files"])
+        self.assertNotIn("script.js`：多种食物生成、判定、特殊效果与状态反馈逻辑。", allowed["files"])
+
 
 if __name__ == "__main__":
     unittest.main()

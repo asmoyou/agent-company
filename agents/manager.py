@@ -335,7 +335,14 @@ class ManagerAgent(BaseAgent):
         except Exception:
             main_head_before = ""
         try:
-            dirty_status = (await self.git("status", "--porcelain", cwd=proj_root)).strip()
+            dirty_status = (
+                await self.git(
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                    cwd=proj_root,
+                )
+            ).strip()
         except Exception:
             dirty_status = ""
         if dirty_status:

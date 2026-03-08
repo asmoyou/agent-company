@@ -115,6 +115,30 @@ class AutonomousDeliveryDbTest(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["summary"], "未覆盖真实下载路径")
 
+    def test_patchset_round_trip_deserializes_structured_fields(self):
+        task = self._create_task(status="todo")
+        saved = db.save_task_patchset(
+            task["id"],
+            {
+                "id": "ps-roundtrip-1",
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "commit_count": 1,
+                "commit_list": [{"hash": "b" * 40, "short": "bbbbbbb", "subject": "feat: roundtrip"}],
+                "changed_files": [{"status": "M", "path": "smoke-test.js"}],
+                "artifact_manifest": {"path": ".opc/delivery.json", "keys": ["deliverables"]},
+                "status": "draft",
+                "worktree_clean": False,
+            },
+        )
+
+        self.assertIsNotNone(saved)
+        fetched = db.get_task_patchset("ps-roundtrip-1")
+        self.assertEqual(fetched["changed_files"][0]["path"], "smoke-test.js")
+        self.assertEqual(fetched["artifact_manifest"]["path"], ".opc/delivery.json")
+        listed = db.list_task_patchsets(task["id"])
+        self.assertEqual(listed[0]["commit_list"][0]["subject"], "feat: roundtrip")
+
     def test_claim_task_skips_cooldown(self):
         task = self._create_task(status="todo")
         db.update_task(
@@ -235,6 +259,61 @@ class DeveloperPreReviewVerifierTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["bundle"]["assumption_conflicts"])
         summaries = {item["summary"] for item in result["issues"]}
         self.assertTrue(any("假设" in summary for summary in summaries))
+
+    def test_pre_review_verifier_accepts_behavioral_smoke_test_evidence(self):
+        task = {
+            "id": "task-3",
+            "title": "丰富贪吃蛇食物种类",
+            "description": (
+                "## 任务目标\n- 丰富贪吃蛇食物种类\n\n"
+                "## 证据要求\n"
+                "- 本地执行 `node smoke-test.js`，结果需覆盖特殊食物与重开流程。\n"
+                "- 若特殊食物生成包含随机性，测试中需使用可控输入、桩数据或固定序列，避免只能依赖随机命中证明功能有效。\n\n"
+                "## 交付物\n"
+                "- `script.js`：多种食物与特殊效果逻辑。\n"
+                "- `index.html`：页面状态提示。\n"
+                "- `smoke-test.js`：本地可执行冒烟脚本。\n\n"
+                "## 验收标准\n"
+                "- [ ] 吃到至少一种特殊食物时，会触发明确的额外效果，且效果结果能被玩家观察到或被测试断言验证。\n"
+                "- [ ] 执行 `node smoke-test.js` 通过，且手动完成开始、关键交互和失败恢复三段冒烟验证。\n"
+            ),
+            "status": "needs_changes",
+            "_claimed_from_status": "needs_changes",
+            "current_contract": {
+                "version": 2,
+                "goal": "丰富贪吃蛇食物种类",
+                "deliverables": ["script.js", "index.html", "smoke-test.js"],
+                "acceptance": [
+                    "吃到至少一种特殊食物时，会触发明确的额外效果，且效果结果能被玩家观察到或被测试断言验证。",
+                    "执行 `node smoke-test.js` 通过，且手动完成开始、关键交互和失败恢复三段冒烟验证。",
+                ],
+                "evidence_required": [
+                    "本地执行 `node smoke-test.js`，结果需覆盖特殊食物与重开流程。",
+                    "若特殊食物生成包含随机性，测试中需使用可控输入、桩数据或固定序列，避免只能依赖随机命中证明功能有效。",
+                ],
+                "allowed_surface": {
+                    "roots": ["index.html", "script.js", "smoke-test.js"],
+                    "files": ["index.html", "script.js", "smoke-test.js"],
+                },
+            },
+            "allowed_surface": {
+                "roots": ["index.html", "script.js", "smoke-test.js"],
+                "files": ["index.html", "script.js", "smoke-test.js"],
+            },
+        }
+        patchset = {
+            "changed_files": [
+                {"status": "M", "path": "index.html"},
+                {"status": "M", "path": "script.js"},
+                {"status": "M", "path": "smoke-test.js"},
+            ],
+        }
+
+        result = self.agent._build_pre_review_evidence_bundle(task, patchset)
+
+        self.assertFalse(result["has_blockers"])
+        self.assertFalse(result["bundle"]["missing_acceptance_checks"])
+        self.assertFalse(result["bundle"]["missing_evidence_required"])
 
 
 if __name__ == "__main__":
