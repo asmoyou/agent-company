@@ -1286,6 +1286,23 @@ class TaskActionsApiTest(unittest.TestCase):
         self.assertEqual(data["task"]["status"], "in_review")
         self.assertEqual(data["task"]["assigned_agent"], "reviewer")
 
+    def test_retry_blocked_action_resumes_manager_merge_block(self):
+        task = self._create_task(
+            status="blocked",
+            assigned_agent="manager",
+            dev_agent="developer",
+        )
+        db.update_task(task["id"], review_feedback="[合并前置检查失败] main 工作区存在未提交改动")
+        res = self.client.post(
+            f"/tasks/{task['id']}/actions",
+            json={"action": "retry_blocked"},
+            headers=self._headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["task"]["status"], "approved")
+        self.assertEqual(data["task"]["assigned_agent"], "manager")
+
     def test_retry_blocked_action_resumes_generic_delivery_block(self):
         self._create_custom_agent(key="writer")
         task = self._create_task(
