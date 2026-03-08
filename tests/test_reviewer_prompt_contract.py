@@ -254,6 +254,13 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
             "latest_evidence": {
                 "summary": "预检仍缺证据",
                 "bundle": {
+                    "hard_blockers": [
+                        {
+                            "issue_id": "evidence-required-1",
+                            "summary": "预检未发现与证据要求对应的验证资产：node smoke-test.js",
+                            "category": "evidence",
+                        }
+                    ],
                     "missing_evidence_required": [{"item": "node smoke-test.js", "status": "missing"}],
                     "missing_acceptance_checks": [],
                     "assumption_conflicts": [],

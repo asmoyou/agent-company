@@ -3,10 +3,12 @@ import json
 
 from base import BaseAgent, is_review_enabled
 from task_intelligence import (
+    acceptance_requires_test_evidence,
     compute_failure_fingerprint,
     detect_surface_from_changed_files,
     evaluate_contract_evidence,
     find_surface_violations,
+    looks_like_behavioral_evidence_path,
     next_retry_strategy,
     normalize_allowed_surface,
 )
@@ -332,15 +334,16 @@ class GenericAgent(BaseAgent):
             lower = str(item or "").lower()
             status = "inferred"
             evidence = "patchset changed_files"
-            if any(token in lower for token in ("测试", "test", "pytest", "unit", "e2e", "integration")):
+            if acceptance_requires_test_evidence(item):
                 proved = any(
-                    "/test" in path
+                    looks_like_behavioral_evidence_path(path)
+                    or "/test" in path
                     or path.startswith("test")
                     or path.startswith("tests/")
                     for path in changed_paths_lower
                 )
                 status = "proved" if proved else "missing"
-                evidence = "test paths in patchset"
+                evidence = "test/behavioral evidence paths in patchset"
                 if not proved:
                     issues.append(
                         {
@@ -349,7 +352,7 @@ class GenericAgent(BaseAgent):
                             "severity": "high",
                             "category": "coverage",
                             "summary": "预检未发现与测试验收项对应的测试文件变更",
-                            "reproducer": "检查 patchset changed_files 是否包含 tests/ 或 test* 文件",
+                            "reproducer": "检查 patchset changed_files 是否包含 tests/、smoke-test 或其它 test/spec/e2e 类验证文件",
                             "evidence_gap": "缺少测试文件或测试证据",
                             "scope": "tests",
                             "fix_hint": "优先补齐真实验收路径的测试，再重新送审",
@@ -410,6 +413,21 @@ class GenericAgent(BaseAgent):
         )
         issues.extend(evidence_result["issues"])
         missing_checks = [item for item in acceptance_checks if item["status"] == "missing"]
+        hard_blockers: list[dict] = []
+        soft_warnings: list[dict] = []
+        for issue in issues:
+            issue_id = str(issue.get("issue_id") or "").strip().lower()
+            if (
+                issue_id.startswith("deliverable-")
+                or issue_id.startswith("surface-")
+                or issue_id.startswith("assumption-conflict-")
+            ):
+                hard_blockers.append(issue)
+                continue
+            if issue_id.startswith("evidence-required-") and str(issue.get("scope") or "").strip():
+                hard_blockers.append(issue)
+                continue
+            soft_warnings.append(issue)
         summary = (
             f"预检完成：changed_files={len(changed_paths)}，"
             f"missing_acceptance={len(missing_checks)}，"
@@ -429,12 +447,59 @@ class GenericAgent(BaseAgent):
                 "missing_acceptance_checks": missing_checks,
                 "missing_evidence_required": evidence_result["missing_evidence_required"],
                 "assumption_conflicts": evidence_result["assumption_conflicts"],
+                "hard_blockers": hard_blockers,
+                "soft_warnings": soft_warnings,
                 "artifact_manifest": artifact_manifest if isinstance(artifact_manifest, dict) else {},
             },
             "issues": issues,
             "allowed_surface": current_surface if any(current_surface.values()) else allowed_surface,
-            "has_blockers": bool(issues),
+            "has_blockers": bool(hard_blockers),
         }
+
+    async def _checkpoint_committed_delivery(
+        self,
+        *,
+        task_id: str,
+        current_status: str,
+        commit_hash: str,
+        patchset: dict,
+        allowed_surface: dict | None = None,
+    ) -> None:
+        checkpoint_patchset = {
+            **dict(patchset or {}),
+            "status": "draft",
+            "summary": str((patchset or {}).get("summary") or "commit checkpoint").strip()[:1000],
+        }
+        patchset_id = str(checkpoint_patchset.get("id") or "").strip() or None
+        try:
+            await self.update_patchset(
+                task_id,
+                patchset=checkpoint_patchset,
+                update_task_refs=True,
+            )
+        except Exception as e:
+            await self.add_log(
+                task_id,
+                f"⚠ 无法保存提交检查点 patchset：{str(e)[:400]}",
+            )
+        checkpoint_fields = {
+            "status": current_status,
+            "commit_hash": commit_hash,
+            "current_patchset_id": patchset_id,
+            "current_patchset_status": "draft",
+        }
+        if allowed_surface is not None:
+            checkpoint_fields["allowed_surface_json"] = allowed_surface
+        try:
+            await self.transition_task(
+                task_id,
+                fields=checkpoint_fields,
+            )
+        except Exception as e:
+            await self.add_log(
+                task_id,
+                f"⚠ 无法保存提交检查点任务元数据：{str(e)[:400]}",
+            )
 
     async def process_task(self, task: dict):
         task_id = task["id"]
@@ -598,6 +663,12 @@ class GenericAgent(BaseAgent):
                 head_sha=head_after,
             )
             await self.add_log(task_id, f"检测到 CLI 已直接创建提交: {commit_display}")
+            await self._checkpoint_committed_delivery(
+                task_id=task_id,
+                current_status=current_status,
+                commit_hash=commit_hash,
+                patchset=patchset,
+            )
             if diff_stat:
                 await self.add_log(
                     task_id,

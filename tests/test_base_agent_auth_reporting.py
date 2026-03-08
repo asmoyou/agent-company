@@ -34,6 +34,7 @@ class BaseAgentAuthReportingTest(unittest.IsolatedAsyncioTestCase):
         resp.status_code = status_code
         resp.json.return_value = payload or {}
         resp.raise_for_status.return_value = None
+        resp.text = ""
         return resp
 
     async def test_init_sets_agent_token_header_on_clients(self):
@@ -150,6 +151,18 @@ class BaseAgentAuthReportingTest(unittest.IsolatedAsyncioTestCase):
         renewed = await agent.renew_task_lease("task-1", "run-1", "lease-1")
         self.assertFalse(renewed)
         conflict.raise_for_status.assert_not_called()
+
+    async def test_transition_task_surfaces_response_detail_on_http_error(self):
+        agent = self._new_agent("developer")
+        bad = self._response(status_code=422)
+        bad.text = "handoff.status_from 与任务当前状态不一致: todo != in_progress"
+        agent.http.post = mock.AsyncMock(return_value=bad)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            await agent.transition_task("task-1", fields={"status": "in_review"})
+
+        self.assertIn("Transition failed (422)", str(ctx.exception))
+        self.assertIn("handoff.status_from", str(ctx.exception))
 
 
 if __name__ == "__main__":

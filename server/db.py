@@ -5032,6 +5032,25 @@ def _coerce_patchset_artifact_manifest(raw) -> dict:
     return _sanitize_patchset_manifest_value(data)
 
 
+def _deserialize_patchset_row(row) -> dict | None:
+    if not row:
+        return None
+    out = dict(row)
+    out["commit_list"] = _coerce_patchset_commit_list(out.get("commit_list"))
+    out["changed_files"] = _coerce_patchset_changed_files(out.get("changed_files"))
+    out["artifact_manifest"] = _coerce_patchset_artifact_manifest(out.get("artifact_manifest"))
+    raw_clean = out.get("worktree_clean")
+    if isinstance(raw_clean, str):
+        out["worktree_clean"] = raw_clean.strip().lower() not in {"0", "false", "off", "no"}
+    else:
+        out["worktree_clean"] = bool(raw_clean)
+    try:
+        out["commit_count"] = int(out.get("commit_count") or 0)
+    except Exception:
+        out["commit_count"] = 0
+    return out
+
+
 def _patchset_identity(task_id: str, base_sha: str, head_sha: str) -> str:
     digest = hashlib.sha1(f"{task_id}|{base_sha}|{head_sha}".encode("utf-8")).hexdigest()
     return f"ps_{digest[:24]}"
@@ -5278,7 +5297,7 @@ def _save_task_patchset_in_conn(
         "SELECT * FROM task_patchsets WHERE id=?",
         (patchset_id,),
     ).fetchone()
-    return dict(row) if row else None
+    return _deserialize_patchset_row(row)
 
 
 def save_task_patchset(task_id: str, patchset: dict | None, *, update_task_refs: bool = True) -> dict | None:
@@ -5303,7 +5322,7 @@ def get_task_patchset(patchset_id: str) -> dict | None:
             "SELECT * FROM task_patchsets WHERE id=?",
             (patchset_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _deserialize_patchset_row(row)
     finally:
         conn.close()
 
@@ -5315,7 +5334,7 @@ def list_task_patchsets(task_id: str) -> list[dict]:
             "SELECT * FROM task_patchsets WHERE task_id=? ORDER BY created_at ASC, id ASC",
             (task_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_deserialize_patchset_row(r) for r in rows if r]
     finally:
         conn.close()
 

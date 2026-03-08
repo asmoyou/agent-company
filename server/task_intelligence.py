@@ -134,9 +134,11 @@ def infer_allowed_surface(contract: dict | None) -> dict[str, list[str]]:
     cli_paths: list[str] = []
     for item in (contract or {}).get("deliverables", []) or []:
         text = str(item or "")
-        candidates = re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", text)
-        if not candidates and ("/" in text or "." in text):
-            candidates = [text.strip("`'\" ")]
+        candidates = [str(match or "").strip() for match in EVIDENCE_PATH_RE.findall(text)]
+        if not candidates:
+            stripped = re.split(r"[：:]", text, maxsplit=1)[0].strip("`'\" ")
+            if stripped and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", stripped):
+                candidates = [stripped]
         for raw_path in candidates:
             path = raw_path.strip().lstrip("./")
             if not path:
@@ -328,13 +330,42 @@ def _artifact_manifest_paths(artifact_manifest) -> list[str]:
     return uniq[:64]
 
 
-def _looks_like_behavioral_evidence_path(path: str) -> bool:
+def looks_like_behavioral_evidence_path(path: str) -> bool:
     lowered = str(path or "").strip().lower()
     if not lowered:
         return False
     if TEST_LIKE_PATH_RE.search(lowered):
         return True
     return lowered.endswith((".spec.js", ".spec.ts", ".test.js", ".test.ts"))
+
+
+def acceptance_requires_test_evidence(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    explicit_test_tokens = (
+        "pytest",
+        "unit",
+        "integration",
+        "e2e",
+        "playwright",
+        "cypress",
+        "smoke-test",
+        "smoke test",
+        "测试脚本",
+        "自动化",
+        "断言",
+        "assert",
+        "`node ",
+    )
+    if any(token in lowered for token in explicit_test_tokens):
+        return True
+    if "测试" in lowered or "test" in lowered:
+        observational_tokens = ("观察", "可见", "视觉", "玩家", "手动", "冒烟", "显示", "提示")
+        if any(token in lowered for token in observational_tokens):
+            return False
+        return True
+    return False
 
 
 def _looks_like_behavioral_contract(contract: dict | None) -> bool:
@@ -398,9 +429,14 @@ def evaluate_contract_evidence(
                 matched_paths.append(candidate)
         if not matched_paths:
             if any(token in lowered for token in ("pytest", "unit", "integration", "e2e", "playwright", "cypress", "smoke", "test")):
-                matched_paths = [path for path in changed_paths if _looks_like_behavioral_evidence_path(path)]
+                matched_paths = [path for path in changed_paths if looks_like_behavioral_evidence_path(path)]
             elif any(token in lowered for token in ("readme", "文档", "说明", ".md")):
                 matched_paths = [path for path in changed_paths if path.lower().endswith(".md")]
+            elif any(
+                token in lowered
+                for token in ("测试", "断言", "桩", "stub", "mock", "seed", "固定序列", "随机")
+            ):
+                matched_paths = [path for path in changed_paths if looks_like_behavioral_evidence_path(path)]
         status = "provided" if matched_paths else "missing"
         check = {
             "item": text,
@@ -426,7 +462,7 @@ def evaluate_contract_evidence(
             )
 
     if not evidence_checks and _looks_like_behavioral_contract(contract):
-        behavior_paths = [path for path in changed_paths if _looks_like_behavioral_evidence_path(path)]
+        behavior_paths = [path for path in changed_paths if looks_like_behavioral_evidence_path(path)]
         if not behavior_paths:
             summary = "交互/行为型任务缺少本地验证脚本或测试证据"
             missing_evidence_required.append(
@@ -490,10 +526,11 @@ def evaluate_contract_evidence(
 
 def evidence_bundle_has_blockers(bundle: dict | None) -> bool:
     data = bundle or {}
+    hard_blockers = data.get("hard_blockers")
+    if isinstance(hard_blockers, list):
+        return bool(hard_blockers)
     return bool(
-        (data.get("missing_acceptance_checks") or [])
-        or (data.get("missing_evidence_required") or [])
-        or (data.get("assumption_conflicts") or [])
+        (data.get("assumption_conflicts") or [])
         or (data.get("surface_violations") or [])
     )
 
@@ -501,6 +538,16 @@ def evidence_bundle_has_blockers(bundle: dict | None) -> bool:
 def summarize_evidence_blockers(bundle: dict | None, *, limit: int = 4) -> list[str]:
     data = bundle or {}
     lines: list[str] = []
+    hard_blockers = data.get("hard_blockers")
+    if isinstance(hard_blockers, list):
+        for item in hard_blockers[: max(1, limit)]:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                lines.append(summary)
+        if lines:
+            return lines[: max(1, limit)]
     for item in (data.get("missing_acceptance_checks") or [])[:limit]:
         label = str(item.get("item") or "").strip()
         if label:

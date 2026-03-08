@@ -1690,6 +1690,14 @@ CRITICAL_TRANSITION_HANDOFF_STAGES: dict[str, set[str]] = {
     "completed": {"acceptance_complete"},
 }
 
+INTERNAL_NEEDS_CHANGES_STAGE_SUFFIXES = (
+    "_failed",
+    "_commit_required",
+    "_no_progress",
+    "_dirty_patchset",
+    "_pre_review_failed",
+)
+
 PATCHSET_REQUIRED_STATUSES = {"in_review", "approved", "pending_acceptance"}
 
 
@@ -1738,6 +1746,42 @@ def _agent_polls_status(agent_key: str | None, status: str) -> bool:
     if not at:
         return False
     return wanted in {_norm_status(x) for x in _parse_poll_statuses(at.get("poll_statuses"))}
+
+
+def _agent_runtime_status_compatible(agent_key: str | None, reported: str | None, actual: str | None) -> bool:
+    key = normalize_agent_key(agent_key, default="")
+    reported_status = _norm_status(reported)
+    actual_status = _norm_status(actual)
+    if not key or not reported_status or not actual_status:
+        return False
+    if reported_status == actual_status:
+        return True
+    at = db.get_agent_type(key)
+    if not at:
+        return False
+    working_status = _norm_status(at.get("working_status"))
+    poll_statuses = {_norm_status(x) for x in _parse_poll_statuses(at.get("poll_statuses")) if _norm_status(x)}
+    if not working_status or not poll_statuses:
+        return False
+    return (
+        actual_status == working_status and reported_status in poll_statuses
+    ) or (
+        reported_status == working_status and actual_status in poll_statuses
+    )
+
+
+def _canonicalize_handoff_status_from(before: dict, handoff_row: dict | None) -> None:
+    if not handoff_row:
+        return
+    actual_status = _norm_status(before.get("status"))
+    reported_status = _norm_status(handoff_row.get("status_from"))
+    if not reported_status or not actual_status:
+        return
+    if reported_status == actual_status:
+        handoff_row["status_from"] = actual_status
+        return
+    if _agent_runtime_status_compatible(handoff_row.get("from_agent"), reported_status, actual_status):
+        handoff_row["status_from"] = actual_status
 
 
 def _validate_status_transition(before: dict, fields: dict):
@@ -2066,6 +2110,7 @@ def _validate_transition_artifacts(
     if not nxt or prev == nxt:
         return
 
+    _canonicalize_handoff_status_from(before, handoff_row)
     handoff_stage = _norm_status((handoff_row or {}).get("stage"))
     handoff_status_from = _norm_status((handoff_row or {}).get("status_from"))
     handoff_status_to = _norm_status((handoff_row or {}).get("status_to"))
@@ -2079,12 +2124,34 @@ def _validate_transition_artifacts(
     if allowed_stages:
         if not handoff_row:
             raise HTTPException(422, f"status={nxt} 的关键流转必须携带 handoff")
-        if handoff_stage not in allowed_stages:
+        if handoff_stage not in allowed_stages and not (
+            nxt == "needs_changes" and _is_internal_needs_changes_retry(before, handoff_row)
+        ):
             stages = ", ".join(sorted(allowed_stages))
             raise HTTPException(422, f"status={nxt} 的关键流转要求 handoff.stage 属于: {stages}")
 
     if nxt in PATCHSET_REQUIRED_STATUSES and not patchset_row:
         raise HTTPException(422, f"status={nxt} 的关键流转必须包含 patchset/commit 证据")
+
+
+def _is_internal_needs_changes_retry(before: dict, handoff_row: dict | None) -> bool:
+    if not handoff_row:
+        return False
+    stage = _norm_status((handoff_row or {}).get("stage"))
+    if not stage or not any(stage.endswith(suffix) for suffix in INTERNAL_NEEDS_CHANGES_STAGE_SUFFIXES):
+        return False
+    from_agent = str((handoff_row or {}).get("from_agent") or "").strip()
+    to_agent = str((handoff_row or {}).get("to_agent") or "").strip()
+    if not from_agent or from_agent != to_agent:
+        return False
+    valid_agents = {
+        str(before.get("assigned_agent") or "").strip(),
+        str(before.get("dev_agent") or "").strip(),
+    }
+    valid_agents.discard("")
+    if valid_agents and from_agent not in valid_agents:
+        return False
+    return True
 
 
 async def _apply_transition_and_broadcast(

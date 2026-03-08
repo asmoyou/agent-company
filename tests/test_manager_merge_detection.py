@@ -392,7 +392,7 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         async def _fake_git(*args, cwd: Path, task_id=None):
             if args == ("rev-parse", "HEAD"):
                 return "d" * 40
-            if args == ("status", "--porcelain"):
+            if args == ("status", "--porcelain", "--untracked-files=no"):
                 return " M README.md"
             raise AssertionError(f"Unexpected git args: {args}")
 
@@ -405,6 +405,67 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["fields"]["status"], "blocked")
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_blocked")
         self.agent.add_alert.assert_awaited()
+
+    async def test_process_task_ignores_untracked_main_worktree_noise(self):
+        head_sha = "4c6a0941655523f7dd2aded90e055525d813c1d1"
+        task = self._task(head_sha)
+        self.agent.resolve_task_patchset = mock.AsyncMock(
+            return_value={
+                "id": "ps-untracked-root-1",
+                "base_sha": "7f9c2ba4e88f827d616045507605853ed73b809c",
+                "head_sha": head_sha,
+                "source_branch": "agent/developer/task-1",
+                "commit_count": 2,
+                "status": "approved",
+                "changed_files": [{"status": "M", "path": "index.html"}],
+                "worktree_clean": True,
+            }
+        )
+        self.agent.enrich_patchset_snapshot = mock.AsyncMock(
+            return_value={
+                "id": "ps-untracked-root-1",
+                "base_sha": "7f9c2ba4e88f827d616045507605853ed73b809c",
+                "head_sha": head_sha,
+                "source_branch": "agent/developer/task-1",
+                "commit_count": 2,
+                "status": "approved",
+                "changed_files": [{"status": "M", "path": "index.html"}],
+                "worktree_clean": True,
+            }
+        )
+        self.agent.ensure_agent_workspace = mock.AsyncMock(
+            return_value=(self.repo, self.repo / ".worktrees" / "developer" / "task-1", "agent/developer/task-1")
+        )
+        self.agent._merge_patchset_squash = mock.AsyncMock(
+            return_value={
+                "status": "merged",
+                "head_before": "ec0a922",
+                "head_after": "14a2a1a",
+                "merge_strategy": "squash",
+            }
+        )
+
+        heads = iter(["ec0a922", "14a2a1a"])
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args[:2] == ("cat-file", "-e"):
+                return ""
+            if args == ("rev-parse", "HEAD"):
+                return "d" * 40
+            if args == ("status", "--porcelain", "--untracked-files=no"):
+                return ""
+            if args[:2] == ("rev-parse", "--short"):
+                return next(heads)
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        await self.agent.process_task(task)
+
+        self.agent._merge_patchset_squash.assert_awaited_once()
+        call = self.agent.transition_task.await_args
+        self.assertEqual(call.kwargs["fields"]["status"], "pending_acceptance")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_acceptance")
 
     async def test_process_task_falls_back_to_commit_merge_when_delivery_model_is_commit(self):
         target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
