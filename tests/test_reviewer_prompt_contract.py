@@ -196,7 +196,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
             "id": "task-4",
             "title": "补全接口测试覆盖",
             "description": "",
-            "status": "in_review",
+            "status": "reviewing",
             "commit_hash": patchset["head_sha"],
             "assigned_agent": "developer",
             "dev_agent": "developer",
@@ -208,6 +208,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
 
         call = self.agent.transition_task.await_args
         self.assertEqual(call.kwargs["fields"]["status"], "approved")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "reviewing")
         self.assertEqual(call.kwargs["handoff"]["payload"]["patchset"]["queue_status"], "queued")
         self.assertEqual(call.kwargs["handoff"]["payload"]["patchset"]["reviewed_main_sha"], "c" * 40)
         self.assertEqual(call.kwargs["handoff"]["payload"]["patchset"]["changed_files"][0]["path"], "index.html")
@@ -244,7 +245,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
             "id": "task-guard-1",
             "title": "补全交互验证",
             "description": "",
-            "status": "in_review",
+            "status": "reviewing",
             "commit_hash": patchset["head_sha"],
             "assigned_agent": "developer",
             "dev_agent": "developer",
@@ -266,6 +267,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         call = self.agent.transition_task.await_args
         self.assertEqual(call.kwargs["fields"]["status"], "needs_changes")
         self.assertEqual(call.kwargs["handoff"]["stage"], "review_to_dev")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "reviewing")
         self.assertIn("机器校验阻止通过", call.kwargs["fields"]["review_feedback"])
 
     async def test_process_task_falls_back_to_commit_review_when_delivery_model_is_commit(self):

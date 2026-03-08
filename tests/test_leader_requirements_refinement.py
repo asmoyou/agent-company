@@ -89,11 +89,14 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         self.agent._create_subtasks.assert_not_awaited()
         call = self.agent.transition_task.await_args
         self.assertEqual(call.args[0], task["id"])
-        self.assertEqual(call.kwargs["fields"]["description"], refined)
+        self.assertIn(refined, call.kwargs["fields"]["description"])
+        self.assertIn("## 假设", call.kwargs["fields"]["description"])
+        self.assertIn("## 证据要求", call.kwargs["fields"]["description"])
         self.assertEqual(call.kwargs["fields"]["status"], "todo")
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "developer")
         self.assertEqual(call.kwargs["fields"]["dev_agent"], "developer")
         self.assertEqual(call.kwargs["handoff"]["to_agent"], "developer")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "triaging")
 
     async def test_auto_triage_simple_infers_art_designer_from_reason(self):
         task = self._task(status="triaging", claimed_from="triage")
@@ -186,8 +189,11 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         self.agent._create_subtasks.assert_awaited_once()
         call = self.agent.transition_task.await_args
         self.assertEqual(call.args[0], task["id"])
-        self.assertEqual(call.kwargs["fields"]["description"], refined)
+        self.assertIn(refined, call.kwargs["fields"]["description"])
+        self.assertIn("## 假设", call.kwargs["fields"]["description"])
+        self.assertIn("## 证据要求", call.kwargs["fields"]["description"])
         self.assertEqual(call.kwargs["fields"]["status"], "decomposed")
+        self.assertEqual(call.kwargs["handoff"]["status_from"], "decompose")
 
 
 if __name__ == "__main__":

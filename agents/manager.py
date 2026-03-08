@@ -314,6 +314,7 @@ class ManagerAgent(BaseAgent):
         dev_branch: str,
         patchset: dict,
     ) -> bool:
+        current_status = str(task.get("status") or "").strip() or "merging"
         try:
             patchset = await self.enrich_patchset_snapshot(
                 proj_root,
@@ -368,7 +369,7 @@ class ManagerAgent(BaseAgent):
                 handoff={
                     "stage": "merge_blocked",
                     "to_agent": self.name,
-                    "status_from": "approved",
+                    "status_from": current_status,
                     "status_to": "blocked",
                     "title": "合并前置检查阻塞",
                     "summary": feedback,
@@ -424,7 +425,7 @@ class ManagerAgent(BaseAgent):
                 handoff={
                     "stage": "merge_to_dev",
                     "to_agent": dev_agent,
-                    "status_from": "approved",
+                    "status_from": current_status,
                     "status_to": "needs_changes",
                     "title": "合并退回开发",
                     "summary": feedback[:300],
@@ -465,6 +466,7 @@ class ManagerAgent(BaseAgent):
                 feedback=feedback,
                 dev_branch=dev_branch,
                 patchset=patchset,
+                current_status=current_status,
             )
             return True
 
@@ -521,7 +523,7 @@ class ManagerAgent(BaseAgent):
                 handoff={
                     "stage": "merge_to_acceptance",
                     "to_agent": "user",
-                    "status_from": "approved",
+                    "status_from": current_status,
                     "status_to": "pending_acceptance",
                     "title": "合并完成，交接验收",
                     "summary": summary,
@@ -584,7 +586,7 @@ class ManagerAgent(BaseAgent):
             handoff={
                 "stage": "merge_to_dev",
                 "to_agent": dev_agent,
-                "status_from": "approved",
+                "status_from": current_status,
                 "status_to": "needs_changes",
                 "title": "合并退回开发",
                 "summary": feedback[:300],
@@ -656,6 +658,7 @@ class ManagerAgent(BaseAgent):
         feedback: str,
         dev_branch: str = "",
         patchset: dict | None = None,
+        current_status: str = "merging",
     ):
         await self.add_log(task_id, feedback[:500])
         await self.add_alert(
@@ -688,7 +691,7 @@ class ManagerAgent(BaseAgent):
             handoff={
                 "stage": "merge_to_dev",
                 "to_agent": dev_agent,
-                "status_from": "approved",
+                "status_from": current_status,
                 "status_to": "needs_changes",
                 "title": "合并退回开发",
                 "summary": feedback[:300],
@@ -843,6 +846,7 @@ class ManagerAgent(BaseAgent):
 
     async def process_task(self, task: dict):
         task_id = task["id"]
+        current_status = str(task.get("status") or "").strip() or "merging"
         if await self.stop_if_task_cancelled(task_id, "开始合并前"):
             return
 
@@ -900,6 +904,7 @@ class ManagerAgent(BaseAgent):
                 related_history_commits=related_history_commits,
                 feedback=feedback,
                 dev_branch=dev_branch,
+                current_status=current_status,
             )
             return
 
@@ -919,6 +924,7 @@ class ManagerAgent(BaseAgent):
                 related_history_commits=related_history_commits,
                 feedback=feedback,
                 dev_branch=dev_branch,
+                current_status=current_status,
             )
             return
 
@@ -1083,7 +1089,7 @@ class ManagerAgent(BaseAgent):
                     handoff={
                         "stage": "merge_to_acceptance",
                         "to_agent": "user",
-                        "status_from": "approved",
+                        "status_from": current_status,
                         "status_to": "pending_acceptance",
                         "title": "无需合并，进入验收",
                         "summary": "目标提交已在 main，直接进入待验收",
@@ -1108,7 +1114,7 @@ class ManagerAgent(BaseAgent):
                 handoff={
                     "stage": "merge_to_acceptance",
                     "to_agent": "user",
-                    "status_from": "approved",
+                    "status_from": current_status,
                     "status_to": "pending_acceptance",
                     "title": "合并完成，交接验收",
                     "summary": (
@@ -1187,7 +1193,7 @@ class ManagerAgent(BaseAgent):
             handoff={
                 "stage": "merge_failed",
                 "to_agent": self.name,
-                "status_from": "approved",
+                "status_from": current_status,
                 "status_to": "approved",
                 "title": "合并失败（系统）",
                 "summary": f"CLI 合并未生效：{err_hint[:200]}",

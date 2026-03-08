@@ -119,6 +119,7 @@ class GenericAgent(BaseAgent):
         retry_reason: str,
         retry_log_message: str,
     ) -> None:
+        current_status = str(task.get("status") or prev_status or "").strip() or prev_status
         retry_limit = self._delivery_retry_limit()
         retry_count = (
             await self._current_delivery_retry_count(task_id) + 1
@@ -166,7 +167,7 @@ class GenericAgent(BaseAgent):
                 handoff={
                     "stage": self._delivery_blocked_stage(),
                     "to_agent": self.name,
-                    "status_from": prev_status,
+                    "status_from": current_status,
                     "status_to": "blocked",
                     "title": f"{self._display_name} 连续未完成交付",
                     "summary": f"连续 {retry_count} 次{retry_reason}，任务转为 blocked",
@@ -199,7 +200,7 @@ class GenericAgent(BaseAgent):
             handoff={
                 "stage": failure_stage,
                 "to_agent": self.name,
-                "status_from": prev_status,
+                "status_from": current_status,
                 "status_to": prev_status,
                 "title": failure_title,
                 "summary": failure_summary,
@@ -450,6 +451,7 @@ class GenericAgent(BaseAgent):
                 return
 
         prev_status = task.get("_claimed_from_status", task.get("status"))
+        current_status = str(task.get("status") or prev_status or "").strip() or prev_status
         is_rework = task.get("review_feedback") and prev_status == "needs_changes"
         rework_section = (
             f"## 审查反馈（必须全部修复）\n\n{task['review_feedback']}"
@@ -542,7 +544,7 @@ class GenericAgent(BaseAgent):
                 handoff={
                     "stage": failure_stage,
                     "to_agent": self.name,
-                    "status_from": prev_status,
+                    "status_from": current_status,
                     "status_to": prev_status,
                     "title": f"{self._display_name} 执行失败",
                     "summary": failure_summary,
@@ -640,7 +642,7 @@ class GenericAgent(BaseAgent):
                     handoff={
                         "stage": dirty_spec["stage"],
                         "to_agent": dirty_spec["to_agent"],
-                        "status_from": prev_status,
+                        "status_from": current_status,
                         "status_to": dirty_status,
                         "title": dirty_spec["title"],
                         "summary": dirty_spec["summary"],
@@ -731,7 +733,7 @@ class GenericAgent(BaseAgent):
                     handoff={
                         "stage": verifier_stage,
                         "to_agent": self.name,
-                        "status_from": prev_status,
+                        "status_from": current_status,
                         "status_to": verifier_status,
                         "title": "送审前预检未通过",
                         "summary": verifier_result["summary"],
@@ -799,7 +801,7 @@ class GenericAgent(BaseAgent):
                         handoff={
                             "stage": transition_spec["stage"],
                             "to_agent": transition_spec["to_agent"],
-                            "status_from": prev_status,
+                            "status_from": current_status,
                             "status_to": effective_next_status,
                             "title": transition_spec["title"],
                             "summary": transition_spec["summary"],
