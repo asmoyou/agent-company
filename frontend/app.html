@@ -6338,7 +6338,7 @@ async function supportChatStreamReply(assistantMessageId) {
       .filter((item) => (item.role === "user" || item.role === "assistant") && String(item.content || "").trim())
       .filter((item) => !(item.role === "assistant" && String(item.content || "").trim() === SUPPORT_CHAT_DEFAULT_GREETING))
       .slice(-SUPPORT_CHAT_MAX_MESSAGES)
-      .map((item) => ({ role: item.role, content: item.content }));
+      .map((item) => ({ role: item.role, content: item.content, created_at: item.created_at || "" }));
 
     const res = await apiFetch(`${API}/support/chat/stream`, {
       method: "POST",

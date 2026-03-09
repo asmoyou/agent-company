@@ -16,7 +16,7 @@ import time
 import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
@@ -120,10 +120,13 @@ SUPPORT_LLM_WRITE_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_WRITE_TIMEOUT_
 SUPPORT_LLM_POOL_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_POOL_TIMEOUT_SECS", "45")).strip() or "45")
 SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS", "8")).strip() or "8")
 SUPPORT_CHAT_MAX_MESSAGES = int(str(os.getenv("SUPPORT_CHAT_MAX_MESSAGES", "24")).strip() or "24")
+SUPPORT_CHAT_MESSAGE_MAX_CHARS = 12000
 SUPPORT_CHAT_INCLUDE_REASONING = str(
     os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "1")
 ).strip().lower() in {"1", "true", "yes", "on"}
 SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "1200")).strip() or "1200")
+SUPPORT_CHAT_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+SUPPORT_CHAT_TIMEZONE_LABEL = "北京时间（UTC+8）"
 FEEDBACK_REVIEW_READ_TIMEOUT_SECS = float(
     str(
         os.getenv(
@@ -901,6 +904,58 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+def _support_chat_now_cn() -> datetime:
+    return datetime.now(SUPPORT_CHAT_TIMEZONE)
+
+
+def _parse_support_chat_created_at(ts: str | None) -> datetime | None:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    normalized = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(SUPPORT_CHAT_TIMEZONE)
+
+
+def _format_support_chat_time_cn(ts: str | None) -> str:
+    parsed = _parse_support_chat_created_at(ts)
+    if parsed is None:
+        return ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_support_chat_message_content(content: str, created_at: str | None) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    stamp = _format_support_chat_time_cn(created_at)
+    if not stamp:
+        return text[:SUPPORT_CHAT_MESSAGE_MAX_CHARS]
+    prefix = f"[消息时间：{stamp} {SUPPORT_CHAT_TIMEZONE_LABEL}]\n"
+    limit = max(0, SUPPORT_CHAT_MESSAGE_MAX_CHARS - len(prefix))
+    return f"{prefix}{text[:limit]}"
+
+
+def _build_support_chat_system_prompt(now: datetime | None = None) -> str:
+    current = now or _support_chat_now_cn()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SUPPORT_CHAT_TIMEZONE)
+    else:
+        current = current.astimezone(SUPPORT_CHAT_TIMEZONE)
+    current_text = current.strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        f"{SUPPORT_SYSTEM_PROMPT}\n\n"
+        f"时间上下文：当前{SUPPORT_CHAT_TIMEZONE_LABEL}是 {current_text}。"
+        f"后续每条对话如果带有“消息时间”，也都按{SUPPORT_CHAT_TIMEZONE_LABEL}理解。"
+        "回答和判断先后顺序时必须以这些时间为准，不要混用其它时区，也不要把历史时间误判成当前时间。"
+    )
+
+
 def _agent_last_seen(status: dict) -> datetime | None:
     seen = []
     for key in ("updated_at", "last_output_at"):
@@ -1616,6 +1671,7 @@ class GeneratePromptRequest(BaseModel):
 class SupportChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+    created_at: str | None = None
 
 class SupportChatRequest(BaseModel):
     messages: list[SupportChatMessage] = Field(default_factory=list)
@@ -4280,14 +4336,19 @@ async def support_chat_stream(
         content = str(item.content or "").strip()
         if role not in {"user", "assistant"} or not content:
             continue
-        normalized_messages.append({"role": role, "content": content[:12000]})
+        normalized_messages.append(
+            {
+                "role": role,
+                "content": _format_support_chat_message_content(content, item.created_at),
+            }
+        )
     if not normalized_messages:
         raise HTTPException(422, "messages 不能为空")
 
     upstream_payload: dict = {
         "model": SUPPORT_LLM_MODEL,
         "stream": True,
-        "messages": [{"role": "system", "content": SUPPORT_SYSTEM_PROMPT}, *normalized_messages],
+        "messages": [{"role": "system", "content": _build_support_chat_system_prompt()}, *normalized_messages],
         "temperature": float(body.temperature),
         "top_p": float(body.top_p),
         "top_k": int(body.top_k),

@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -161,10 +162,25 @@ class SupportChatStreamApiTest(unittest.TestCase):
             )
 
         _FakeAsyncClient.response_factory = _factory
-        with mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient):
+        with (
+            mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient),
+            mock.patch.object(
+                app_module,
+                "_support_chat_now_cn",
+                return_value=datetime(2026, 3, 9, 20, 30, 0, tzinfo=app_module.SUPPORT_CHAT_TIMEZONE),
+            ),
+        ):
             response = self.client.post(
                 "/support/chat/stream",
-                json={"messages": [{"role": "user", "content": "你好"}]},
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "你好",
+                            "created_at": "2026-03-09T11:22:33.000Z",
+                        }
+                    ]
+                },
                 headers=self.headers,
             )
 
@@ -193,6 +209,12 @@ class SupportChatStreamApiTest(unittest.TestCase):
         self.assertEqual(payload["presence_penalty"], 1.5)
         self.assertEqual(payload["repetition_penalty"], 1.0)
         self.assertEqual(payload["max_tokens"], 1024)
+        self.assertIn("当前北京时间（UTC+8）是 2026-03-09 20:30:00", payload["messages"][0]["content"])
+        self.assertEqual(payload["messages"][1]["role"], "user")
+        self.assertEqual(
+            payload["messages"][1]["content"],
+            "[消息时间：2026-03-09 19:22:33 北京时间（UTC+8）]\n你好",
+        )
 
     def test_support_system_prompt_includes_latest_platform_features(self):
         prompt = app_module.SUPPORT_SYSTEM_PROMPT
