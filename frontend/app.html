@@ -15,36 +15,34 @@
   <style>
     :root{
       --surface-0:#020617;
-      --surface-1:#0f172a;
-      --surface-2:#1e293b;
-      --panel-border:rgba(148,163,184,.15);
-      --panel-soft:rgba(15,23,42,.7);
-      --text-main:#f8fafc;
+      --surface-1:#0a1222;
+      --surface-2:#111c33;
+      --panel-border:rgba(148,163,184,.24);
+      --panel-soft:rgba(15,23,42,.68);
+      --text-main:#e2e8f0;
       --text-soft:#94a3b8;
-      --accent:#8b5cf6;
-      --accent-strong:#7c3aed;
+      --accent:#7c89ff;
+      --accent-strong:#5d6df8;
       --accent-cool:#38bdf8;
-      --accent-glow:rgba(139,92,246,.3);
-      --success:#10b981;
-      --danger:#f43f5e;
+      --accent-glow:rgba(124,137,255,.34);
+      --success:#34d399;
+      --danger:#fb7185;
       --mobile-topbar-height:58px;
       --mobile-nav-width:min(86vw, 360px);
-      --ease-smooth:cubic-bezier(0.4, 0, 0.2, 1);
+      --ease-smooth:cubic-bezier(.22,.61,.36,1);
       --mobile-terminal-offset:52px;
-      --elev-1:0 10px 25px -5px rgba(0,0,0,.3);
-      --elev-2:0 20px 40px -10px rgba(0,0,0,.5);
+      --elev-1:0 12px 30px rgba(2,6,23,.36);
+      --elev-2:0 20px 44px rgba(2,6,23,.46);
     }
     body {
       background:
-        radial-gradient(circle at 15% 50%, rgba(139, 92, 246, 0.15), transparent 25%),
-        radial-gradient(circle at 85% 30%, rgba(56, 189, 248, 0.15), transparent 25%),
-        linear-gradient(135deg, var(--surface-0), var(--surface-1));
-      background-attachment: fixed;
+        radial-gradient(1240px 600px at 4% -16%, rgba(56,189,248,.18), transparent 65%),
+        radial-gradient(980px 520px at 104% -10%, rgba(124,137,255,.22), transparent 70%),
+        linear-gradient(165deg, var(--surface-0), var(--surface-1) 54%, var(--surface-2));
       color:var(--text-main);
-      font-family:"Inter", "Space Grotesk","PingFang SC","Microsoft YaHei",sans-serif;
+      font-family:"Space Grotesk","IBM Plex Sans","PingFang SC","Microsoft YaHei",sans-serif;
       -webkit-font-smoothing:antialiased;
       text-rendering:optimizeLegibility;
-      overflow-x: hidden;
     }
     ::selection{background:rgba(124,137,255,.32);color:#eef2ff;}
     .card{
@@ -53,26 +51,20 @@
         box-shadow .24s var(--ease-smooth),
         border-color .24s var(--ease-smooth),
         background-color .24s var(--ease-smooth);
-      box-shadow:var(--elev-1);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      background-color: rgba(30,41,59,0.6);
-      border: 1px solid rgba(148,163,184,0.1);
+      box-shadow:0 8px 20px rgba(2,6,23,.22);
     }
     .card:hover{
-      transform:translateY(-4px) scale(1.01);
+      transform:translateY(-3px);
       box-shadow:var(--elev-2);
-      border-color:rgba(139,92,246,0.4);
-      background-color:rgba(30,41,59,0.85);
+      border-color:rgba(99,102,241,.45);
+      background-color:rgba(30,41,59,.96);
     }
-    .badge { font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; }
+    .badge { font-size: 0.58rem; font-weight: 700; letter-spacing: 0.03em; }
     #panel {
       transition: transform .28s var(--ease-smooth);
-      background: rgba(15,23,42,0.85);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
+      background:linear-gradient(180deg, rgba(15,23,42,.96), rgba(15,23,42,.9));
       border-left:1px solid var(--panel-border);
-      box-shadow:-20px 0 50px rgba(0,0,0,0.5);
+      box-shadow:-18px 0 42px rgba(2,6,23,.42);
     }
     #panel.hidden-panel { transform: translateX(100%); }
     .ws-dot { width:8px;height:8px;border-radius:50%;display:inline-block; }
@@ -2147,81 +2139,9 @@
       align-items: center;
       gap: 6px;
     }
-
-    /* Custom Scrollbar */
-    ::-webkit-scrollbar {
-      width: 8px;
-      height: 8px;
-    }
-    ::-webkit-scrollbar-track {
-      background: rgba(15, 23, 42, 0.5);
-      border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb {
-      background: rgba(100, 116, 139, 0.4);
-      border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: rgba(139, 92, 246, 0.6);
-    }
-
-    /* Input & Button global enhancements */
-    input:focus, textarea:focus, select:focus {
-      outline: none;
-      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.3) !important;
-      border-color: rgba(139, 92, 246, 0.7) !important;
-      transition: all 0.2s ease-in-out;
-    }
-    button {
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-    }
-    button:active {
-      transform: scale(0.96) !important;
-    }
-    
-    /* Global Background animations */
-    .bg-shape-app {
-      position: fixed;
-      border-radius: 50%;
-      filter: blur(100px);
-      z-index: -1;
-      opacity: 0.3;
-      animation: floatApp 25s infinite ease-in-out alternate;
-      pointer-events: none;
-    }
-    .bg-shape-app-1 {
-      top: -20%; left: -10%; width: 60vw; height: 60vh; background: rgba(139, 92, 246, 0.15); animation-delay: 0s;
-    }
-    .bg-shape-app-2 {
-      bottom: -20%; right: -10%; width: 50vw; height: 50vh; background: rgba(56, 189, 248, 0.15); animation-delay: -5s;
-    }
-    @keyframes floatApp {
-      0% { transform: translate(0, 0) scale(1); }
-      100% { transform: translate(30px, 50px) scale(1.1); }
-    }
-
-    /* Modal enhancements */
-    [id^="modal-"] > div, .modal-card, .msg-dialog {
-      background: rgba(15, 23, 42, 0.75) !important;
-      backdrop-filter: blur(24px) !important;
-      -webkit-backdrop-filter: blur(24px) !important;
-      border: 1px solid rgba(148, 163, 184, 0.15) !important;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important;
-      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
-    }
-    
-    /* Header Enhancements */
-    .app-header {
-      background: rgba(15, 23, 42, 0.6) !important;
-      backdrop-filter: blur(16px) !important;
-      -webkit-backdrop-filter: blur(16px) !important;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.1) !important;
-    }
   </style>
 </head>
 <body class="min-h-screen font-sans flex flex-col">
-<div class="bg-shape-app bg-shape-app-1"></div>
-<div class="bg-shape-app bg-shape-app-2"></div>
 
 <div id="mobile-topbar" class="mobile-topbar">
   <button id="mobile-nav-toggle" type="button" class="mobile-topbar-btn" aria-label="打开导航">☰</button>
