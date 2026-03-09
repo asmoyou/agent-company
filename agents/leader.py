@@ -97,6 +97,8 @@ LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)、:]?)\s*")
 ASSUMPTION_SECTION_RE = re.compile(r"^\s{0,3}#{1,6}\s*(?:假设|assumptions?|待确认)\s*$", re.IGNORECASE | re.MULTILINE)
 EVIDENCE_SECTION_RE = re.compile(r"^\s{0,3}#{1,6}\s*(?:证据要求|evidence(?:\s+required)?)\s*$", re.IGNORECASE | re.MULTILINE)
 PARENT_REF_INLINE_RE = re.compile(r"(?<![A-Za-z0-9_])R\d+(?:\s*[、,，/]\s*R\d+)*(?![A-Za-z0-9_])")
+DOCUMENT_TASK_HINT_RE = re.compile(r"(?i)(文档|合同|模板|word|docx?\b|pdf\b|xlsx?\b|pptx?\b|文件|附件|导出|转换|转为)")
+INTERACTIVE_TASK_HINT_RE = re.compile(r"(网页|页面|浏览器|前端|交互|按钮|界面|动画|表单|游戏)")
 LEADER_SYSTEM_RETRY_MAX = int(os.getenv("LEADER_SYSTEM_RETRY_MAX", "2"))
 LEADER_SYSTEM_RETRY_BACKOFF_SECS = int(os.getenv("LEADER_SYSTEM_RETRY_BACKOFF_SECS", "20"))
 
@@ -368,10 +370,15 @@ class LeaderAgent(BaseAgent):
             evidence_lines = [
                 "## 证据要求",
                 "- 提供至少一个可本地执行的验证命令、测试或冒烟脚本，用于覆盖关键验收路径。",
+                "- 证据应优先采用当前 CLI/headless 环境可复核的本地验证；除非原始需求明确要求，不要把人工 GUI、桌面软件、真机或手动点击过程写成默认必备证据。",
             ]
-            if re.search(r"(网页|页面|浏览器|前端|游戏|交互|按钮|界面|动画)", text):
+            if DOCUMENT_TASK_HINT_RE.search(text) and not INTERACTIVE_TASK_HINT_RE.search(text):
                 evidence_lines.append(
-                    "- 对交互/行为型任务，验证证据需覆盖开始、关键交互以及失败恢复路径。"
+                    "- 对文档、文件转换或导出类任务，优先提供当前 CLI/headless 环境可复核的结构校验、解析校验、回读或转换结果；除非原始需求明确要求，不要把桌面办公软件手动打开/编辑作为默认必备证据。"
+                )
+            elif INTERACTIVE_TASK_HINT_RE.search(text):
+                evidence_lines.append(
+                    "- 对交互/行为型任务，验证证据需覆盖开始、关键交互以及失败恢复路径，并优先使用可脚本化的冒烟脚本、自动化测试、截图或断言结果，不要默认要求人工逐步点击界面。"
                 )
             append_sections.append("\n".join(evidence_lines))
         if not append_sections:

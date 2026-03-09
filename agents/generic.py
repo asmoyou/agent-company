@@ -252,28 +252,36 @@ class GenericAgent(BaseAgent):
         commit_display: str,
         effective_next_status: str,
     ) -> dict[str, str]:
-        if self._uses_developer_profile():
+        if review_enabled:
             return {
-                "stage": "dev_to_review" if review_enabled else "dev_to_approved",
-                "to_agent": "reviewer" if review_enabled else "manager",
-                "title": "开发交接审查" if review_enabled else "开发直达合并",
+                "stage": "dev_to_review",
+                "to_agent": "reviewer",
+                "title": "开发交接审查" if self._uses_developer_profile() else f"{self._display_name} 交接审查",
                 "summary": (
                     f"CLI 已提交 commit {commit_display}，等待审查"
-                    if review_enabled
-                    else f"CLI 已提交 commit {commit_display}，跳过审查，交由 Manager 合并"
+                    if self._uses_developer_profile()
+                    else f"{self._display_name} 已提交 commit {commit_display}，等待审查"
                 ),
                 "conclusion": (
                     "开发完成，等待审查结论"
-                    if review_enabled
-                    else "开发完成，已跳过审查并转交 Manager 合并"
+                    if self._uses_developer_profile()
+                    else f"{self._display_name} 已完成交付，等待审查结论"
                 ),
             }
+        if self._uses_developer_profile():
+            return {
+                "stage": "dev_to_approved",
+                "to_agent": "manager",
+                "title": "开发直达合并",
+                "summary": f"CLI 已提交 commit {commit_display}，跳过审查，交由 Manager 合并",
+                "conclusion": "开发完成，已跳过审查并转交 Manager 合并",
+            }
         return {
-            "stage": f"{self.name}_handoff",
-            "to_agent": "manager" if effective_next_status == "approved" else self.name,
+            "stage": "dev_to_approved",
+            "to_agent": "manager",
             "title": f"{self._display_name} 交接",
-            "summary": f"检测到 CLI 已生成 commit {commit_display}，推进到 {effective_next_status}",
-            "conclusion": f"{self._display_name} 完成，推进到 {effective_next_status}",
+            "summary": f"{self._display_name} 已提交 commit {commit_display}，跳过审查，交由 Manager 合并",
+            "conclusion": f"{self._display_name} 已完成交付，已跳过审查并转交 Manager 合并",
         }
 
     async def _resolve_commit_hash(self, worktree_dev, head_after: str) -> tuple[str, str]:

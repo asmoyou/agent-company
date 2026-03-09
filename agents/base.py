@@ -73,6 +73,8 @@ INTERACTIVE_PROMPT_RE = re.compile(
 )
 TASK_SECTION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 TASK_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|(?:\d+\.))\s+(?:\[[ xX]\]\s*)?")
+DOCUMENT_FILE_TASK_RE = re.compile(r"(?i)(文档|合同|模板|word|docx?\b|pdf\b|xlsx?\b|pptx?\b|文件|附件|导出|转换|转为)")
+INTERACTIVE_UI_TASK_RE = re.compile(r"(网页|页面|浏览器|前端|交互|按钮|界面|动画|表单|游戏)")
 TASK_SECTION_ALIAS_MAP = {
     "goal": (
         "任务目标",
@@ -427,6 +429,16 @@ class BaseAgent:
         prefix = "- [ ] " if checkbox else "- "
         lines.extend(f"{prefix}{item}" for item in cleaned)
 
+    def _contract_prefers_cli_file_evidence(self, contract: dict[str, object] | None) -> bool:
+        data = contract or {}
+        parts: list[str] = [str(data.get("goal") or "")]
+        for key in ("scope", "deliverables", "acceptance", "evidence_required", "constraints"):
+            parts.extend(str(item or "") for item in (data.get(key) or []))
+        text = " ".join(parts)
+        if not text:
+            return False
+        return bool(DOCUMENT_FILE_TASK_RE.search(text)) and not bool(INTERACTIVE_UI_TASK_RE.search(text))
+
     def build_execution_contract_block(self, task: dict | None) -> str:
         contract = self._extract_task_contract(task)
         if not contract or not any(contract.values()):
@@ -436,7 +448,18 @@ class BaseAgent:
             "- 下面的交付物和验收标准也是执行 agent 的完成定义，不是只给 reviewer 的参考清单。",
             "- 提交前必须按这些条目自检；不要擅自扩展非范围内容。",
             "- 合同中的 assumptions 是 leader 已吸收的不确定性；除非与显式要求或现场证据冲突，不要把它们当成阻塞项，也不要等待额外用户确认。",
+            "- 证据优先采用当前 CLI/headless 环境可复核的本地验证；除非用户明确要求人工 GUI、桌面软件、真机或手动点击过程，不要把这些人工操作当成默认必备证据。",
         ]
+        if bool(INTERACTIVE_UI_TASK_RE.search(" ".join(str(item or "") for item in (
+            [contract.get("goal")] + list(contract.get("scope") or []) + list(contract.get("deliverables") or []) + list(contract.get("acceptance") or [])
+        )))):
+            lines.append(
+                "- 对交互/行为型任务，优先补齐可脚本化的冒烟脚本、自动化测试、截图或断言结果来证明关键路径，而不是等待人工逐步点击界面。"
+            )
+        if self._contract_prefers_cli_file_evidence(contract):
+            lines.append(
+                "- 若任务属于文档、文件转换或导出类型，默认按当前 CLI/headless 环境取证；除非用户明确要求桌面软件实测，否则可用结构校验、可解析性检查、回读或转换结果替代 GUI 打开验证。"
+            )
         goal = str(contract.get("goal") or "").strip()
         if goal:
             lines.append(f"- 任务目标: {goal}")
@@ -460,7 +483,18 @@ class BaseAgent:
             "- 以下条目既是开发完成定义，也是 reviewer 的独立核查清单；不要只接受开发自述。",
             "- 只要任一验收项缺少证据、交付物缺失、或实现违反约束，就不能 approve。",
             "- 合同中的 assumptions 默认视为允许的执行基线；不要因为“存在 assumptions”本身打回。",
+            "- 证据优先采用当前 CLI/headless 环境可复核的本地验证；除非用户明确要求人工 GUI、桌面软件、真机或手动点击过程，不要默认以缺少这些人工操作为由打回。",
         ]
+        if bool(INTERACTIVE_UI_TASK_RE.search(" ".join(str(item or "") for item in (
+            [contract.get("goal")] + list(contract.get("scope") or []) + list(contract.get("deliverables") or []) + list(contract.get("acceptance") or [])
+        )))):
+            lines.append(
+                "- 对交互/行为型任务，可接受可脚本化的冒烟脚本、自动化测试、截图或断言结果作为关键路径证据；不要默认要求人工逐步点击界面。"
+            )
+        if self._contract_prefers_cli_file_evidence(contract):
+            lines.append(
+                "- 对文档、文件转换或导出类任务，若用户未明确要求 Word/WPS/Office 等桌面软件实测，可接受当前 CLI/headless 环境下的等价本地证据（结构校验、可解析性检查、回读/保存结果）；不要仅因缺少 GUI 打开过程而打回。"
+            )
         goal = str(contract.get("goal") or "").strip()
         if goal:
             lines.append(f"- 任务目标: {goal}")

@@ -81,6 +81,74 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要因为“存在 assumptions”本身打回", prompt)
         self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
 
+    async def test_prompt_allows_cli_equivalent_evidence_for_document_conversion_tasks(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, '{"decision":"approve","comment":"ok"}'
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent._load_decision_file = mock.Mock(return_value={"decision": "approve", "comment": "ok"})
+
+        task = {
+            "id": "task-doc-review",
+            "title": "合同模板转 Word",
+            "description": "",
+            "status": "reviewing",
+            "commit_hash": "a" * 40,
+            "assigned_agent": "admin_specialist",
+            "dev_agent": "admin_specialist",
+            "current_contract": {
+                "version": 2,
+                "goal": "将合同模板转为可编辑 Word 文件",
+                "deliverables": ["外包劳务派遣合同模板.docx", "合同模板转Word处理说明.md"],
+                "acceptance": ["生成的 Word 文件可继续编辑", "处理说明记录验证过程"],
+                "evidence_required": ["验证生成的 Word 文件能够被本地继续读取或转换"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("CLI/headless 环境下的等价本地证据", prompt)
+        self.assertIn("不要仅因缺少 GUI 打开过程而打回", prompt)
+
+    async def test_prompt_prefers_scriptable_evidence_for_interactive_tasks(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, '{"decision":"approve","comment":"ok"}'
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent._load_decision_file = mock.Mock(return_value={"decision": "approve", "comment": "ok"})
+
+        task = {
+            "id": "task-ui-review",
+            "title": "按钮交互页面",
+            "description": "",
+            "status": "reviewing",
+            "commit_hash": "a" * 40,
+            "assigned_agent": "developer",
+            "dev_agent": "developer",
+            "current_contract": {
+                "version": 2,
+                "goal": "实现一个网页按钮交互流程",
+                "scope": ["页面包含按钮、成功反馈和失败提示"],
+                "deliverables": ["index.html", "script.js"],
+                "acceptance": ["点击按钮后页面反馈正确"],
+                "evidence_required": ["覆盖开始、关键交互和失败恢复路径的本地验证"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("不要默认以缺少这些人工操作为由打回", prompt)
+        self.assertIn("可接受可脚本化的冒烟脚本、自动化测试、截图或断言结果", prompt)
+        self.assertIn("不要默认要求人工逐步点击界面", prompt)
+
     async def test_lightweight_static_review_uses_medium_reasoning_effort(self):
         captured = {}
 
