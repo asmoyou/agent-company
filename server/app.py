@@ -122,7 +122,7 @@ SUPPORT_LLM_HEALTH_READ_TIMEOUT_SECS = float(str(os.getenv("SUPPORT_LLM_HEALTH_R
 SUPPORT_CHAT_MAX_MESSAGES = int(str(os.getenv("SUPPORT_CHAT_MAX_MESSAGES", "24")).strip() or "24")
 SUPPORT_CHAT_MESSAGE_MAX_CHARS = 12000
 SUPPORT_CHAT_INCLUDE_REASONING = str(
-    os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "1")
+    os.getenv("SUPPORT_CHAT_INCLUDE_REASONING", "0")
 ).strip().lower() in {"1", "true", "yes", "on"}
 SUPPORT_CHAT_REASONING_MAX_CHARS = int(str(os.getenv("SUPPORT_CHAT_REASONING_MAX_CHARS", "1200")).strip() or "1200")
 SUPPORT_CHAT_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")

@@ -255,7 +255,10 @@ class SupportChatStreamApiTest(unittest.TestCase):
             )
 
         _FakeAsyncClient.response_factory = _factory
-        with mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient):
+        with (
+            mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient),
+            mock.patch.object(app_module, "SUPPORT_CHAT_INCLUDE_REASONING", True),
+        ):
             response = self.client.post(
                 "/support/chat/stream",
                 json={"messages": [{"role": "user", "content": "你好"}]},
@@ -281,7 +284,10 @@ class SupportChatStreamApiTest(unittest.TestCase):
             )
 
         _FakeAsyncClient.response_factory = _factory
-        with mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient):
+        with (
+            mock.patch.object(app_module.httpx, "AsyncClient", _FakeAsyncClient),
+            mock.patch.object(app_module, "SUPPORT_CHAT_INCLUDE_REASONING", True),
+        ):
             response = self.client.post(
                 "/support/chat/stream",
                 json={"messages": [{"role": "user", "content": "你好"}]},
