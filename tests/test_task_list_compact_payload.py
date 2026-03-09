@@ -91,6 +91,102 @@ class TaskListCompactPayloadTest(unittest.TestCase):
         rows = db.list_tasks(project_id=self.project["id"], compact=True)
         self.assertEqual(rows[0]["cancel_reason"], "违规任务")
 
+    def test_get_task_preserves_original_description_after_refinement(self):
+        created = db.create_task(
+            title="refined task",
+            description="用户手工填写的原始需求",
+            project_id=self.project["id"],
+            status="triage",
+        )
+
+        db.update_task(created["id"], description="AI 补全后的执行描述", status="todo")
+
+        task = db.get_task(created["id"])
+        self.assertIsNotNone(task)
+        self.assertEqual(task["original_description"], "用户手工填写的原始需求")
+        self.assertEqual(task["description"], "AI 补全后的执行描述")
+
+    def test_task_lifecycle_is_available_for_compact_and_detail_payloads(self):
+        created = db.create_task(
+            title="timeline task",
+            description="timeline",
+            project_id=self.project["id"],
+            status="triage",
+        )
+        t0 = "2026-03-01T09:00:00"
+        t1 = "2026-03-01T09:05:00"
+        t2 = "2026-03-01T09:20:00"
+        t3 = "2026-03-01T09:45:00"
+        t4 = "2026-03-01T10:00:00"
+
+        h1 = db.add_handoff(
+            created["id"],
+            stage="leader_to_todo",
+            from_agent="leader",
+            to_agent="developer",
+            status_from="triage",
+            status_to="todo",
+            summary="进入待开发",
+        )
+        h2 = db.add_handoff(
+            created["id"],
+            stage="dev_started",
+            from_agent="developer",
+            to_agent="developer",
+            status_from="todo",
+            status_to="in_progress",
+            summary="开始开发",
+        )
+        h3 = db.add_handoff(
+            created["id"],
+            stage="dev_to_review",
+            from_agent="developer",
+            to_agent="reviewer",
+            status_from="in_progress",
+            status_to="in_review",
+            summary="进入审查",
+        )
+        h4 = db.add_handoff(
+            created["id"],
+            stage="merge_to_acceptance",
+            from_agent="manager",
+            to_agent="user",
+            status_from="approved",
+            status_to="pending_acceptance",
+            summary="等待验收",
+        )
+
+        conn = db.get_conn()
+        try:
+            conn.execute(
+                "UPDATE tasks SET status=?, created_at=?, updated_at=? WHERE id=?",
+                ("pending_acceptance", t0, t4, created["id"]),
+            )
+            conn.execute("UPDATE task_handoffs SET created_at=? WHERE id=?", (t1, h1["id"]))
+            conn.execute("UPDATE task_handoffs SET created_at=? WHERE id=?", (t2, h2["id"]))
+            conn.execute("UPDATE task_handoffs SET created_at=? WHERE id=?", (t3, h3["id"]))
+            conn.execute("UPDATE task_handoffs SET created_at=? WHERE id=?", (t4, h4["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+
+        task = db.get_task(created["id"])
+        self.assertIsNotNone(task)
+        self.assertEqual(task["lifecycle"]["created_at"], t0)
+        self.assertEqual(task["lifecycle"]["started_at"], t2)
+        self.assertEqual(task["lifecycle"]["review_started_at"], t3)
+        self.assertEqual(task["lifecycle"]["acceptance_started_at"], t4)
+        self.assertEqual(task["lifecycle"]["current_status"], "pending_acceptance")
+        self.assertEqual(task["lifecycle"]["current_status_at"], t4)
+        self.assertEqual(
+            [item["status"] for item in task["status_timeline"]],
+            ["triage", "todo", "in_progress", "in_review", "pending_acceptance"],
+        )
+
+        rows = db.list_tasks(project_id=self.project["id"], compact=True)
+        self.assertEqual(rows[0]["lifecycle"]["started_at"], t2)
+        self.assertNotIn("status_timeline", rows[0])
+
 
 if __name__ == "__main__":
     unittest.main()
