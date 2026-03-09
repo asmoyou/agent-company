@@ -46,6 +46,7 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
 
         async def _capture_run_cli(prompt, cwd, **kwargs):
             captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
             return 0, '{"decision":"approve","comment":"ok"}'
 
         self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
@@ -78,6 +79,51 @@ class ReviewerPromptContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("只要任一验收项缺少证据", prompt)
         self.assertIn("允许沿用的默认假设", prompt)
         self.assertIn("不要因为“存在 assumptions”本身打回", prompt)
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
+
+    async def test_lightweight_static_review_uses_medium_reasoning_effort(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["kwargs"] = kwargs
+            return 0, '{"decision":"approve","comment":"ok"}'
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent._load_decision_file = mock.Mock(return_value={"decision": "approve", "comment": "ok"})
+
+        task = {
+            "id": "task-static-review",
+            "title": "福州旅游攻略",
+            "description": "",
+            "status": "reviewing",
+            "commit_hash": "a" * 40,
+            "assigned_agent": "developer",
+            "dev_agent": "developer",
+            "current_contract": {
+                "version": 2,
+                "goal": "输出静态旅游攻略网页",
+                "scope": ["使用静态网页展示内容"],
+                "deliverables": ["index.html", "styles.css", "script.js"],
+                "acceptance": ["页面可在桌面端与移动端浏览"],
+                "evidence_required": ["node --check script.js"],
+                "allowed_surface": {
+                    "roots": ["index.html", "styles.css", "script.js"],
+                    "files": ["index.html", "styles.css", "script.js"],
+                    "docs": [],
+                    "cli_paths": ["index.html", "styles.css", "script.js"],
+                },
+            },
+            "allowed_surface": {
+                "roots": ["index.html", "styles.css", "script.js"],
+                "files": ["index.html", "styles.css", "script.js"],
+                "docs": [],
+                "cli_paths": ["index.html", "styles.css", "script.js"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "medium")
 
     async def test_process_task_rejects_commit_that_is_not_independently_mergeable(self):
         target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"

@@ -8,9 +8,11 @@ from task_intelligence import (
     detect_surface_from_changed_files,
     evaluate_contract_evidence,
     find_surface_violations,
+    looks_like_concrete_surface_path,
     looks_like_behavioral_evidence_path,
     next_retry_strategy,
     normalize_allowed_surface,
+    select_reasoning_effort,
 )
 
 
@@ -82,6 +84,14 @@ class GenericAgent(BaseAgent):
 
     def _delivery_retry_limit(self) -> int:
         return 0 if self._uses_developer_profile() else 3
+
+    def _preferred_reasoning_effort(self, task: dict) -> str | None:
+        return select_reasoning_effort(
+            task,
+            agent=self.name,
+            operation="implement",
+            cli_name=self.cli_name,
+        )
 
     def _delivery_retry_stages(self) -> set[str]:
         return {self._commit_required_stage(), self._no_progress_stage()}
@@ -311,7 +321,13 @@ class GenericAgent(BaseAgent):
         issues: list[dict] = []
         acceptance_checks: list[dict] = []
 
-        deliverable_paths = normalize_allowed_surface({"files": (allowed_surface.get("files") or [])}).get("files") or []
+        deliverable_paths = [
+            path
+            for path in (
+                normalize_allowed_surface({"files": (allowed_surface.get("files") or [])}).get("files") or []
+            )
+            if looks_like_concrete_surface_path(path)
+        ]
         for path in deliverable_paths[:24]:
             if changed_paths and any(item == path or item.endswith(path) for item in changed_paths):
                 continue
@@ -568,6 +584,7 @@ class GenericAgent(BaseAgent):
             task_id=task_id,
             expected_status=str(task.get("status") or "").strip().lower(),
             expected_assignee=self.name,
+            reasoning_effort=self._preferred_reasoning_effort(task),
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "CLI 失败后"):

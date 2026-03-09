@@ -52,6 +52,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_triage_runs_single_cli_and_updates_description(self):
         task = self._task(status="triaging", claimed_from="triage")
+        captured = {}
         refined = (
             "## 任务目标\n- 完成关键接口的鉴权与状态流转覆盖\n\n"
             "## 范围\n- /tasks/claim\n- /tasks/{id}/transition\n\n"
@@ -62,6 +63,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         self.agent.http.get = mock.AsyncMock(return_value=self._resp(200, []))
 
         async def _fake_run_cli(prompt, cwd, **kwargs):
+            captured["kwargs"] = kwargs
             out = Path(cwd) / ".opc" / "decisions" / f"{task['id']}.leader-triage.json"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(
@@ -86,6 +88,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         await self.agent._auto_triage(task)
 
         self.assertEqual(self.agent.run_cli.await_count, 1)
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "medium")
         self.agent._create_subtasks.assert_not_awaited()
         call = self.agent.transition_task.await_args
         self.assertEqual(call.args[0], task["id"])
@@ -133,6 +136,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_force_decompose_runs_single_cli_and_updates_description(self):
         task = self._task(status="decompose", claimed_from="decompose")
+        captured = {}
         refined = (
             "## 任务目标\n- 拆分任务并形成可独立交付的子任务清单\n\n"
             "## 范围\n- 接口测试补全\n\n"
@@ -166,6 +170,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def _fake_run_cli(prompt, cwd, **kwargs):
+            captured["kwargs"] = kwargs
             out = Path(cwd) / ".opc" / "decisions" / f"{task['id']}.leader-force-decompose.json"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(
@@ -186,6 +191,7 @@ class LeaderRequirementsRefinementTest(unittest.IsolatedAsyncioTestCase):
         await self.agent._force_decompose(task)
 
         self.assertEqual(self.agent.run_cli.await_count, 1)
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
         self.agent._create_subtasks.assert_awaited_once()
         call = self.agent.transition_task.await_args
         self.assertEqual(call.args[0], task["id"])

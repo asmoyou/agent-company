@@ -1879,11 +1879,14 @@ class BaseAgent:
         output_schema: dict | None = None,
         expected_status: str | None = None,
         expected_assignee: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[int, str]:
         schema_path: Path | None = None
         last_message_path: Path | None = None
         if self.cli_name == "codex":
             cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+            if str(reasoning_effort or "").strip():
+                cmd += ["-c", f"model_reasoning_effort={json.dumps(str(reasoning_effort).strip())}"]
             try:
                 fd_last, raw_last = tempfile.mkstemp(
                     prefix="opc-codex-last-", suffix=".txt", dir=str(cwd)

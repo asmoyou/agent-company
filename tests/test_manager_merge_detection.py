@@ -73,15 +73,19 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_process_task_accepts_cherry_pick_equivalent_merge(self):
         target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"
         task = self._task(target_commit)
+        captured = {}
         self.agent.ensure_agent_workspace = mock.AsyncMock(
             return_value=(self.repo, self.repo / ".worktrees" / "developer", "agent/developer")
         )
-        self.agent.run_cli = mock.AsyncMock(
-            return_value=(
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["kwargs"] = kwargs
+            return (
                 0,
                 "合并结果：main 新提交为 14a2a1a\n冲突情况：无冲突\n",
             )
-        )
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
         self.agent._is_ancestor = mock.AsyncMock(side_effect=[True, False, False])
         self.agent._is_patch_equivalent_on_ref = mock.AsyncMock(side_effect=[False, True])
 
@@ -110,6 +114,7 @@ class ManagerMergeDetectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["handoff"]["stage"], "merge_to_acceptance")
         self.assertEqual(call.kwargs["handoff"]["status_from"], "merging")
         self.assertEqual(call.kwargs["handoff"]["title"], "合并完成，交接验收")
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
 
     async def test_process_task_returns_to_dev_when_commit_parent_not_on_main(self):
         target_commit = "4c6a0941655523f7dd2aded90e055525d813c1d1"

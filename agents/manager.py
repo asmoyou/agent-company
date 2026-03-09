@@ -6,6 +6,7 @@ from pathlib import Path
 
 from base import BaseAgent, MANAGER_MERGE_MODE, TASK_DELIVERY_MODEL, get_task_dev_agent, parse_status_list
 from prompt_registry import MANAGER_PROMPT_DEFAULT
+from task_intelligence import select_reasoning_effort
 
 
 def _utcnow_iso() -> str:
@@ -1026,6 +1027,12 @@ class ManagerAgent(BaseAgent):
             task_id=task_id,
             expected_status=str(task.get("status") or "").strip().lower(),
             expected_assignee=self.name,
+            reasoning_effort=select_reasoning_effort(
+                task,
+                agent=self.name,
+                operation="merge",
+                cli_name=self.cli_name,
+            ),
         )
         if await self.stop_if_task_cancelled(task_id, "合并 CLI 执行后"):
             return
