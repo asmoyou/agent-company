@@ -489,7 +489,7 @@ def init_db():
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id            TEXT NOT NULL,
             depends_on_task_id TEXT NOT NULL,
-            required_state     TEXT NOT NULL DEFAULT 'completed',
+            required_state     TEXT NOT NULL DEFAULT 'approved',
             created_by         TEXT,
             created_at         TEXT NOT NULL,
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
@@ -742,7 +742,7 @@ def init_db():
     _ensure_columns(conn, "task_dependencies", [
         ("task_id", "TEXT NOT NULL DEFAULT ''"),
         ("depends_on_task_id", "TEXT NOT NULL DEFAULT ''"),
-        ("required_state", "TEXT NOT NULL DEFAULT 'completed'"),
+        ("required_state", "TEXT NOT NULL DEFAULT 'approved'"),
         ("created_by", "TEXT"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ])
@@ -1527,7 +1527,7 @@ def _normalize_dependency_required_state(state: str | None) -> str:
     raw = str(state or "").strip().lower()
     if raw in ALLOWED_DEPENDENCY_STATES:
         return raw
-    return DEPENDENCY_STATE_COMPLETED
+    return DEPENDENCY_STATE_APPROVED
 
 
 def _dependency_is_satisfied(required_state: str, depends_on_status: str) -> bool:
@@ -3210,7 +3210,7 @@ def _normalize_dependency_payload(dependencies) -> list[dict]:
         dep_id = str(item.get("depends_on_task_id") or "").strip()
         if not dep_id:
             raise DependencyValidationError(f"dependencies[{idx}] 缺少 depends_on_task_id")
-        raw_state = str(item.get("required_state") or DEPENDENCY_STATE_COMPLETED).strip().lower()
+        raw_state = str(item.get("required_state") or DEPENDENCY_STATE_APPROVED).strip().lower()
         if raw_state not in ALLOWED_DEPENDENCY_STATES:
             allowed = ", ".join(sorted(ALLOWED_DEPENDENCY_STATES))
             raise DependencyValidationError(
@@ -4409,12 +4409,12 @@ def claim_task(
                      WHERE td.task_id = t.id
                        AND (
                            (
-                               COALESCE(td.required_state, 'completed') = 'completed'
+                               COALESCE(td.required_state, 'approved') = 'completed'
                                AND dep.status != 'completed'
                            )
                            OR
                            (
-                               COALESCE(td.required_state, 'completed') = 'approved'
+                               COALESCE(td.required_state, 'approved') = 'approved'
                                AND dep.status NOT IN ('approved', 'pending_acceptance', 'completed')
                            )
                        )

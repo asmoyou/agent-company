@@ -129,6 +129,35 @@ class TaskPriorityDependencyTest(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["id"], task["id"])
 
+    def test_dependency_defaults_to_approved_and_accepts_pending_acceptance(self):
+        dep = self._create_task("dep-pending-acceptance", status="pending_acceptance")
+        task = self._create_task(
+            "wait-default-approved",
+            status="todo",
+            assigned_agent="developer",
+            dev_agent="developer",
+            dependencies=[
+                {
+                    "depends_on_task_id": dep["id"],
+                }
+            ],
+        )
+
+        deps = db.list_task_dependencies(task["id"])
+        self.assertEqual(len(deps), 1)
+        self.assertEqual(deps[0]["required_state"], "approved")
+
+        claimed = db.claim_task(
+            status="todo",
+            working_status="in_progress",
+            agent="developer",
+            agent_key="developer",
+            respect_assignment=True,
+            project_id=self.project["id"],
+        )
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], task["id"])
+
     def test_dependency_cycle_rejected(self):
         a = self._create_task("task-a")
         b = self._create_task("task-b")

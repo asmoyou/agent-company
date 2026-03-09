@@ -1481,7 +1481,7 @@ class UserUpdateRequest(BaseModel):
 
 class TaskDependencyItem(BaseModel):
     depends_on_task_id: str
-    required_state: Literal["completed", "approved"] = "completed"
+    required_state: Literal["completed", "approved"] = "approved"
 
 
 class TaskDependenciesUpdate(BaseModel):

@@ -37,6 +37,39 @@ class AssumptionContractFlowTest(unittest.TestCase):
         self.assertTrue(contract.get("assumptions"))
         self.assertTrue(contract.get("evidence_required"))
 
+    def test_leader_refined_description_uses_cli_friendly_evidence_for_document_tasks(self):
+        agent = leader_module.LeaderAgent()
+
+        refined = agent._normalize_refined_description(
+            (
+                "## 任务目标\n- 将合同模板转为 Word 文档。\n\n"
+                "## 范围\n- 基于现有 Markdown 模板生成 docx 文件。\n\n"
+                "## 交付物\n- 外包劳务派遣合同模板.docx\n\n"
+                "## 验收标准\n- [ ] 生成一个可继续编辑的 Word 文件"
+            ),
+            "",
+        )
+
+        self.assertIn("CLI/headless 环境可复核", refined)
+        self.assertIn("不要把桌面办公软件手动打开/编辑作为默认必备证据", refined)
+
+    def test_leader_refined_description_prefers_scriptable_evidence_for_interactive_tasks(self):
+        agent = leader_module.LeaderAgent()
+
+        refined = agent._normalize_refined_description(
+            (
+                "## 任务目标\n- 实现一个带按钮交互的网页流程。\n\n"
+                "## 范围\n- 页面包含开始按钮和失败提示。\n\n"
+                "## 交付物\n- index.html\n- script.js\n\n"
+                "## 验收标准\n- [ ] 点击按钮后页面有正确反馈"
+            ),
+            "",
+        )
+
+        self.assertIn("CLI/headless 环境可复核", refined)
+        self.assertIn("可脚本化的冒烟脚本、自动化测试、截图或断言结果", refined)
+        self.assertIn("不要默认要求人工逐步点击界面", refined)
+
     def test_review_contract_treats_assumptions_as_allowed_baseline(self):
         agent = reviewer_module.ReviewerAgent()
 

@@ -171,6 +171,8 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         call = self.agent.transition_task.await_args_list[1]
         self.assertEqual(call.kwargs["fields"]["status"], "approved")
         self.assertEqual(call.kwargs["fields"]["assigned_agent"], "manager")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "dev_to_approved")
+        self.assertEqual(call.kwargs["handoff"]["to_agent"], "manager")
         self.assertFalse(call.kwargs["handoff"]["payload"]["review_enabled"])
         self.assertEqual(call.kwargs["handoff"]["status_from"], "in_progress")
 
@@ -228,8 +230,53 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checkpoint_call.kwargs["fields"]["commit_hash"], head_after[:7])
         self.assertEqual(checkpoint_call.kwargs["fields"]["current_patchset_status"], "draft")
         self.assertEqual(final_call.kwargs["fields"]["status"], "in_review")
+        self.assertEqual(final_call.kwargs["handoff"]["stage"], "dev_to_review")
+        self.assertEqual(final_call.kwargs["handoff"]["to_agent"], "reviewer")
         self.agent.add_alert.assert_awaited()
         self.assertIn("无法把任务推进到 in_review", self.agent.add_log.await_args_list[-1].args[1])
+
+    async def test_cli_commit_routes_generic_agent_to_reviewer_with_dev_stage(self):
+        head_before = "a" * 40
+        head_after = "f" * 40
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return head_before if _fake_git.rev_parse_calls == 0 else head_after
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            if args == ("rev-parse", "--short", "HEAD"):
+                return head_after[:7]
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        _fake_git.rev_parse_calls = 0
+
+        async def _git_side_effect(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                val = await _fake_git(*args, cwd=cwd, task_id=task_id)
+                _fake_git.rev_parse_calls += 1
+                return val
+            return await _fake_git(*args, cwd=cwd, task_id=task_id)
+
+        self.agent.git = mock.AsyncMock(side_effect=_git_side_effect)
+
+        task = {
+            "id": "task-8",
+            "title": "writer review handoff",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+        }
+
+        await self.agent.process_task(task)
+
+        self.assertEqual(self.agent.transition_task.await_count, 2)
+        call = self.agent.transition_task.await_args_list[1]
+        self.assertEqual(call.kwargs["fields"]["status"], "in_review")
+        self.assertEqual(call.kwargs["fields"]["assigned_agent"], "writer")
+        self.assertEqual(call.kwargs["handoff"]["stage"], "dev_to_review")
+        self.assertEqual(call.kwargs["handoff"]["to_agent"], "reviewer")
 
     async def test_prompt_includes_execution_contract_for_generic_worker(self):
         captured = {}
@@ -268,6 +315,88 @@ class GenericCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## 执行基线（必须遵守）", prompt)
         self.assertIn("docs/faq.md", prompt)
         self.assertIn("FAQ 至少覆盖 10 个常见问题", prompt)
+
+    async def test_prompt_allows_cli_equivalent_evidence_for_document_tasks(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, "done"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-doc-1",
+            "title": "convert contract to word",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+            "current_contract": {
+                "version": 2,
+                "goal": "将合同模板转为可编辑 Word 文件",
+                "deliverables": ["外包劳务派遣合同模板.docx", "合同模板转Word处理说明.md"],
+                "acceptance": ["生成 Word 文件", "保留处理说明"],
+                "evidence_required": ["验证生成的 Word 文件能够被本地继续读取或转换"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("CLI/headless 环境取证", prompt)
+        self.assertIn("替代 GUI 打开验证", prompt)
+
+    async def test_prompt_prefers_scriptable_evidence_for_interactive_tasks(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["prompt"] = prompt
+            return 0, "done"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-ui-1",
+            "title": "interactive page",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+            "current_contract": {
+                "version": 2,
+                "goal": "实现一个带按钮交互的网页流程",
+                "scope": ["页面包含开始按钮和失败提示"],
+                "deliverables": ["index.html", "script.js"],
+                "acceptance": ["点击按钮后页面反馈正确"],
+                "evidence_required": ["覆盖开始、关键交互和失败恢复路径的本地验证"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        prompt = captured["prompt"]
+        self.assertIn("CLI/headless 环境可复核的本地验证", prompt)
+        self.assertIn("可脚本化的冒烟脚本、自动化测试、截图或断言结果", prompt)
+        self.assertIn("不要把这些人工操作当成默认必备证据", prompt)
 
     async def test_no_progress_blocks_after_three_consecutive_delivery_failures(self):
         async def _fake_git(*args, cwd: Path, task_id=None):
