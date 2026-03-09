@@ -49,6 +49,14 @@ BEHAVIORAL_TASK_HINT_RE = re.compile(r"(网页|页面|浏览器|前端|游戏|�
 TEST_LIKE_PATH_RE = re.compile(r"(^|/)(tests?|specs?|e2e|playwright|cypress)(/|$)|(^|/)(smoke|spec|test)[-_]", re.IGNORECASE)
 DEPENDENCY_FILE_RE = re.compile(r"(^|/)(package\.json|pnpm-lock\.yaml|yarn\.lock|package-lock\.json|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|Pipfile|Pipfile\.lock)$", re.IGNORECASE)
 BACKEND_ROOT_RE = re.compile(r"^(server|backend|api|db|migrations|services?)(/|$)", re.IGNORECASE)
+GENERIC_TECH_SEGMENT_RE = re.compile(r"^[A-Z]{2,8}$")
+HIGH_RISK_TASK_HINT_RE = re.compile(
+    r"(鉴权|认证|权限|token|租约|lease|状态机|并发|竞态|迁移|migration|schema|数据库|db|"
+    r"冲突|cherry-pick|rebase|回滚|支付|财务|法务|合规|下载|爬虫|安全|"
+    r"xss|csrf|sql|注入|加密|证书|deploy|发布|线上|生产)",
+    re.IGNORECASE,
+)
+LOW_RISK_SURFACE_ROOTS = {"tests", "test", "docs", "examples", "example", "demo", "demos", "public", "static", "assets", "images", "img"}
 
 
 def _clip_text(text: str, *, limit: int = 400) -> str:
@@ -127,6 +135,257 @@ def section_items(
     return items
 
 
+def looks_like_concrete_surface_path(raw: str) -> bool:
+    text = str(raw or "").strip().lstrip("./")
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if text.endswith("/"):
+        return False
+    basename = text.rsplit("/", 1)[-1]
+    if "." in basename:
+        return True
+    segments = [segment for segment in text.split("/") if segment]
+    if len(segments) >= 2 and all(GENERIC_TECH_SEGMENT_RE.fullmatch(segment) for segment in segments):
+        return False
+    return True
+
+
+def looks_like_lightweight_static_contract(
+    contract: dict | None,
+    *,
+    allowed_surface: dict | None = None,
+) -> bool:
+    if not isinstance(contract, dict):
+        return False
+    surface = normalize_allowed_surface(allowed_surface or contract.get("allowed_surface") or {})
+    files = [
+        str(path or "").strip()
+        for path in (surface.get("files") or [])
+        if looks_like_concrete_surface_path(path)
+    ]
+    if not files or len(files) > 8:
+        return False
+    lowered_files = [path.lower() for path in files]
+    lightweight_exts = (
+        ".html",
+        ".css",
+        ".js",
+        ".mjs",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    )
+    asset_roots = {"assets", "images", "img", "public", "static"}
+    for path in lowered_files:
+        root = path.split("/", 1)[0]
+        if "/" in path and root not in asset_roots:
+            return False
+        if not path.endswith(lightweight_exts):
+            return False
+    text_parts = [str(contract.get("goal") or "")]
+    for key in ("scope", "constraints", "deliverables", "acceptance", "evidence_required"):
+        text_parts.extend([str(item or "") for item in (contract.get(key) or [])])
+    text = " ".join(text_parts).lower()
+    disallowed_tokens = (
+        "backend",
+        "server",
+        "api",
+        "数据库",
+        "后端",
+        "迁移",
+        "playwright",
+        "cypress",
+        "pytest",
+        "package.json",
+        "pnpm",
+        "npm ",
+    )
+    return not any(token in text for token in disallowed_tokens)
+
+
+def _extract_contract_for_effort(task: dict | None) -> dict:
+    task = task or {}
+    contract = task.get("current_contract")
+    if isinstance(contract, dict) and contract:
+        return contract
+    description = str(task.get("description") or "").strip()
+    allowed_surface = task.get("allowed_surface") or task.get("allowed_surface_json")
+    if description:
+        extracted = extract_task_contract_from_description(
+            description,
+            existing_allowed_surface=normalize_allowed_surface(allowed_surface),
+        )
+        if extracted:
+            return extracted
+    return {}
+
+
+def _bundle_metric(bundle: dict | None, key: str) -> int:
+    items = (bundle or {}).get(key)
+    return len(items) if isinstance(items, list) else 0
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def select_reasoning_effort(
+    task: dict | None,
+    *,
+    agent: str,
+    operation: str = "",
+    cli_name: str = "codex",
+) -> str | None:
+    if str(cli_name or "").strip().lower() != "codex":
+        return None
+    task = task or {}
+    agent_key = str(agent or "").strip().lower() or "generic"
+    op = str(operation or "").strip().lower()
+    contract = _extract_contract_for_effort(task)
+    allowed_surface = normalize_allowed_surface(
+        task.get("allowed_surface") or task.get("allowed_surface_json") or contract.get("allowed_surface")
+    )
+    concrete_files = [
+        str(path or "").strip()
+        for path in (allowed_surface.get("files") or [])
+        if looks_like_concrete_surface_path(path)
+    ]
+    text_parts = [
+        str(task.get("title") or ""),
+        str(task.get("description") or ""),
+        str(task.get("review_feedback") or ""),
+        str(contract.get("goal") or ""),
+    ]
+    for key in ("scope", "constraints", "deliverables", "acceptance", "assumptions", "evidence_required"):
+        text_parts.extend([str(item or "") for item in (contract.get(key) or [])])
+    text = " ".join(text_parts)
+    lowered_text = text.lower()
+    high_risk = bool(HIGH_RISK_TASK_HINT_RE.search(text))
+    lightweight_static = looks_like_lightweight_static_contract(contract, allowed_surface=allowed_surface)
+
+    surface_roots = {path.split("/", 1)[0].lower() for path in concrete_files if path}
+    dependency_paths = [path for path in concrete_files if DEPENDENCY_FILE_RE.search(path)]
+    backend_paths = [path for path in concrete_files if BACKEND_ROOT_RE.search(path)]
+    small_surface = 0 < len(concrete_files) <= 4
+    low_risk_surface = bool(concrete_files) and all(
+        (
+            "/" not in path
+            or path.split("/", 1)[0].lower() in LOW_RISK_SURFACE_ROOTS
+            or lightweight_static
+        )
+        and not DEPENDENCY_FILE_RE.search(path)
+        for path in concrete_files
+    )
+
+    acceptance_count = len(contract.get("acceptance") or [])
+    evidence_count = len(contract.get("evidence_required") or [])
+    scope_count = len(contract.get("scope") or [])
+    deliverable_count = len(contract.get("deliverables") or [])
+    open_issue_count = _safe_int(task.get("open_issue_count"))
+    same_streak = _safe_int(task.get("same_fingerprint_streak"))
+    retry_strategy = str(task.get("retry_strategy") or RETRY_STRATEGY_DEFAULT).strip().lower() or RETRY_STRATEGY_DEFAULT
+    current_status = str(task.get("status") or "").strip().lower()
+    claimed_from = str(task.get("_claimed_from_status") or "").strip().lower()
+    execution_phase = str(task.get("execution_phase") or "").strip().lower()
+    latest_evidence = task.get("latest_evidence")
+    bundle = latest_evidence.get("bundle") if isinstance(latest_evidence, dict) and isinstance(latest_evidence.get("bundle"), dict) else {}
+
+    score = {
+        "leader": 0,
+        "developer": 1,
+        "reviewer": 1,
+        "manager": 2,
+    }.get(agent_key, 1)
+
+    if op in {"decompose", "merge"}:
+        score += 1
+    if execution_phase in {"critic", "merge"}:
+        score += 1
+    if current_status in {"needs_changes", "blocked"} or claimed_from in {"needs_changes", "blocked"}:
+        score += 1
+    if task.get("review_feedback"):
+        score += 1
+
+    if high_risk:
+        score += 2
+    if dependency_paths:
+        score += 1
+    if backend_paths and not lightweight_static:
+        score += 1
+    if len(concrete_files) >= 8 or deliverable_count >= 6:
+        score += 1
+    if acceptance_count >= 6 or evidence_count >= 4 or scope_count >= 6:
+        score += 1
+    if open_issue_count >= 1:
+        score += 1
+    if open_issue_count >= 4:
+        score += 1
+    if retry_strategy != RETRY_STRATEGY_DEFAULT:
+        score += 1
+    if retry_strategy in {"package_audit", "critic_pass", "alternate_model"}:
+        score += 1
+    if same_streak >= 1:
+        score += 1
+    if same_streak >= 2:
+        score += 2
+
+    hard_blocker_count = _bundle_metric(bundle, "hard_blockers")
+    missing_acceptance_count = _bundle_metric(bundle, "missing_acceptance_checks")
+    missing_evidence_count = _bundle_metric(bundle, "missing_evidence_required")
+    assumption_conflict_count = _bundle_metric(bundle, "assumption_conflicts")
+    surface_violation_count = _bundle_metric(bundle, "surface_violations")
+    if hard_blocker_count:
+        score += 2
+    elif missing_acceptance_count or assumption_conflict_count or surface_violation_count:
+        score += 1
+    elif missing_evidence_count >= 3:
+        score += 1
+
+    if agent_key == "manager" and (
+        "冲突" in text
+        or "merge_blocked" in lowered_text
+        or current_status == "blocked"
+    ):
+        score += 2
+    if agent_key == "reviewer" and hard_blocker_count:
+        score += 1
+
+    low_risk_small_task = (
+        small_surface
+        and low_risk_surface
+        and not high_risk
+        and open_issue_count == 0
+        and same_streak == 0
+        and retry_strategy == RETRY_STRATEGY_DEFAULT
+        and not dependency_paths
+        and not backend_paths
+        and acceptance_count <= 4
+        and evidence_count <= 2
+    )
+    if lightweight_static and low_risk_small_task:
+        score -= 2
+    elif low_risk_small_task:
+        score -= 1
+
+    if agent_key == "leader":
+        if op == "triage" and not high_risk and len(text) < 800 and deliverable_count <= 4 and scope_count <= 4:
+            score = min(score, 1)
+        if op == "decompose":
+            score = max(score, 2)
+
+    if score >= 5:
+        return "xhigh"
+    if score >= 2:
+        return "high"
+    return "medium"
+
+
 def infer_allowed_surface(contract: dict | None) -> dict[str, list[str]]:
     files: list[str] = []
     roots: list[str] = []
@@ -141,7 +400,7 @@ def infer_allowed_surface(contract: dict | None) -> dict[str, list[str]]:
                 candidates = [stripped]
         for raw_path in candidates:
             path = raw_path.strip().lstrip("./")
-            if not path:
+            if not path or not looks_like_concrete_surface_path(path):
                 continue
             if path not in files:
                 files.append(path[:500])

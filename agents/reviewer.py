@@ -12,6 +12,7 @@ from task_intelligence import (
     evidence_bundle_has_blockers,
     next_retry_strategy,
     normalize_issue_list,
+    select_reasoning_effort,
     summarize_evidence_blockers,
 )
 
@@ -71,6 +72,14 @@ class ReviewerAgent(BaseAgent):
     def _current_system_retry(self, feedback: str | None) -> int:
         m = re.search(r"\[review_retry=(\d+)/(\d+)\]", str(feedback or ""))
         return int(m.group(1)) if m else 0
+
+    def _preferred_reasoning_effort(self, task: dict) -> str | None:
+        return select_reasoning_effort(
+            task,
+            agent=self.name,
+            operation="review",
+            cli_name=self.cli_name,
+        )
 
     async def _is_ancestor(self, repo_root: Path, ancestor: str, ref: str) -> bool:
         try:
@@ -706,6 +715,7 @@ class ReviewerAgent(BaseAgent):
             output_schema=REVIEW_DECISION_SCHEMA,
             expected_status=str(task.get("status") or "").strip().lower(),
             expected_assignee=self.name,
+            reasoning_effort=self._preferred_reasoning_effort(task),
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "审查 CLI 失败后"):

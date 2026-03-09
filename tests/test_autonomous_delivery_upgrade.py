@@ -15,6 +15,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 import db  # noqa: E402
 import generic as generic_module  # noqa: E402
+import task_intelligence  # noqa: E402
 
 
 class AutonomousDeliveryDbTest(unittest.TestCase):
@@ -314,6 +315,63 @@ class DeveloperPreReviewVerifierTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["has_blockers"])
         self.assertFalse(result["bundle"]["missing_acceptance_checks"])
         self.assertFalse(result["bundle"]["missing_evidence_required"])
+
+    def test_infer_allowed_surface_ignores_generic_tech_labels(self):
+        contract = {
+            "deliverables": [
+                "`index.html`：页面主文件。",
+                "`styles.css` 或等效样式资源：负责 HTML/CSS 视觉表现。",
+                "`script.js` 或等效脚本：若无脚本，应保证页面仅靠 HTML/CSS 也可完成浏览。",
+            ]
+        }
+
+        allowed_surface = task_intelligence.infer_allowed_surface(contract)
+
+        self.assertEqual(allowed_surface["files"], ["index.html", "styles.css", "script.js"])
+        self.assertEqual(allowed_surface["roots"], ["index.html", "styles.css", "script.js"])
+
+    def test_pre_review_verifier_does_not_block_on_generic_html_css_label(self):
+        task = {
+            "id": "task-4",
+            "title": "福州旅游攻略",
+            "description": "",
+            "status": "needs_changes",
+            "_claimed_from_status": "needs_changes",
+            "current_contract": {
+                "version": 2,
+                "goal": "输出福州旅游攻略单页",
+                "deliverables": ["index.html", "styles.css", "script.js"],
+                "acceptance": ["页面可浏览"],
+                "evidence_required": [
+                    "本地执行 `python3 -m http.server 8000` 后访问网页首页，能够正常加载完整页面。"
+                ],
+                "allowed_surface": {
+                    "roots": ["index.html", "styles.css", "script.js", "HTML"],
+                    "files": ["index.html", "styles.css", "script.js", "HTML/CSS"],
+                    "docs": [],
+                    "cli_paths": ["index.html", "styles.css", "script.js"],
+                },
+            },
+            "allowed_surface": {
+                "roots": ["index.html", "styles.css", "script.js", "HTML"],
+                "files": ["index.html", "styles.css", "script.js", "HTML/CSS"],
+                "docs": [],
+                "cli_paths": ["index.html", "styles.css", "script.js"],
+            },
+        }
+        patchset = {
+            "changed_files": [
+                {"status": "M", "path": "index.html"},
+                {"status": "M", "path": "styles.css"},
+                {"status": "M", "path": "script.js"},
+            ],
+        }
+
+        result = self.agent._build_pre_review_evidence_bundle(task, patchset)
+
+        blocker_summaries = {item["summary"] for item in result["bundle"]["hard_blockers"]}
+        self.assertFalse(any("HTML/CSS" in summary for summary in blocker_summaries))
+        self.assertFalse(result["has_blockers"])
 
 
 if __name__ == "__main__":

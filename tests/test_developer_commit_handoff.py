@@ -185,6 +185,7 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         async def _capture_run_cli(prompt, cwd, **kwargs):
             captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
             return 0, "任务实现完成"
 
         async def _fake_git(*args, cwd: Path, task_id=None):
@@ -219,6 +220,58 @@ class DeveloperCommitHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tests/test_task_actions_api.py 中的新增测试", prompt)
         self.assertIn("新增测试全部通过", prompt)
         self.assertIn("不影响现有测试", prompt)
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
+
+    async def test_lightweight_static_delivery_uses_medium_reasoning_effort(self):
+        captured = {}
+
+        async def _capture_run_cli(prompt, cwd, **kwargs):
+            captured["kwargs"] = kwargs
+            return 0, "任务实现完成"
+
+        async def _fake_git(*args, cwd: Path, task_id=None):
+            if args == ("rev-parse", "HEAD"):
+                return "a" * 40
+            if args == ("add", "-A"):
+                return ""
+            if args == ("diff", "--cached", "--stat"):
+                return ""
+            raise AssertionError(f"Unexpected git args: {args}")
+
+        self.agent.run_cli = mock.AsyncMock(side_effect=_capture_run_cli)
+        self.agent.git = mock.AsyncMock(side_effect=_fake_git)
+
+        task = {
+            "id": "task-4",
+            "title": "福州旅游攻略",
+            "description": "",
+            "status": "in_progress",
+            "_claimed_from_status": "todo",
+            "current_contract": {
+                "version": 2,
+                "goal": "输出静态旅游攻略网页",
+                "scope": ["使用静态网页展示内容"],
+                "deliverables": ["index.html", "styles.css", "script.js"],
+                "acceptance": ["页面可在桌面端与移动端浏览"],
+                "evidence_required": ["node --check script.js"],
+                "allowed_surface": {
+                    "roots": ["index.html", "styles.css", "script.js"],
+                    "files": ["index.html", "styles.css", "script.js"],
+                    "docs": [],
+                    "cli_paths": ["index.html", "styles.css", "script.js"],
+                },
+            },
+            "allowed_surface": {
+                "roots": ["index.html", "styles.css", "script.js"],
+                "files": ["index.html", "styles.css", "script.js"],
+                "docs": [],
+                "cli_paths": ["index.html", "styles.css", "script.js"],
+            },
+        }
+
+        await self.agent.process_task(task)
+
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "medium")
 
 
 if __name__ == "__main__":

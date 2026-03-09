@@ -11,6 +11,7 @@ from prompt_registry import (
     LEADER_REQUIREMENT_REFINEMENT_PROMPT,
     TRIAGE_PROMPT_DEFAULT,
 )
+from task_intelligence import select_reasoning_effort
 
 LEADER_SUBTASK_SCHEMA = {
     "type": "object",
@@ -669,6 +670,12 @@ class LeaderAgent(BaseAgent):
             output_schema=LEADER_TRIAGE_SCHEMA,
             expected_status=str(task.get("status") or "").strip().lower(),
             expected_assignee=self.name,
+            reasoning_effort=select_reasoning_effort(
+                task,
+                agent=self.name,
+                operation="triage",
+                cli_name=self.cli_name,
+            ),
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "评估 CLI 失败后"):
@@ -878,6 +885,12 @@ class LeaderAgent(BaseAgent):
             output_schema=LEADER_FORCE_DECOMPOSE_SCHEMA,
             expected_status=str(task.get("status") or "").strip().lower(),
             expected_assignee=self.name,
+            reasoning_effort=select_reasoning_effort(
+                task,
+                agent=self.name,
+                operation="decompose",
+                cli_name=self.cli_name,
+            ),
         )
         if returncode != 0:
             if await self.stop_if_task_cancelled(task_id, "分解 CLI 失败后"):
