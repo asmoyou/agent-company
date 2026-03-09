@@ -2614,69 +2614,84 @@
       <span id="panel-project-badge" class="text-xs text-indigo-400 bg-indigo-900/30 px-2 py-0.5 rounded-full"></span>
     </div>
 
+    <div id="panel-actions-wrap" class="hidden sticky top-0 z-10 rounded-xl border border-slate-700 bg-slate-800/95 backdrop-blur px-3 py-3 shadow-sm space-y-2">
+      <div class="text-xs text-slate-400 mb-2">快捷操作</div>
+
+      <!-- 用户验收区 (pending_acceptance only) -->
+      <div id="panel-acceptance" class="hidden space-y-3">
+        <div class="text-xs font-semibold text-teal-400 uppercase tracking-wide">用户验收</div>
+        <div class="panel-acceptance-actions flex gap-2">
+          <button onclick="acceptTask()"
+            class="flex-1 bg-teal-600 hover:bg-teal-500 text-white text-sm font-medium py-2 rounded-lg">
+            ✅ 接受，标记完成
+          </button>
+          <button onclick="showRejectInput()"
+            class="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium py-2 rounded-lg">
+            ↩ 打回修改
+          </button>
+        </div>
+        <div id="reject-form" class="hidden space-y-2">
+          <textarea id="reject-feedback" rows="3" placeholder="描述需要修改的具体内容..."
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-red-500 resize-none"></textarea>
+          <button onclick="rejectTask()"
+            class="w-full bg-red-700 hover:bg-red-600 text-white text-sm font-medium py-2 rounded-lg">
+            确认打回
+          </button>
+        </div>
+      </div>
+
+      <!-- 阻塞恢复按钮 (blocked only) -->
+      <div id="panel-retry-blocked-btn" class="hidden">
+        <button onclick="retryBlockedCurrentTask()"
+          class="w-full bg-amber-900/40 hover:bg-amber-900/60 text-amber-300 text-sm py-2 rounded-lg border border-amber-900/50 transition">
+          <span id="panel-retry-blocked-label">♻ 重试任务</span>
+        </button>
+      </div>
+
+      <!-- 归档按钮 (completed only) -->
+      <div id="panel-archive-btn" class="hidden">
+        <button onclick="archiveCurrentTask()"
+          class="w-full bg-slate-700 hover:bg-slate-600 text-slate-400 text-sm py-2 rounded-lg">
+          📦 归档此任务
+        </button>
+      </div>
+
+      <!-- 取消按钮（非完成任务） -->
+      <div id="panel-cancel-btn" class="hidden">
+        <button onclick="cancelCurrentTask()"
+          class="w-full bg-red-900/30 hover:bg-red-900/50 text-red-300 text-sm py-2 rounded-lg border border-red-900/40 transition">
+          ⛔ 取消任务（归档且停止执行）
+        </button>
+      </div>
+
+      <!-- 分解按钮 (todo only, non-subtask) — 强制让主管（leader）分解 -->
+      <div id="panel-decompose-btn" class="hidden">
+        <button onclick="decomposeCurrentTask()"
+          class="w-full bg-fuchsia-900/40 hover:bg-fuchsia-900/70 text-fuchsia-300 text-sm py-2 rounded-lg border border-fuchsia-900/50 transition">
+          🧩 强制分解（让主管拆分为子任务）
+        </button>
+      </div>
+    </div>
+
+    <div id="panel-flow-wrap">
+      <div class="text-xs text-slate-400 mb-1">流程明细</div>
+      <div id="panel-flow-summary" class="grid grid-cols-1 gap-2 sm:grid-cols-3"></div>
+      <div id="panel-flow-timeline" class="space-y-2 text-xs mt-2"></div>
+    </div>
+
+    <div id="panel-original-desc-wrap" class="hidden">
+      <div class="text-xs text-slate-400 mb-1">原始需求</div>
+      <div id="panel-original-desc" class="text-sm text-slate-300 msg-rich bg-slate-900/50 rounded p-3"></div>
+    </div>
+
     <div>
-      <div class="text-xs text-slate-400 mb-1">需求描述</div>
+      <div id="panel-current-desc-label" class="text-xs text-slate-400 mb-1">需求描述</div>
       <div id="panel-desc" class="text-sm text-slate-300 msg-rich bg-slate-900/50 rounded p-3"></div>
     </div>
 
     <div id="panel-cancel-reason-wrap" class="hidden">
       <div class="text-xs text-red-300 mb-1">取消原因</div>
       <div id="panel-cancel-reason" class="text-sm text-red-200 msg-rich bg-red-950/20 border border-red-900/40 rounded p-3"></div>
-    </div>
-
-    <!-- 用户验收区 (pending_acceptance only) -->
-    <div id="panel-acceptance" class="hidden space-y-3">
-      <div class="text-xs font-semibold text-teal-400 uppercase tracking-wide border-t border-slate-700 pt-3">用户验收</div>
-      <div class="panel-acceptance-actions flex gap-2">
-        <button onclick="acceptTask()"
-          class="flex-1 bg-teal-600 hover:bg-teal-500 text-white text-sm font-medium py-2 rounded-lg">
-          ✅ 接受，标记完成
-        </button>
-        <button onclick="showRejectInput()"
-          class="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium py-2 rounded-lg">
-          ↩ 打回修改
-        </button>
-      </div>
-      <div id="reject-form" class="hidden space-y-2">
-        <textarea id="reject-feedback" rows="3" placeholder="描述需要修改的具体内容..."
-          class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-red-500 resize-none"></textarea>
-        <button onclick="rejectTask()"
-          class="w-full bg-red-700 hover:bg-red-600 text-white text-sm font-medium py-2 rounded-lg">
-          确认打回
-        </button>
-      </div>
-    </div>
-
-    <!-- 阻塞恢复按钮 (blocked only) -->
-    <div id="panel-retry-blocked-btn" class="hidden">
-      <button onclick="retryBlockedCurrentTask()"
-        class="w-full bg-amber-900/40 hover:bg-amber-900/60 text-amber-300 text-sm py-2 rounded-lg border border-amber-900/50 transition">
-        <span id="panel-retry-blocked-label">♻ 重试任务</span>
-      </button>
-    </div>
-
-    <!-- 归档按钮 (completed only) -->
-    <div id="panel-archive-btn" class="hidden">
-      <button onclick="archiveCurrentTask()"
-        class="w-full bg-slate-700 hover:bg-slate-600 text-slate-400 text-sm py-2 rounded-lg">
-        📦 归档此任务
-      </button>
-    </div>
-
-    <!-- 取消按钮（非完成任务） -->
-    <div id="panel-cancel-btn" class="hidden">
-      <button onclick="cancelCurrentTask()"
-        class="w-full bg-red-900/30 hover:bg-red-900/50 text-red-300 text-sm py-2 rounded-lg border border-red-900/40 transition">
-        ⛔ 取消任务（归档且停止执行）
-      </button>
-    </div>
-
-    <!-- 分解按钮 (todo only, non-subtask) — 强制让主管（leader）分解 -->
-    <div id="panel-decompose-btn" class="hidden">
-      <button onclick="decomposeCurrentTask()"
-        class="w-full bg-fuchsia-900/40 hover:bg-fuchsia-900/70 text-fuchsia-300 text-sm py-2 rounded-lg border border-fuchsia-900/50 transition">
-        🧩 强制分解（让主管拆分为子任务）
-      </button>
     </div>
 
     <!-- 子任务列表 (decomposed only) -->
@@ -5400,6 +5415,196 @@ function formatLocalDateTime(ts) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function taskStatusLabel(status) {
+  const key = String(status || "").trim();
+  return STATUS_LABEL[key] || key || "-";
+}
+
+const AGENT_FLOW_STATUSES = new Set([
+  "triage",
+  "triaging",
+  "todo",
+  "decompose",
+  "decomposing",
+  "decomposed",
+  "in_progress",
+  "in_review",
+  "reviewing",
+  "blocked",
+  "needs_changes",
+  "approved",
+  "merging",
+]);
+
+function getTaskLifecycle(task) {
+  return task && typeof task.lifecycle === "object" && task.lifecycle ? task.lifecycle : {};
+}
+
+function formatDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value < 0) return "-";
+  const totalSeconds = Math.floor(value / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (days) parts.push(`${days}天`);
+  if (hours) parts.push(`${hours}小时`);
+  if (minutes) parts.push(`${minutes}分`);
+  if (!parts.length || (parts.length < 2 && !days && seconds)) parts.push(`${seconds}秒`);
+  return parts.slice(0, 2).join(" ");
+}
+
+function buildTaskFlowSteps(task) {
+  const timeline = Array.isArray(task?.status_timeline) ? task.status_timeline.filter(Boolean) : [];
+  const lifecycle = getTaskLifecycle(task);
+  const terminalStatuses = new Set(["completed", "cancelled"]);
+  const now = Date.now();
+  return timeline.map((entry, index) => {
+    const status = String(entry?.status || "").trim();
+    const label = taskStatusLabel(status);
+    const title = String(entry?.title || "").trim()
+      || (String(entry?.stage || "").trim() === "task_created" ? "任务创建" : label);
+    const startAt = String(entry?.at || "").trim();
+    const nextEntry = timeline[index + 1] || null;
+    let endAt = String(nextEntry?.at || "").trim();
+    const active = !endAt && !terminalStatuses.has(status);
+    if (!endAt && terminalStatuses.has(status)) {
+      endAt = String(lifecycle.ended_at || lifecycle.completed_at || lifecycle.cancelled_at || startAt).trim();
+    }
+    const startDate = parseTimestamp(startAt);
+    const endDate = active ? new Date(now) : parseTimestamp(endAt);
+    const durationMs = startDate && endDate ? Math.max(0, endDate.getTime() - startDate.getTime()) : null;
+    const duration = durationMs !== null ? formatDuration(durationMs) : "-";
+    return {
+      ...entry,
+      status,
+      label,
+      title,
+      start_at: startAt,
+      end_at: endAt,
+      active,
+      duration_ms: durationMs,
+      duration,
+    };
+  });
+}
+
+function syncPanelActionSection() {
+  const wrap = document.getElementById("panel-actions-wrap");
+  if (!wrap) return;
+  const actionIds = [
+    "panel-acceptance",
+    "panel-retry-blocked-btn",
+    "panel-archive-btn",
+    "panel-cancel-btn",
+    "panel-decompose-btn",
+  ];
+  const visible = actionIds.some((id) => {
+    const el = document.getElementById(id);
+    return !!el && !el.classList.contains("hidden");
+  });
+  wrap.classList.toggle("hidden", !visible);
+}
+
+function computeAgentFlowSummary(task, steps) {
+  const lifecycle = getTaskLifecycle(task);
+  const startStep = steps.find((step) => AGENT_FLOW_STATUSES.has(String(step?.status || "").trim()));
+  const startAt = String(startStep?.start_at || lifecycle.created_at || task?.created_at || "").trim();
+  if (!startAt) {
+    return {
+      duration: "-",
+      extra: "暂无 Agent 流转记录",
+    };
+  }
+
+  const acceptanceAt = String(lifecycle.acceptance_started_at || "").trim();
+  const endedAt = String(lifecycle.ended_at || lifecycle.current_status_at || task?.updated_at || "").trim();
+  const endAt = acceptanceAt || endedAt;
+  const startDate = parseTimestamp(startAt);
+  const endDate = endAt ? parseTimestamp(endAt) : new Date();
+  const duration = startDate && endDate ? formatDuration(Math.max(0, endDate.getTime() - startDate.getTime())) : "-";
+  const extra = acceptanceAt
+    ? `截至 ${formatLocalDateTime(acceptanceAt)}，已剔除人工验收等待`
+    : "包含评估、排队、开发、Review、返工、Merge";
+  return {duration, extra};
+}
+
+function renderTaskFlow(task) {
+  const summaryEl = document.getElementById("panel-flow-summary");
+  const timelineEl = document.getElementById("panel-flow-timeline");
+  if (!summaryEl || !timelineEl) return;
+
+  const lifecycle = getTaskLifecycle(task);
+  const createdAt = String(lifecycle.created_at || task?.created_at || "").trim();
+  const currentStatus = String(lifecycle.current_status || task?.status || "").trim();
+  const currentStatusAt = String(lifecycle.current_status_at || task?.updated_at || createdAt).trim();
+  const steps = buildTaskFlowSteps(task);
+  const agentFlow = computeAgentFlowSummary(task, steps);
+  const summaryItems = [
+    {
+      label: "当前阶段",
+      value: taskStatusLabel(currentStatus),
+      extra: currentStatusAt ? `开始于 ${formatLocalDateTime(currentStatusAt)}` : "",
+    },
+    {
+      label: "创建时间",
+      value: createdAt ? formatLocalDateTime(createdAt) : "未知",
+      extra: "",
+    },
+    {
+      label: "Agent流转耗时",
+      value: agentFlow.duration,
+      extra: agentFlow.extra,
+    },
+  ];
+  summaryEl.innerHTML = summaryItems.map((item) => `
+    <div class="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2">
+      <div class="text-[11px] text-slate-500">${escHtml(item.label)}</div>
+      <div class="text-sm text-slate-100 mt-1">${escHtml(item.value)}</div>
+      ${item.extra ? `<div class="text-[11px] text-slate-500 mt-1">${escHtml(item.extra)}</div>` : ""}
+    </div>
+  `).join("");
+
+  if (!steps.length) {
+    timelineEl.innerHTML = "<div class='text-slate-500'>暂无流程步骤明细</div>";
+    return;
+  }
+  timelineEl.innerHTML = steps.map((step) => {
+    const status = String(step.status || "").trim();
+    const badgeClass = STATUS_BADGE[status] || "bg-slate-700 text-slate-300";
+    const stage = String(step?.stage || "").trim();
+    const summary = String(step?.summary || "").trim();
+    const endLabel = step.active ? "进行中" : (step.end_at ? formatLocalDateTime(step.end_at) : "-");
+    return `<div class="rounded-lg border ${step?.is_current ? "border-indigo-500/50 bg-indigo-950/15" : "border-slate-700 bg-slate-900/30"} px-3 py-3">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="badge px-2 py-0.5 rounded-full text-[10px] ${badgeClass} shrink-0">${escHtml(step.label)}</span>
+          <span class="text-slate-200 truncate">${escHtml(step.title)}</span>
+        </div>
+        <span class="text-[11px] ${step.active ? "text-indigo-300" : "text-slate-500"} shrink-0">${step.active ? "进行中" : "已结束"}</span>
+      </div>
+      ${stage && !["task_created", "task_current"].includes(stage) ? `<div class="text-[11px] text-slate-500 mt-1">${escHtml(stage)}</div>` : ""}
+      <div class="grid grid-cols-1 gap-2 sm:grid-cols-3 mt-2">
+        <div class="rounded bg-slate-950/35 px-2.5 py-2">
+          <div class="text-[11px] text-slate-500">开始时间</div>
+          <div class="text-slate-200 mt-1">${escHtml(step.start_at ? formatLocalDateTime(step.start_at) : "-")}</div>
+        </div>
+        <div class="rounded bg-slate-950/35 px-2.5 py-2">
+          <div class="text-[11px] text-slate-500">结束时间</div>
+          <div class="text-slate-200 mt-1">${escHtml(endLabel)}</div>
+        </div>
+        <div class="rounded bg-slate-950/35 px-2.5 py-2">
+          <div class="text-[11px] text-slate-500">耗时</div>
+          <div class="text-slate-200 mt-1">${escHtml(step.duration || "-")}</div>
+        </div>
+      </div>
+      ${summary ? `<div class="text-[11px] text-slate-300 mt-1 msg-rich">${renderRichMsg(summary)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 function showToast(title, message, kind = "error") {
   const wrap = document.getElementById("toast-wrap");
   if (!wrap) return;
@@ -7081,7 +7286,21 @@ async function openPanel(id) {
   }
 
   document.getElementById("panel-title").textContent = task.title;
-  setRichContent("panel-desc", task.description, "(无描述)");
+  renderTaskFlow(task);
+  const originalDescription = String(task.original_description || "").trim();
+  const currentDescription = String(task.description || "").trim();
+  const displayDescription = currentDescription || originalDescription;
+  const showOriginalDescription = !!originalDescription
+    && !!currentDescription
+    && normalizeTextForCompare(originalDescription) !== normalizeTextForCompare(currentDescription);
+  const originalWrap = document.getElementById("panel-original-desc-wrap");
+  const currentDescLabel = document.getElementById("panel-current-desc-label");
+  originalWrap.classList.toggle("hidden", !showOriginalDescription);
+  if (showOriginalDescription) {
+    setRichContent("panel-original-desc", originalDescription, "(无原始需求)");
+  }
+  currentDescLabel.textContent = showOriginalDescription ? "当前执行需求" : "需求描述";
+  setRichContent("panel-desc", displayDescription, "(无描述)");
   document.getElementById("panel-assignee").textContent = task.assignee?`负责人: ${task.assignee}`:"";
   const cancelReasonWrap = document.getElementById("panel-cancel-reason-wrap");
   const cancelReason = String(task.cancel_reason || "").trim();
@@ -7133,6 +7352,7 @@ async function openPanel(id) {
   // Decompose button: show only for todo tasks that are not subtasks
   const decompBtn = document.getElementById("panel-decompose-btn");
   decompBtn.classList.toggle("hidden", task.status !== "todo" || !!task.parent_task_id);
+  syncPanelActionSection();
 
   // Subtasks section: show for decomposed tasks
   const stWrap = document.getElementById("panel-subtasks-wrap");

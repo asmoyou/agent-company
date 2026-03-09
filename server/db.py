@@ -457,6 +457,7 @@ def init_db():
             project_id      TEXT REFERENCES projects(id),
             title           TEXT NOT NULL,
             description     TEXT NOT NULL DEFAULT '',
+            original_description TEXT NOT NULL DEFAULT '',
             priority        INTEGER NOT NULL DEFAULT 2,
             status          TEXT NOT NULL DEFAULT 'todo',
             assignee        TEXT,
@@ -708,6 +709,7 @@ def init_db():
         ("project_id", "TEXT"),
         ("title", "TEXT NOT NULL DEFAULT ''"),
         ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("original_description", "TEXT NOT NULL DEFAULT ''"),
         ("priority", "INTEGER NOT NULL DEFAULT 2"),
         ("status", "TEXT NOT NULL DEFAULT 'todo'"),
         ("assignee", "TEXT"),
@@ -901,6 +903,7 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim_cooldown ON tasks(status, archived, cooldown_until, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_task ON task_dependencies(task_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_handoffs_task_created ON task_handoffs(task_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_contracts_task_version ON task_contracts(task_id, version DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_issues_task_status ON task_issues(task_id, status, last_seen_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_attempts_task_created ON task_attempts(task_id, created_at DESC)")
@@ -910,6 +913,7 @@ def init_db():
     _cleanup_expired_sessions(conn)
     _seed_builtin_agents(conn)
     _cleanup_orphan_agent_outputs(conn)
+    _backfill_original_task_descriptions(conn)
     _backfill_task_contracts(conn)
     _recover_reviewer_stuck_tasks(conn)
     _recover_invalid_todo_assignments(conn)
@@ -926,6 +930,17 @@ def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]):
     for col, defn in columns:
         if col not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+
+
+def _backfill_original_task_descriptions(conn) -> None:
+    conn.execute(
+        """
+        UPDATE tasks
+           SET original_description=description
+         WHERE COALESCE(TRIM(original_description), '')=''
+           AND COALESCE(TRIM(description), '')!=''
+        """
+    )
 
 
 def _seed_admin_user(conn):
@@ -2159,6 +2174,161 @@ def _coerce_json_dict(raw) -> dict:
 
 def _json_dump(value) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _normalize_task_status(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _first_non_empty_mapping_value(mapping: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(mapping.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_task_lifecycle(
+    task: dict,
+    handoffs: list[dict],
+    *,
+    include_events: bool,
+) -> tuple[dict[str, str], list[dict] | None]:
+    events: list[dict] = []
+    first_entered_at: dict[str, str] = {}
+    last_entered_at: dict[str, str] = {}
+
+    def append_event(
+        status: str | None,
+        at: str | None,
+        *,
+        title: str = "",
+        summary: str = "",
+        stage: str = "",
+        source: str = "",
+        synthetic: bool = False,
+    ) -> None:
+        normalized_status = _normalize_task_status(status)
+        normalized_at = str(at or "").strip()
+        if not normalized_status or not normalized_at:
+            return
+        event = {
+            "status": normalized_status,
+            "at": normalized_at,
+            "title": str(title or "").strip(),
+            "summary": str(summary or "").strip(),
+            "stage": str(stage or "").strip(),
+            "source": str(source or "").strip(),
+            "synthetic": bool(synthetic),
+        }
+        if events:
+            prev = events[-1]
+            if prev["status"] == event["status"] and prev["at"] == event["at"]:
+                if not prev.get("title") and event["title"]:
+                    prev["title"] = event["title"]
+                if not prev.get("summary") and event["summary"]:
+                    prev["summary"] = event["summary"]
+                if not prev.get("stage") and event["stage"]:
+                    prev["stage"] = event["stage"]
+                if not prev.get("source") and event["source"]:
+                    prev["source"] = event["source"]
+                prev["synthetic"] = prev.get("synthetic", False) and event["synthetic"]
+                return
+        events.append(event)
+        first_entered_at.setdefault(normalized_status, normalized_at)
+        last_entered_at[normalized_status] = normalized_at
+
+    created_at = str(task.get("created_at") or "").strip()
+    current_status = _normalize_task_status(task.get("status"))
+    initial_status = current_status
+    for handoff in handoffs:
+        status_from = _normalize_task_status(handoff.get("status_from"))
+        if status_from:
+            initial_status = status_from
+            break
+    if not initial_status:
+        initial_status = current_status
+
+    if initial_status and created_at:
+        append_event(
+            initial_status,
+            created_at,
+            title="任务创建",
+            summary="任务已创建",
+            stage="task_created",
+            source="task_created",
+            synthetic=True,
+        )
+
+    for handoff in handoffs:
+        append_event(
+            handoff.get("status_to"),
+            handoff.get("created_at"),
+            title=str(handoff.get("title") or ""),
+            summary=str(handoff.get("summary") or ""),
+            stage=str(handoff.get("stage") or ""),
+            source="handoff",
+        )
+
+    if current_status:
+        current_status_at = str(task.get("updated_at") or created_at).strip()
+        if current_status not in last_entered_at and current_status_at:
+            append_event(
+                current_status,
+                current_status_at,
+                title="当前状态",
+                stage="task_current",
+                source="task_current",
+                synthetic=True,
+            )
+
+    current_status_at = last_entered_at.get(current_status) or str(task.get("updated_at") or created_at or "").strip()
+    lifecycle = {
+        "created_at": created_at,
+        "started_at": _first_non_empty_mapping_value(
+            first_entered_at,
+            (
+                "in_progress",
+                "reviewing",
+                "in_review",
+                "approved",
+                "merging",
+                "pending_acceptance",
+                "completed",
+                "needs_changes",
+                "blocked",
+            ),
+        ),
+        "review_started_at": _first_non_empty_mapping_value(
+            first_entered_at,
+            (
+                "in_review",
+                "reviewing",
+                "approved",
+                "merging",
+                "pending_acceptance",
+                "completed",
+            ),
+        ),
+        "acceptance_started_at": _first_non_empty_mapping_value(
+            first_entered_at,
+            ("pending_acceptance", "completed"),
+        ),
+        "completed_at": str(first_entered_at.get("completed") or "").strip(),
+        "cancelled_at": str(first_entered_at.get(CANCELLED_STATUS) or "").strip(),
+        "ended_at": str(first_entered_at.get("completed") or first_entered_at.get(CANCELLED_STATUS) or "").strip(),
+        "current_status": current_status,
+        "current_status_at": current_status_at,
+    }
+
+    if events:
+        for event in events:
+            event["is_current"] = bool(
+                event["status"] == current_status
+                and event["at"] == current_status_at
+            )
+
+    return lifecycle, events if include_events else None
 
 
 def _normalize_contract_row(row) -> dict | None:
@@ -3581,11 +3751,53 @@ def _attach_autonomy_metadata_to_tasks_in_conn(conn, task_rows: list[dict]) -> N
         item["latest_attempt"] = latest_attempt_by_task.get(task_id)
 
 
+def _attach_task_lifecycle_metadata_to_tasks_in_conn(
+    conn,
+    task_rows: list[dict],
+    *,
+    compact: bool = False,
+) -> None:
+    task_ids = [str(item.get("id") or "").strip() for item in (task_rows or []) if str(item.get("id") or "").strip()]
+    if not task_ids:
+        return
+
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task_id, stage, status_from, status_to, title, summary, created_at
+          FROM task_handoffs
+         WHERE task_id IN ({placeholders})
+         ORDER BY task_id ASC, created_at ASC, id ASC
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    handoffs_by_task: dict[str, list[dict]] = {}
+    for row in rows:
+        handoff = dict(row)
+        task_id = str(handoff.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        handoffs_by_task.setdefault(task_id, []).append(handoff)
+
+    include_events = not compact
+    for item in task_rows:
+        task_id = str(item.get("id") or "").strip()
+        lifecycle, events = _build_task_lifecycle(
+            item,
+            handoffs_by_task.get(task_id, []),
+            include_events=include_events,
+        )
+        item["lifecycle"] = lifecycle
+        if include_events:
+            item["status_timeline"] = events or []
+
+
 def _enrich_task_rows_in_conn(
     conn,
     task_rows: list[dict],
     *,
     persist_cancel_reason: bool = False,
+    compact: bool = False,
 ) -> None:
     _fill_cancel_reasons_from_logs_in_conn(
         conn,
@@ -3593,6 +3805,7 @@ def _enrich_task_rows_in_conn(
         persist=persist_cancel_reason,
     )
     _attach_dependency_state_to_tasks_in_conn(conn, task_rows)
+    _attach_task_lifecycle_metadata_to_tasks_in_conn(conn, task_rows, compact=compact)
     _attach_autonomy_metadata_to_tasks_in_conn(conn, task_rows)
 
 
@@ -3641,13 +3854,14 @@ def create_task(title: str, description: str, project_id: str | None = None,
                 )
         conn.execute(
             """INSERT INTO tasks
-               (id, project_id, title, description, priority, status,
+               (id, project_id, title, description, original_description, priority, status,
                 parent_task_id, subtask_order, assigned_agent, dev_agent, review_enabled, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 tid,
                 project_id,
                 title,
+                description,
                 description,
                 normalized_priority,
                 normalized_status,
@@ -3845,7 +4059,7 @@ def list_tasks(
                 _join_project(f"SELECT {select_cols} FROM tasks t ORDER BY t.created_at DESC")
             ).fetchall()
     out = [dict(r) for r in rows]
-    _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True)
+    _enrich_task_rows_in_conn(conn, out, persist_cancel_reason=True, compact=compact)
     conn.close()
     return out
 
