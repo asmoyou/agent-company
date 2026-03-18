@@ -31,7 +31,7 @@ from task_intelligence import (
 
 SERVER_URL      = os.getenv("SERVER_URL", "http://localhost:8080")
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL", "5"))
-CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "300"))
+CLI_TIMEOUT     = int(os.getenv("CLI_TIMEOUT", "1800"))
 HEARTBEAT_SECS  = int(os.getenv("HEARTBEAT_SECS", "45"))
 STATUS_HEARTBEAT_SECS = int(os.getenv("STATUS_HEARTBEAT_SECS", "20"))
 AGENT_POST_TIMEOUT_SECS = float(os.getenv("AGENT_POST_TIMEOUT_SECS", "8"))

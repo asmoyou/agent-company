@@ -32,6 +32,243 @@ prefix_logs() {
   done
 }
 
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+detect_package_manager() {
+  if command_exists brew; then
+    printf "%s" "brew"
+    return
+  fi
+  if command_exists apt-get; then
+    printf "%s" "apt-get"
+    return
+  fi
+  if command_exists dnf; then
+    printf "%s" "dnf"
+    return
+  fi
+  if command_exists yum; then
+    printf "%s" "yum"
+    return
+  fi
+  if command_exists pacman; then
+    printf "%s" "pacman"
+    return
+  fi
+  printf "%s" ""
+}
+
+PACKAGE_MANAGER="$(detect_package_manager)"
+PACKAGE_CACHE_READY=0
+
+run_as_admin() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+  if command_exists sudo && sudo -n true >/dev/null 2>&1; then
+    sudo "$@"
+    return
+  fi
+  return 1
+}
+
+install_system_packages() {
+  local label="$1"
+  shift
+  if [ "$#" -eq 0 ]; then
+    return 1
+  fi
+  case "${PACKAGE_MANAGER}" in
+    brew)
+      log_info "📥 Installing ${label} via Homebrew: $*"
+      brew install "$@"
+      ;;
+    apt-get)
+      if [ "${PACKAGE_CACHE_READY}" -eq 0 ]; then
+        log_info "📥 Refreshing apt package index..."
+        run_as_admin apt-get update
+        PACKAGE_CACHE_READY=1
+      fi
+      log_info "📥 Installing ${label} via apt-get: $*"
+      run_as_admin apt-get install -y "$@"
+      ;;
+    dnf)
+      log_info "📥 Installing ${label} via dnf: $*"
+      run_as_admin dnf install -y "$@"
+      ;;
+    yum)
+      log_info "📥 Installing ${label} via yum: $*"
+      run_as_admin yum install -y "$@"
+      ;;
+    pacman)
+      log_info "📥 Installing ${label} via pacman: $*"
+      run_as_admin pacman -Sy --noconfirm "$@"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ensure_command() {
+  local cmd="$1"
+  local label="$2"
+  local brew_pkgs="$3"
+  local apt_pkgs="$4"
+  local rpm_pkgs="$5"
+  local pacman_pkgs="$6"
+  if command_exists "$cmd"; then
+    log_done "${label} already available: $(command -v "$cmd")"
+    return
+  fi
+
+  log_warn "Missing ${label} (${cmd}); attempting automatic install..."
+  local pkg_list=""
+  case "${PACKAGE_MANAGER}" in
+    brew)
+      pkg_list="${brew_pkgs}"
+      ;;
+    apt-get)
+      pkg_list="${apt_pkgs}"
+      ;;
+    dnf|yum)
+      pkg_list="${rpm_pkgs}"
+      ;;
+    pacman)
+      pkg_list="${pacman_pkgs}"
+      ;;
+  esac
+
+  if [ -n "${pkg_list}" ] && install_system_packages "${label}" ${pkg_list}; then
+    hash -r
+  fi
+
+  if command_exists "$cmd"; then
+    log_done "${label} installed successfully."
+    return
+  fi
+
+  log_warn "Unable to auto-install ${label}. Please install ${cmd} manually and re-run start.sh."
+  exit 1
+}
+
+ensure_optional_command() {
+  local cmd="$1"
+  local label="$2"
+  local brew_pkgs="$3"
+  local apt_pkgs="$4"
+  local rpm_pkgs="$5"
+  local pacman_pkgs="$6"
+  if command_exists "$cmd"; then
+    log_done "${label} already available: $(command -v "$cmd")"
+    return
+  fi
+
+  log_warn "Missing optional dependency ${label} (${cmd}); attempting automatic install..."
+  local pkg_list=""
+  case "${PACKAGE_MANAGER}" in
+    brew)
+      pkg_list="${brew_pkgs}"
+      ;;
+    apt-get)
+      pkg_list="${apt_pkgs}"
+      ;;
+    dnf|yum)
+      pkg_list="${rpm_pkgs}"
+      ;;
+    pacman)
+      pkg_list="${pacman_pkgs}"
+      ;;
+  esac
+
+  if [ -n "${pkg_list}" ] && install_system_packages "${label}" ${pkg_list}; then
+    hash -r
+  fi
+
+  if command_exists "$cmd"; then
+    log_done "${label} installed successfully."
+    return
+  fi
+
+  log_warn "Optional dependency ${label} is still unavailable. Continuing startup without it."
+}
+
+create_virtualenv() {
+  if python3 -m venv .venv >/dev/null 2>&1; then
+    return
+  fi
+
+  log_warn "python3 venv module is unavailable; attempting to install venv support..."
+  case "${PACKAGE_MANAGER}" in
+    apt-get)
+      install_system_packages "Python venv support" python3-venv python3-pip || true
+      ;;
+    dnf|yum)
+      install_system_packages "Python tooling" python3-pip || true
+      ;;
+    pacman)
+      install_system_packages "Python tooling" python-pip || true
+      ;;
+  esac
+
+  if python3 -m venv .venv >/dev/null 2>&1; then
+    return
+  fi
+
+  log_warn "Falling back to virtualenv bootstrap..."
+  python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+  python3 -m pip install -q virtualenv
+  python3 -m virtualenv .venv
+}
+
+activate_virtualenv() {
+  if [ ! -f ".venv/bin/activate" ]; then
+    log_warn "Virtual environment activation script is missing."
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  hash -r
+  log_done "Virtual environment activated: ${VIRTUAL_ENV}"
+}
+
+install_node_dependencies_if_needed() {
+  if [ ! -f "package.json" ]; then
+    return
+  fi
+
+  log_info "📦 Detected package.json, installing Node.js dependencies..."
+  if [ -f "pnpm-lock.yaml" ] && command_exists pnpm; then
+    pnpm install --frozen-lockfile
+    return
+  fi
+  if [ -f "yarn.lock" ] && command_exists yarn; then
+    yarn install --frozen-lockfile
+    return
+  fi
+  if command_exists npm; then
+    npm install
+    return
+  fi
+
+  log_warn "package.json exists but no supported package manager was found."
+  exit 1
+}
+
+bootstrap_runtime() {
+  ensure_command python3 "Python 3" "python" "python3 python3-venv python3-pip" "python3 python3-pip" "python python-pip"
+  ensure_command git "Git" "git" "git" "git" "git"
+  ensure_command curl "curl" "curl" "curl" "curl" "curl"
+  ensure_optional_command node "Node.js" "node" "nodejs npm" "nodejs" "nodejs npm"
+
+  if ! command_exists codex && ! command_exists claude; then
+    log_warn "Neither codex nor claude CLI is installed yet. The web service can start, but agents will not execute tasks until at least one CLI is available."
+  fi
+}
+
 print_quick_guide() {
   log_info "╔════════════════════════════════════════════════════════════╗"
   log_info "║ Multi-Agent Task Board 已启动                              ║"
@@ -77,11 +314,13 @@ cleanup_old_pid() {
 cleanup_old_pid "server"
 cleanup_old_pid "agents"
 
+bootstrap_runtime
+
 # ── Load .env ─────────────────────────────────────────────────────────────────
 if [ ! -f ".env" ]; then
   log_warn "⚠️  .env not found. Copying from .env.example..."
   cp .env.example .env
-  log_warn "📝 Edit .env for server polling/timeout settings, then re-run start.sh"
+  log_info "📝 Using defaults from .env.example for this run. Edit .env later if you need custom settings."
 fi
 set -a; source .env 2>/dev/null || true; set +a
 
@@ -128,15 +367,23 @@ BROWSER_URL="${BROWSER_URL:-${LOCAL_ACCESS_URL}}"
 # ── Virtual environment ───────────────────────────────────────────────────────
 if [ ! -d ".venv" ]; then
   log_info "🐍 Creating virtual environment..."
-  python3 -m venv .venv
+  create_virtualenv
+fi
+
+activate_virtualenv
+
+if ! python -m pip --version >/dev/null 2>&1; then
+  log_info "📦 Bootstrapping pip in virtual environment..."
+  python -m ensurepip --upgrade >/dev/null 2>&1 || true
 fi
 
 log_info "📦 Installing dependencies..."
-.venv/bin/pip install -q -r requirements.txt
+python -m pip install -q -r requirements.txt
+install_node_dependencies_if_needed
 
 # ── Start server ──────────────────────────────────────────────────────────────
 log_info "🚀 Starting FastAPI server on ${SERVER_HOST}:${SERVER_PORT} ..."
-.venv/bin/uvicorn server.app:app --host "${SERVER_HOST}" --port "${SERVER_PORT}" --no-access-log --log-level "$SERVER_LOG_LEVEL" \
+python -m uvicorn server.app:app --host "${SERVER_HOST}" --port "${SERVER_PORT}" --no-access-log --log-level "$SERVER_LOG_LEVEL" \
   > >(prefix_logs >>"$SERVER_LOG_FILE") \
   2> >(prefix_logs >>"$SERVER_LOG_FILE") &
 SERVER_PID=$!
@@ -163,7 +410,7 @@ fi
 
 # ── Start agents ──────────────────────────────────────────────────────────────
 log_info "🤖 Starting agents..."
-(cd agents && PYTHONUNBUFFERED=1 ../.venv/bin/python -u run_all.py) \
+(cd agents && PYTHONUNBUFFERED=1 python -u run_all.py) \
   > >(prefix_logs >>"$AGENTS_LOG_FILE") \
   2> >(prefix_logs >>"$AGENTS_LOG_FILE") &
 AGENTS_PID=$!
