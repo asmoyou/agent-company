@@ -39,14 +39,12 @@ LinX协作平台简易演示网络版 用结构化任务流和结构化交接材
 
 ### 前置依赖
 
-- Python 3.10+
-- Git
+- 常见环境下若已安装 `Homebrew` / `apt-get` / `dnf` / `yum` / `pacman`，`start.sh` 会尝试自动补齐 `Python 3`、`Git`、`curl`、`Node.js`
 - 至少一个可用 Agent CLI（如 `codex` 或 `claude`）
 
 ### 启动
 
 ```bash
-cp .env.example .env
 bash start.sh
 ```
 
@@ -54,9 +52,13 @@ bash start.sh
 
 `start.sh` 会自动执行这些动作：
 
-- 若不存在 `.venv`，自动创建 Python 虚拟环境。
-- 每次启动执行 `pip install -r requirements.txt`，自动补齐缺失依赖。
+- 检查系统依赖；若系统已有常见包管理器，会尽力自动安装缺失的 `Python 3`、`Git`、`curl`、`Node.js`。
+- 若不存在 `.env`，自动从 `.env.example` 复制一份并继续启动。
+- 若不存在 `.venv`，自动创建 Python 虚拟环境，并在脚本内部激活。
+- 每次启动执行 `pip install -r requirements.txt`；若仓库未来加入 `package.json`，也会自动安装前端依赖。
 - 启动后端服务和 Agent 轮询进程，并写入 `.pids/` 便于下次清理旧进程。
+
+如果你想先自定义配置，也可以手动执行 `cp .env.example .env` 后再编辑。
 
 ### 数据库初始化说明
 
@@ -155,7 +157,7 @@ decompose -> decomposed -> (subtasks in todo...)
 | `BROWSER_URL` | `http://localhost:8080` | 自动打开浏览器时使用的地址 |
 | `LAN_IP_OVERRIDE` | `` | 手动指定局域网 IP（自动检测失败时可设置） |
 | `POLL_INTERVAL` | `5` | Agent 轮询间隔（秒） |
-| `CLI_TIMEOUT` | `300` | 单次 CLI 超时（秒） |
+| `CLI_TIMEOUT` | `1800` | 单次 CLI 超时（秒） |
 | `FEATURE_STRICT_CLAIM_SCOPE` | `1` | 是否强制 `/tasks/claim` 与任务创建必须带 `project_id` |
 | `PER_PROJECT_MAX_WORKERS` | `0` | 每个项目同时租约中的任务上限（0=不限制） |
 | `PER_AGENT_TYPE_MAX_WORKERS` | `0` | 每种 agent 类型并发上限（0=不限制） |
