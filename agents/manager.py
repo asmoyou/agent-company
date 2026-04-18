@@ -257,8 +257,7 @@ class ManagerAgent(BaseAgent):
         await self._cleanup_merge_state(repo_root)
         await self._ensure_on_main(repo_root)
         try:
-            await self.git("config", "user.email", "agent@opc-demo.local", cwd=repo_root)
-            await self.git("config", "user.name", "OPC Agent", cwd=repo_root)
+            await self._sync_git_identity(repo_root)
         except Exception:
             pass
         head_before = (await self.git("rev-parse", "--short", "HEAD", cwd=repo_root)).strip()

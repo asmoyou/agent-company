@@ -313,6 +313,42 @@ class BaseAgent:
             payload += "\n"
         exclude_path.write_text(payload, encoding="utf-8")
 
+    async def _preferred_git_identity(self) -> tuple[str | None, str | None]:
+        name = (
+            os.getenv("OPC_GIT_USER_NAME")
+            or os.getenv("GIT_AUTHOR_NAME")
+            or os.getenv("GIT_COMMITTER_NAME")
+            or os.getenv("GIT_USER_NAME")
+            or ""
+        ).strip()
+        email = (
+            os.getenv("OPC_GIT_USER_EMAIL")
+            or os.getenv("GIT_AUTHOR_EMAIL")
+            or os.getenv("GIT_COMMITTER_EMAIL")
+            or os.getenv("GIT_USER_EMAIL")
+            or ""
+        ).strip()
+        if not name:
+            with contextlib.suppress(Exception):
+                name = (await self.git("config", "--global", "--get", "user.name", cwd=PROJECT_ROOT)).strip()
+        if not email:
+            with contextlib.suppress(Exception):
+                email = (await self.git("config", "--global", "--get", "user.email", cwd=PROJECT_ROOT)).strip()
+        return (name or None, email or None)
+
+    async def _sync_git_identity(self, cwd: Path) -> None:
+        name, email = await self._preferred_git_identity()
+        if email:
+            await self.git("config", "user.email", email, cwd=cwd)
+        else:
+            with contextlib.suppress(Exception):
+                await self.git("config", "--unset-all", "user.email", cwd=cwd)
+        if name:
+            await self.git("config", "user.name", name, cwd=cwd)
+        else:
+            with contextlib.suppress(Exception):
+                await self.git("config", "--unset-all", "user.name", cwd=cwd)
+
     def _normalize_task_section_name(self, raw: str) -> str:
         cleaned = re.sub(r"[\s:：()（）/_-]+", "", str(raw or "")).strip().lower()
         for key, aliases in TASK_SECTION_ALIAS_MAP.items():
@@ -2337,8 +2373,7 @@ class BaseAgent:
         # Bootstrap repo for scratch or non-initialized project paths.
         if not (root / ".git").exists():
             await self.git("init", cwd=root)
-            await self.git("config", "user.email", "agent@opc-demo.local", cwd=root)
-            await self.git("config", "user.name", "OPC Agent", cwd=root)
+            await self._sync_git_identity(root)
             try:
                 await self.git("checkout", "-b", "main", cwd=root)
             except Exception:
@@ -2363,8 +2398,8 @@ class BaseAgent:
             except Exception:
                 pass
 
-        await self.git("config", "user.email", "agent@opc-demo.local", cwd=worktree)
-        await self.git("config", "user.name", "OPC Agent", cwd=worktree)
+        await self._sync_git_identity(root)
+        await self._sync_git_identity(worktree)
         self._ensure_runtime_git_excludes(root)
         self._ensure_runtime_git_excludes(worktree)
 

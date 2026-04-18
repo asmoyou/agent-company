@@ -101,6 +101,42 @@ else:
     PROJECTS_BASE_DIR = PROJECTS_BASE_DIR.resolve()
 
 
+def _preferred_git_identity(run, cwd: Path) -> tuple[str | None, str | None]:
+    name = (
+        os.getenv("OPC_GIT_USER_NAME")
+        or os.getenv("GIT_AUTHOR_NAME")
+        or os.getenv("GIT_COMMITTER_NAME")
+        or os.getenv("GIT_USER_NAME")
+        or ""
+    ).strip()
+    email = (
+        os.getenv("OPC_GIT_USER_EMAIL")
+        or os.getenv("GIT_AUTHOR_EMAIL")
+        or os.getenv("GIT_COMMITTER_EMAIL")
+        or os.getenv("GIT_USER_EMAIL")
+        or ""
+    ).strip()
+    if not name:
+        _, out, _ = run("git", "config", "--global", "--get", "user.name", cwd=cwd)
+        name = out.strip()
+    if not email:
+        _, out, _ = run("git", "config", "--global", "--get", "user.email", cwd=cwd)
+        email = out.strip()
+    return (name or None, email or None)
+
+
+def _sync_repo_git_identity(run, cwd: Path) -> None:
+    name, email = _preferred_git_identity(run, cwd)
+    if email:
+        run("git", "config", "user.email", email, cwd=cwd)
+    else:
+        run("git", "config", "--unset-all", "user.email", cwd=cwd)
+    if name:
+        run("git", "config", "user.name", name, cwd=cwd)
+    else:
+        run("git", "config", "--unset-all", "user.name", cwd=cwd)
+
+
 def _normalize_support_llm_base_url(raw_url: str) -> str:
     base = str(raw_url or "").strip().rstrip("/")
     if not base:
@@ -2854,16 +2890,14 @@ async def setup_project(project_id: str, user: dict = Depends(require_user)):
     if not (proj_path / ".git").exists():
         rc, out, err = run("git", "init")
         log.append(f"git init: {out or err}")
-        run("git", "config", "user.email", "agent@linx.local")
-        run("git", "config", "user.name", "linX Agent")
+        _sync_repo_git_identity(run, proj_path)
         rc, out, err = run("git", "checkout", "-b", "main")
         log.append(f"checkout main: {out or err}")
         rc, out, err = run("git", "commit", "--allow-empty", "-m", "chore: init project")
         log.append(f"init commit: {out or err}")
     else:
         # Ensure git user config
-        run("git", "config", "user.email", "agent@linx.local")
-        run("git", "config", "user.name", "linX Agent")
+        _sync_repo_git_identity(run, proj_path)
         log.append("git repo already exists")
     log.append("shared dev worktree disabled; agents create their own worktrees on demand")
 
